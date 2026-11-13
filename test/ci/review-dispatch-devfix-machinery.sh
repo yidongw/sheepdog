@@ -95,6 +95,7 @@ cat > "$T/bin/t3" <<'SH'
 #!/usr/bin/env bash
 # `t3 thread show <tid>` → "<tid> <state>": running, or what $FX/t3state says (a test ends a fixer that way)
 echo "t3 $*" >> "$FX/t3"
+if [ "${1:-} ${2:-}" = "thread send" ] && [ -e "$FX/t3fail" ]; then echo "t3: transport down" >&2; exit 1; fi   # a delivery failure
 if [ "${1:-} ${2:-}" = "thread show" ]; then echo "$3 $(cat "$FX/t3state" 2>/dev/null || echo running)"; else echo '{"status":"running"}'; fi
 SH
 chmod +x "$T/bin/gh" "$T/bin/t3mcp" "$T/bin/t3"
@@ -151,6 +152,14 @@ for f in .github/workflows/review.yml .github/sheepdog/tests.sh scripts/ci/check
   [ "$(grep -c "${FXH:0:9}: changes review machinery" "$STATE/dispatch.log")" = "$n" ] || fail "the machinery devfix was reported again"
 done
 echo "ok - a devfix changing the workflow pin, the trusted test list, a contract script or the reviewer is not landed"
+# (tralyx review of 71b7f7a77 #1) the machinery notice is retried until delivered: the log marker is not its receipt
+fix scripts/ci/other.sh; run "review $FXH" $R workflow_run main "$FXH" completed success skipped; publish
+touch "$FX/t3fail"; dispatch; rm -f "$FX/t3fail"
+ls "$STATE/sent/$D1.machinery-${FXH:0:9}".* >/dev/null 2>&1 && fail "setup: the notice was recorded although its delivery failed"
+dispatch
+ls "$STATE/sent/$D1.machinery-${FXH:0:9}".* >/dev/null 2>&1 || fail "an undelivered machinery notice was not retried: $(tail -3 "$STATE/dispatch.log")"
+[ "$(grep -c "${FXH:0:9}: changes review machinery" "$STATE/dispatch.log")" = 1 ] || fail "the machinery devfix was logged again on the retry"
+echo "ok - an undelivered machinery notice is retried on the next run (logged once)"
 fix src/d1.ts; run "review $FXH" $R workflow_run main "$FXH" completed success skipped; publish
 dispatch
 [ "$(main_at)" = "$FXH" ] || fail "a code-only devfix did not land: $(tail -3 "$STATE/dispatch.log")"
