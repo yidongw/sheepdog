@@ -31,7 +31,9 @@
 #       AND has a completed review run that blocked ("review T" / "recheck T", blocking step failure — the Review
 #       runs are the evidence, not the candidate's trailer); and every dev-side merge in the range is clean (its tree is
 #       exactly the automatic merge of its two parents: no code of its own), and no dev commit in OR BELOW the range
-#       (down to main; merges included) is a blocked, unrepaired review (that one is reviewed again). review.yml does not review such a range
+#       (down to main; merges included) is a blocked, unrepaired review (that one is reviewed again) — a blocked review
+#       whose whole range a later completed review re-reviewed, and that later review passed or is repaired, is
+#       superseded: it needs no repair of its own (superseded()). review.yml does not review such a range
 #       again (REVIEW_SKIP); review-passed.sh counts the run as passed when its tests pass.
 #       Never when landing <head> would change review machinery on main (review-machinery.sh landing_machinery_files —
 #       the same definition the dispatcher's and merge-branch.sh's landing guard use: a tests-only approval never lands
@@ -76,6 +78,42 @@ verdict() { # verdict <sha> → "pass <run id>" | "blocked <base its review used
     esac
   done
 }
+run_base() { # run_base <run id> → the base of the range that run reviewed (its "review-range:" line); "" when unknown
+  local jobs jid log rb
+  jobs=$(api "actions/runs/$1/jobs" 2>/dev/null || true)
+  jid=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].id // empty' <<<"$jobs" 2>/dev/null || true)
+  [ -n "$jid" ] || return 0
+  log=$(api "actions/jobs/$jid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' || true)
+  rb=$(sed -nE 's/^review-range: ([0-9a-f]{40}) [0-9a-f]{40}$/\1/p' <<<"$log"); printf '%s\n' "${rb%%$'\n'*}"
+}
+declare -A _verdicts=()
+verdict_m() { # verdict_m <sha> → verdict, asked once per script run
+  [ -n "${_verdicts[$1]+x}" ] || _verdicts[$1]=$(verdict "$1")
+  printf '%s\n' "${_verdicts[$1]}"
+}
+superseded() { # superseded <C> <the base C's blocked review used, or -> <head> → 0 when a LATER completed dev review re-reviewed
+  # all of C's range and stands: a review of a descendant D of C (D in C..head, not on main) whose own range started at or
+  # below C's (its review-range base is an ancestor of C's base, so every commit C's review saw was in D's) and that passed,
+  # or blocked and is repaired in D..head. C's own block then needs no repair of its own: its code had its one review again
+  # in D's round, and D's findings — C's still-open ones among them — are what the repairs answer (owner 11-13: dev gets one
+  # review; tralyx 11-13/14: dev heads blocked and superseded at once by a main→dev merge — 4b6671346, bc1f40bd3,
+  # f54379cfd — were never repaired by trailer, so no range above them could ever be a tests-only round again).
+  local c=$1 rc=$2 h=$3 d v rb
+  [[ "$rc" =~ ^[0-9a-f]{40}$ ]] || return 1
+  for d in $(git rev-list "$c..$h" "^$MAINREF" 2>/dev/null); do
+    v=$(verdict_m "$d")
+    case "${v%% *}" in
+      blocked) rb=${v#blocked }; rb=${rb%% *}; repaired "$d" "$h" || continue ;;
+      pass) rb=$(run_base "${v##* }") ;;
+      *) continue ;;
+    esac
+    [[ "$rb" =~ ^[0-9a-f]{40}$ ]] || continue
+    # D's range began at or below C's, and C is inside it
+    git merge-base --is-ancestor "$rb" "$rc" 2>/dev/null && ! git merge-base --is-ancestor "$c" "$rb" 2>/dev/null || continue
+    return 0
+  done
+  return 1
+}
 . "$(dirname "${BASH_SOURCE[0]}")/review-repair.sh"   # reverted / repaired: the one repair rule
 . "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machinery_files: what a tests-only approval never lands
 clean_merge() { # clean_merge <m> → 0 when m has two parents and its tree is exactly their automatic merge
@@ -93,10 +131,14 @@ only_fixes() { # only_fixes <base> <head>
   # review machinery that would land: a full review (the landing guard refuses it on a tests-only approval)
   [ -z "$(landing_machinery_files . "$MAINREF" "$2")" ] || return 1
   [ -n "$runs" ] || load_runs
-  # no blocked, unrepaired review in or below the range (down to main), merges included: that one is reviewed again
+  # no blocked, unrepaired review in or below the range (down to main), merges included: that one is reviewed again —
+  # unless a later completed review that stands re-reviewed its whole range (superseded)
   for c in $(git rev-list "$2" "^$MAINREF"); do
-    v=$(verdict "$c")
-    if [ "${v%% *}" = blocked ] && ! repaired "$c" "$2"; then return 1; fi
+    v=$(verdict_m "$c")
+    if [ "${v%% *}" = blocked ] && ! repaired "$c" "$2"; then
+      local rcb=${v#blocked }; rcb=${rcb%% *}
+      superseded "$c" "$rcb" "$2" || return 1
+    fi
   done
   for c in $(git rev-list --merges "$1..$2" "^$MAINREF"); do clean_merge "$c" || return 1; done
   for c in $(git rev-list --no-merges "$1..$2" "^$MAINREF"); do
@@ -104,7 +146,7 @@ only_fixes() { # only_fixes <base> <head>
     for t in $(git show -s --format=%B "$c" | sed -nE 's/^Review-Fix-Of: ([0-9a-f]{40})[[:space:]]*$/\1/p'); do
       git rev-parse -q --verify "$t^{commit}" >/dev/null 2>&1 || continue
       [ "$t" != "$c" ] && git merge-base --is-ancestor "$t" "$c" 2>/dev/null || continue
-      v=$(verdict "$t")
+      v=$(verdict_m "$t")
       if [ "${v%% *}" = blocked ]; then hit=1; break; fi
     done
     [ "$hit" = 1 ] || return 1

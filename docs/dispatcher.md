@@ -18,7 +18,12 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
 - **Overdue blocks**: dev blocked longer than `DEV_REVERT_AFTER_SEC` → the commits that touched the files named in the
   findings are reverted on dev (a new commit), their authors told first.
 - **Main re-checks**: blocked main reviews go to the chain's owner, then (after `MAIN_OWNER_CLAIM_SEC`) to the strongest
-  fixer agent.
+  fixer agent. A finding pinned on a dispute-only commit (`Review-Fix-Of:`, no file changed) goes to the commit it
+  disputes; such a commit is no hop of a repair chain.
+- **Re-checks that failed before the code review** (the review job failed in its range, gates or setup steps; the
+  blocking step never ran): infrastructure, not a finding — no owner or fixer is woken. The supervisor is told once per
+  episode (`$STATE/infra-<step>`: the same failing step on the same main line until a main review completes again), with
+  the step and a log excerpt; later heads of the episode are logged once each and settled by the next completed review.
 - **Open findings**: findings whose fix rounds are spent are kept in `$STATE/open-findings.log`, which the review job
   passes to the reviewer (`open-findings-file`) so repeats are recognised as pre-existing.
 

@@ -14,7 +14,9 @@ what gets deployed. The workflow is [.github/workflows/review.yml](../.github/wo
 - Every commit carries `Loop: <loop>`, `Thread: <author thread id>` and a `Verify:` checklist (`Verify:` alone on its
   line, then `- [x] <evidence>` lines). A fix of a blocked review carries `Review-Fix-Of: <full sha>`; a fixer that
   disagrees with a finding records `Review-Disputed: <finding #> <evidence>`; a main repair names
-  `Fixes-Finding: #<n> <finding>` per finding.
+  `Fixes-Finding: #<n> <finding>` per finding. A `Review-Fix-Of:` that names no ancestor of its commit is ignored with a
+  warning (never a range abort): that commit is reviewed as an ordinary commit and gets no repair privilege — no
+  tests-only round, no repair of a blocked round (`review-repair.sh`), no previous-round ledger.
 
 ## What runs for which push
 
@@ -35,7 +37,9 @@ what gets deployed. The workflow is [.github/workflows/review.yml](../.github/wo
   passed, or that blocked and is repaired in the range (`dev-review-base.sh`). A range of only `Review-Fix-Of:` repairs
   of blocked reviews is a **tests-only fix round**: the blocking step is skipped (never reported as a pass), the
   attestation says `kind: tests-only-fix`, and `review-passed.sh` re-checks from the trusted runs that every commit
-  really repairs a completed, blocked review before it lets the fix land on green tests. Main then reviews the fix
+  really repairs a completed, blocked review before it lets the fix land on green tests. A blocked review below the
+  range needs no repair of its own when it is superseded: a later completed review of a descendant re-reviewed its whole
+  range (its range base is at or below the blocked one's) and passed or is repaired. Main then reviews the fix
   under (a).
 - **(c) Coverage is a chain of completed reviews.** Each review uploads an attestation `{head, base, kind, main}`.
   `review-passed.sh <sha> [repo] [deployed sha]` approves a sha only when its trusted tests passed, its review step

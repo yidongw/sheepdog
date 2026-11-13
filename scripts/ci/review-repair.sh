@@ -2,7 +2,7 @@
 # THE eligibility rule for a blocked review round (sourced by dev-review-base.sh and review-passed.sh, owner 11-12:
 # "if it fails, fix it once"): a round that BLOCKED at <S> counts — as a dev range base, as a link of deployment coverage — only
 # when an effective repair of it is an ancestor of the head being judged: a commit in <S>..<head> carrying the exact
-# trailer "Review-Fix-Of: <S>" (full sha) that is not reverted since. Otherwise S's code is not vouched for by any later,
+# trailer "Review-Fix-Of: <S>" (full sha) that has S as an ancestor and is not reverted since. Otherwise S's code is not vouched for by any later,
 # unrelated review. (review-dispatch.sh's repair_effective is the dispatcher's richer form of the same rule.)
 reverted() { # reverted <c> <head> [depth] → 0 when a standing "This reverts commit <c>" sits in c..head (fail closed past 64)
   local x k=${3:-0}
@@ -18,6 +18,9 @@ repaired() { # repaired <S> <head> → 0 when S..head carries an effective repai
     # Read the full message before matching; an early-closing grep -q can give git SIGPIPE under pipefail.
     msg=$(git show -s --format=%B "$c") || continue
     grep -qx "Review-Fix-Of: $1" <<<"$msg" || continue
+    # the repair must descend from S (tralyx fd935e7c5, 11-14: a main hotfix naming a dev sha reached dev through a
+    # main→dev merge and sat in S..head without containing S — a trailer that names no ancestor repairs nothing)
+    git merge-base --is-ancestor "$1" "$c" 2>/dev/null || continue
     reverted "$c" "$2" || return 0
   done
   return 1

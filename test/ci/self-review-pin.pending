@@ -2,3 +2,6 @@
 #   <suite file name> <the 40-char pin sha> <the protection that is not in the pinned snapshot yet>
 # Allowed only for that exact pin: a pin bump runs every suite against the new pin again. Keep this list empty whenever
 # the newest reviewed main carries the protection — bump the pin instead (docs/self-review.md).
+main-review-range.sh 463c89351d88feda70991f9b80f5d8371e4741bd a non-ancestor Review-Fix-Of: is a warning, not a range abort (tralyx fd935e7c5 stopped every main re-check); the pin bump follows the hotfix's re-check
+review-fix-of-nonancestor.sh 463c89351d88feda70991f9b80f5d8371e4741bd range kept past a non-ancestor Review-Fix-Of:, repaired() / prior-findings.sh ignore it; the pin bump follows the hotfix's re-check
+dev-review-superseded.sh 463c89351d88feda70991f9b80f5d8371e4741bd a blocked dev review superseded by a later completed review of its whole range needs no repair of its own (tralyx dev never got a tests-only round again); the pin bump follows the hotfix's re-check
