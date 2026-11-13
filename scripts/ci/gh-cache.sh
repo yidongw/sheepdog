@@ -15,8 +15,8 @@
 #       repos/<r>/actions/runs/<id>, …/runs/<id>/jobs, …/runs/<id>/artifacts — kept for this run (GHC_LIST_TTL), and on
 #           disk once the run is COMPLETED according to a listing of this run (status completed, its updatedAt recorded):
 #           such a run's record no longer changes. A disk entry is used while a listing shows the run completed with that
-#           same updatedAt (a re-run is listed as not completed / with a new updatedAt → fetched again); for a
-#           run no listing shows (older than the listings) for at most GHC_UNLISTED_TTL seconds (3600) after it was stored;
+#           same updatedAt (a re-run is listed as not completed / with a new updatedAt → fetched again); for a run
+#           no listing shows, while its record (runs/<id>, one call per run) shows the same;
 #       repos/<r>/actions/jobs/<id>/logs — on disk once a jobs answer showed that job completed (a job id belongs to one
 #           attempt; its log is final);
 #       repos/<r>/actions/artifacts/<id>/zip — on disk (an artifact never changes);
@@ -24,7 +24,6 @@
 #   Failures are never cached. Disk entries older than GHC_KEEP_DAYS (2) are removed at ghc_init.
 # The cache holds only what the same token read from GitHub; it lives in the dispatcher's private state directory.
 GHC_LIST_TTL=${GHC_LIST_TTL:-60}
-GHC_UNLISTED_TTL=${GHC_UNLISTED_TTL:-3600}
 # (fields every gh since 2.2x knows — no `attempt`: gh 2.4x on the host refuses it; a re-run shows as a new updatedAt)
 GHC_FIELDS=databaseId,displayTitle,status,conclusion,headBranch,headSha,workflowName,event,createdAt,updatedAt,number,name
 
@@ -34,7 +33,7 @@ ghc_init() { # ghc_init <dir>
   find "$GHC_DIR" -mindepth 1 -maxdepth 1 -name 'run.*' -mmin +60 -exec rm -rf {} + 2>/dev/null || true
   find "$GHC_DIR/disk" -type f -mtime +"${GHC_KEEP_DAYS:-2}" -delete 2>/dev/null || true
   GHC_RUN=$(mktemp -d "$GHC_DIR/run.XXXXXX") || return 1
-  export GHC_DIR GHC_RUN GHC_LIST_TTL GHC_UNLISTED_TTL GHC_FIELDS
+  export GHC_DIR GHC_RUN GHC_LIST_TTL GHC_FIELDS
   export -f gh ghc_fresh ghc_put ghc_run_list ghc_api ghc_run_state ghc_jq
 }
 ghc_done() { [ -n "${GHC_RUN:-}" ] && rm -rf "$GHC_RUN"; return 0; }
@@ -116,22 +115,29 @@ ghc_api() {
   path=${path#/}; path=${path#https://api.github.com/}
   key=$(printf '%s' "$path" | tr -c 'A-Za-z0-9._-' '_')
   memo=$GHC_RUN/api.$key
-  if [[ "$path" =~ ^repos/[^/]+/[^/]+/actions/runs/([0-9]+)(/jobs|/artifacts)?$ ]]; then
-    disk=$GHC_DIR/disk/$key; st=$(ghc_run_state "${BASH_REMATCH[1]}")
+  if [[ "$path" =~ ^(repos/[^/]+/[^/]+/actions/runs/([0-9]+))(/jobs|/artifacts)?$ ]]; then
+    local rec=${BASH_REMATCH[1]} sub=${BASH_REMATCH[3]}
+    disk=$GHC_DIR/disk/$key; st=$(ghc_run_state "${BASH_REMATCH[2]}")
     if ghc_fresh "$memo" "$GHC_LIST_TTL"; then a=$(cat "$memo")
-    elif [ -f "$disk" ] && { att=$(cat "$disk.version" 2>/dev/null || echo x)
-           { [ -n "$st" ] && [ "$st" = "completed $att" ]; } || { [ -z "$st" ] && ghc_fresh "$disk" "$GHC_UNLISTED_TTL"; }; }; then
-      a=$(cat "$disk")
     else
-      a=$(command gh api "$path") || return 1
-      ghc_put "$memo" <<<"$a"
-      # on disk only what is final: the listing says completed, and the answer is completed too (a re-run between the
-      # listing and this call answers for the new attempt: not completed)
-      if [ "${st%% *}" = completed ] && jq -e '
-           if has("jobs") then (.jobs | length > 0) and all(.jobs[]; .status == "completed")
-           elif has("artifacts") then true
-           else .status == "completed" end' >/dev/null 2>&1 <<<"$a"; then
-        ghc_put "$disk" <<<"$a" && echo "${st#* }" > "$disk.version"
+      # a run no listing of this run shows (older, or not listed yet): its record (one call, kept for the run) says
+      # whether a stored jobs / artifacts answer is still current
+      if [ -z "$st" ] && [ -n "$sub" ] && [ -f "$disk" ]; then
+        st=$(ghc_api "$rec" -q '"\(.status) \(.updated_at)"' 2>/dev/null) || st=""
+      fi
+      att=$(cat "$disk.version" 2>/dev/null || echo x)
+      if [ -f "$disk" ] && [ -n "$st" ] && [ "$st" = "completed $att" ]; then a=$(cat "$disk")
+      else
+        a=$(command gh api "$path") || return 1
+        ghc_put "$memo" <<<"$a"
+        # on disk only what is final: the listing (or record) says completed, and the answer is completed too (a re-run
+        # between the listing and this call answers for the new attempt: not completed)
+        if [ "${st%% *}" = completed ] && jq -e '
+             if has("jobs") then (.jobs | length > 0) and all(.jobs[]; .status == "completed")
+             elif has("artifacts") then true
+             else .status == "completed" end' >/dev/null 2>&1 <<<"$a"; then
+          ghc_put "$disk" <<<"$a" && echo "${st#* }" > "$disk.version"
+        fi
       fi
     fi
     if [[ "$path" =~ /jobs$ ]]; then   # completed jobs: their logs are final

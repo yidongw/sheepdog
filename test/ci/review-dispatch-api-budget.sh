@@ -169,7 +169,15 @@ grep -q "MAIN ${H2:0:9}: finding(s) 1 → owner" "$STATE/dispatch.log" || fail "
   gh run list -R o/r -w review.yml -e workflow_run -b main -L 5 --json databaseId >/dev/null
   : > "$FX/calls"; gh api "repos/o/r/actions/runs/$RH2/jobs" >/dev/null
   grep -q "^api repos/o/r/actions/runs/$RH2/jobs" "$FX/calls" || fail "a re-run (new updatedAt, queued) was answered from the cache of the previous attempt"
+  # a run no listing of this run shows: one record call decides (same updatedAt → the stored answer; re-run → fetched)
+  ghc_done; ghc_init "$STATE/ghcache"
+  : > "$FX/calls"; gh api "repos/o/r/actions/runs/$RH1/jobs" >/dev/null; gh api "repos/o/r/actions/runs/$RH1/jobs" >/dev/null
+  [ "$(cat "$FX/calls")" = "api repos/o/r/actions/runs/$RH1" ] || fail "an unlisted stored run: expected one record call, got: $(cat "$FX/calls")"
+  jq --argjson id "$RH1" 'map(if .databaseId == $id then .updatedAt = "2026-11-13T02:00:00Z" else . end)' "$FX/runs.json" > "$T/r" && mv "$T/r" "$FX/runs.json"
+  ghc_done; ghc_init "$STATE/ghcache"
+  : > "$FX/calls"; gh api "repos/o/r/actions/runs/$RH1/jobs" >/dev/null
+  grep -q "^api repos/o/r/actions/runs/$RH1/jobs" "$FX/calls" || fail "an unlisted run whose record changed was answered from the cache"
   ghc_done
 ) || exit 1
-echo "ok - stored completed runs are answered without a call; a re-run is read again"
+echo "ok - stored completed runs are answered without a call; a re-run is read again; an unlisted run is checked by its record"
 echo "dispatcher API budget: run 1 $(count 1) calls, run 2 $(count 2) calls (budgets ${API_BUDGET_COLD:-20} / ${API_BUDGET_WARM:-8})"
