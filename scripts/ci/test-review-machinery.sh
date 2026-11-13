@@ -20,6 +20,6 @@ echo repair > "$t/app"
 git -C "$t" add .
 git -C "$t" commit -qm repair
 git -C "$t" merge -q -s ours landing -m rollback
-files=$(review_machinery_files "$t" "$landing..HEAD")
+files=$(landing_machinery_files "$t" "$landing" HEAD)   # the landing tree against main (= landing)
 [[ "$files" == '.github/workflows/check.yml' ]] || { echo 'FAIL: merge rollback escaped machinery guard' >&2; exit 1; }
 echo 'PASS: merge rollback detected'

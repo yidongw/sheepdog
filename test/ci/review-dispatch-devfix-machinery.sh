@@ -6,6 +6,8 @@
 #   · a devfix that changes only code lands on main (fast-forward);
 #   · a devfix that changes .github/workflows/review.yml (the sheepdog pin), .github/sheepdog/tests.sh or scripts/ci/
 #     is NOT landed: logged once, the authors told to push it through a full review;
+#   · a code-only repair of a blocked base S that itself changes the pin is not landed (review of dev c1dcca119 #1/#2),
+#     nor a repair whose merge of main rolls main's newer pin back (an evil merge the combined diff hides: #3);
 #   · merge-branch.sh refuses a tests-only approval that changes review machinery, and still merges one that does not.
 set -euo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"
@@ -91,7 +93,9 @@ case "$1" in t3_thread_launch) echo '{"threadId":"mcp:aaaaaaaa-0000-0000-0000-00
 SH
 cat > "$T/bin/t3" <<'SH'
 #!/usr/bin/env bash
-echo "t3 $*" >> "$FX/t3"; echo '{"status":"running"}'
+# `t3 thread show <tid>` → "<tid> <state>": running, or what $FX/t3state says (a test ends a fixer that way)
+echo "t3 $*" >> "$FX/t3"
+if [ "${1:-} ${2:-}" = "thread show" ]; then echo "$3 $(cat "$FX/t3state" 2>/dev/null || echo running)"; else echo '{"status":"running"}'; fi
 SH
 chmod +x "$T/bin/gh" "$T/bin/t3mcp" "$T/bin/t3"
 
@@ -151,6 +155,39 @@ fix src/d1.ts; run "review $FXH" $R workflow_run main "$FXH" completed success s
 dispatch
 [ "$(main_at)" = "$FXH" ] || fail "a code-only devfix did not land: $(tail -3 "$STATE/dispatch.log")"
 echo "ok - a code-only devfix still lands on its tests"
+
+# review of dev c1dcca119 #1/#2: the blocked base S itself changes the pin; a code-only repair on it is not landed
+cd "$T/w"; g fetch -q origin; g checkout -q -B dev2 origin/main
+printf 'jobs:\n  sheepdog:\n    uses: yidongw/sheepdog/.github/workflows/review.yml@%040d\n' 2 > .github/workflows/review.yml
+D2=$(c .github/workflows/review.yml); g push -q -f origin "dev2:refs/heads/dev"
+blocked() { # blocked <sha> → its dev review blocked; the dispatcher wakes a fixer for it
+  run "review $1" $R workflow_run main "$1" completed failure; local r=$id
+  printf '2026-11-13T00:00:00.0000000Z review-range: %s %s\n2026-11-13T00:00:00.0000000Z review-gate: FINDING #1 route=fixer commit=%s — x\n2026-11-13T00:00:00.0000000Z review-gate: BLOCKED #1 regression [should]: it drops rows\n2026-11-13T00:00:00.0000000Z evidence: src/x.ts:1 x\n' "$1" "$1" "$1" > "$FX/log-${r}2.txt"
+  publish; dispatch; [ -e "$STATE/sent/$1.fixer-blocked" ] || { fail "setup: no fixer for the blocked ${1:0:9}: $(tail -3 "$STATE/dispatch.log")"; }; }
+blocked "$D2"
+g checkout -q -B fx "$D2"; FXH=$(c src/fix2.ts "Review-Fix-Of: $D2
+Hotfix: review fix of ${D2:0:9}"); g push -q -f origin "fx:refs/heads/devfix/$D2"
+M0=$(main_at); run "review $FXH" $R workflow_run main "$FXH" completed success skipped; publish; dispatch
+[ "$(main_at)" = "$M0" ] || fail "a code-only repair landed its blocked base's workflow pin change"
+grep -q "${FXH:0:9}: changes review machinery (.github/workflows/review.yml )" "$STATE/dispatch.log" || fail "no machinery log for the blocked base's pin: $(tail -3 "$STATE/dispatch.log")"
+echo "ok - a code-only repair whose blocked base changes the pin is not landed"
+# review of dev c1dcca119 #3: main moved the pin (1 → 3); a repair merges main but keeps the OLD pin (an evil merge:
+# the combined diff hides it) — the landing tree would roll main's pin back, so it is not landed
+g push -q origin --delete "devfix/$D2"; rm -rf "$STATE"/sent/*.fixer-* "$STATE/fixer-gate" "$STATE/dev-fixer.active"   # the earlier fixers are done (one at a time)
+g checkout -q -B hot origin/main
+printf 'jobs:\n  sheepdog:\n    uses: yidongw/sheepdog/.github/workflows/review.yml@%040d\n' 3 > .github/workflows/review.yml
+MH=$(c .github/workflows/review.yml "Hotfix: pin 3"); g push -q origin "hot:refs/heads/main"
+g checkout -q -B dev3 "$M0"; D3=$(c src/d3.ts); g push -q -f origin "dev3:refs/heads/dev"
+blocked "$D3"
+g checkout -q -B fx "$D3"; c src/fix3.ts "Review-Fix-Of: $D3
+Hotfix: review fix of ${D3:0:9}" >/dev/null
+g merge -q --no-ff "$MH" -m "merge main" -m "Review-Fix-Of: $D3"; git checkout -q HEAD^1 -- .github/workflows/review.yml
+g commit -q --amend --no-edit; FXH=$(git rev-parse HEAD); g push -q -f origin "fx:refs/heads/devfix/$D3"
+[ -z "$(git log --format= --name-only --cc -1 "$FXH" | grep -F .github/ || true)" ] || fail "setup: the evil merge shows in its combined diff"
+run "review $FXH" $R workflow_run main "$FXH" completed success skipped; publish; dispatch
+[ "$(main_at)" = "$MH" ] || fail "a repair whose merge rolls main's pin back landed"
+grep -q "${FXH:0:9}: changes review machinery (.github/workflows/review.yml )" "$STATE/dispatch.log" || fail "no machinery log for the rollback: $(tail -3 "$STATE/dispatch.log")"
+echo "ok - a repair whose merge rolls main's workflow pin back is not landed"
 
 # merge-branch.sh: a tests-only approval (stub review-passed.sh) with / without review machinery
 MB=$T/mb; mkdir -p "$MB"; cp "$ROOT/scripts/ci/merge-branch.sh" "$ROOT/scripts/ci/review-machinery.sh" "$MB/"

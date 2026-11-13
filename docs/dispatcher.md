@@ -25,14 +25,13 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
 ## GitHub API budget
 
 All of a host's dispatchers usually share one token (5000 REST calls/hour). `scripts/ci/gh-cache.sh` (sourced by the
-dispatcher, and inherited by the contract scripts it runs) answers repeated reads within a run and the final records of
-completed runs from `$STATE/ghcache`: one `gh run list` per filter set per run (the same server-side filters, the union
-of the fields, at least 100 runs, 60 s); a run's jobs on disk once the newest listing (or the run's record) shows it
-completed, used while it still shows the same updatedAt (a re-run is read again); a completed job's log. Never
-artifacts (the review attestation is approval evidence: it can expire or be deleted without a new attempt) and never
-binary downloads. Writes (`gh run cancel`, …) are never cached and drop everything kept for the run.
+dispatcher, and inherited by the contract scripts it runs) is deliberately small: one `gh run list` per filter set per
+run (the same server-side filters, the union of the fields, at least 100 runs, 60 s); a run's jobs on disk, stored and
+used only for the run state ("<status> <updatedAt>") on which every fresh listing of the run agrees and which is
+completed (no listing, disagreeing listings, a re-run: the real call); a completed job's log. Never run records,
+artifacts / attestations, workflow run pages or binary downloads. Writes (`gh run cancel`, …) drop the kept listings.
 `test/ci/review-dispatch-api-budget.sh` runs the whole
-dispatcher against a counting fake `gh`: 13 calls cold, 4 on the next run of the same state (32 / 14 before).
+dispatcher against a counting fake `gh`: 16 calls cold, 4 on the next run of the same state (32 / 14 before).
 
 ## Settings
 

@@ -171,17 +171,13 @@ grep -q "MAIN ${H2:0:9}: finding(s) 1 → owner" "$STATE/dispatch.log" || fail "
   gh run list -R o/r -w review.yml -e workflow_run -b main -L 5 --json databaseId >/dev/null
   : > "$FX/calls"; gh api "repos/o/r/actions/runs/$RH2/jobs" >/dev/null
   grep -q "^api repos/o/r/actions/runs/$RH2/jobs" "$FX/calls" || fail "a re-run (new updatedAt, queued) was answered from the cache of the previous attempt"
-  # a run no listing of this run shows: one record call decides (same updatedAt → the stored answer; re-run → fetched)
+  # a run no listing of this run shows: never answered from the cache (the real call, every time)
   ghc_done; ghc_init "$STATE/ghcache"
   : > "$FX/calls"; gh api "repos/o/r/actions/runs/$RH1/jobs" >/dev/null; gh api "repos/o/r/actions/runs/$RH1/jobs" >/dev/null
-  [ "$(cat "$FX/calls")" = "api repos/o/r/actions/runs/$RH1" ] || fail "an unlisted stored run: expected one record call, got: $(cat "$FX/calls")"
-  jq --argjson id "$RH1" 'map(if .databaseId == $id then .updatedAt = "2026-11-13T02:00:00Z" else . end)' "$FX/runs.json" > "$T/r" && mv "$T/r" "$FX/runs.json"
-  ghc_done; ghc_init "$STATE/ghcache"
-  : > "$FX/calls"; gh api "repos/o/r/actions/runs/$RH1/jobs" >/dev/null
-  grep -q "^api repos/o/r/actions/runs/$RH1/jobs" "$FX/calls" || fail "an unlisted run whose record changed was answered from the cache"
+  [ "$(grep -c "^api repos/o/r/actions/runs/$RH1/jobs" "$FX/calls")" = 2 ] || fail "an unlisted run was answered from the cache: $(cat "$FX/calls")"
   ghc_done
 ) || exit 1
-echo "ok - stored completed runs are answered without a call; a re-run is read again; an unlisted run is checked by its record"
+echo "ok - stored completed runs are answered without a call; a re-run is read again; an unlisted run is never answered from the cache"
 
 # review of baf73755e #3-#5 (and dev 730b3e2ca #3)
 (
@@ -197,8 +193,8 @@ echo "ok - stored completed runs are answered without a call; a re-run is read a
   old "$GHC_RUN"/list.*                     # the review listing is due again; the jobs answer is still within its 60 s
   gh run list -R o/r -w review.yml -e workflow_run -b main -L 5 --json databaseId >/dev/null
   [ "$(jobs_c)" = failure ] || fail "a kept jobs answer of the previous attempt was used after a newer listing showed the re-run"
-  # #3: an OLDER (still fresh) listing of another filter set that shows the previous attempt does not decide over the
-  # newer one — both orders of the two filter sets (a lookup in file-name order picks the older one in one of them)
+  # #3: an OLDER (still fresh) listing of another filter set that shows the previous attempt never decides: listings
+  # that disagree give no state, the jobs are fetched — both orders of the two filter sets
   lst_all() { gh run list -R o/r -L 50 --json databaseId >/dev/null; }
   lst_rev() { gh run list -R o/r -w review.yml -e workflow_run -b main -L 5 --json databaseId >/dev/null; }
   u=6
@@ -210,7 +206,7 @@ echo "ok - stored completed runs are answered without a call; a re-run is read a
     u=$((u + 1))
     setrun "$RH1" "2026-11-13T0$u:00:00Z" failure; jq '.jobs[1].conclusion = "failure"' "$FX/jobs-$RH1.json" > "$T/j" && mv "$T/j" "$FX/jobs-$RH1.json"
     $second                                                                                      # newer: the re-run
-    [ "$(ghc_run_state "$RH1")" = "completed 2026-11-13T0$u:00:00Z" ] || fail "($order) the run state came from the older listing: $(ghc_run_state "$RH1")"
+    [ -z "$(ghc_run_state "$RH1")" ] || fail "($order) two listings that disagree gave a run state: $(ghc_run_state "$RH1")"
     [ "$(jobs_c)" = failure ] || fail "($order) a stored answer of the previous attempt was used (the older listing decided)"
     u=$((u + 1))
   done
@@ -237,17 +233,27 @@ echo "ok - stored completed runs are answered without a call; a re-run is read a
   out=$(gh api "repos/o/r/actions/runs/$RH2/jobs" -q '.jobs | length'); rc=$?
   chmod 700 "$GHC_RUN" "$GHC_DIR/disk"
   [ "$rc" = 0 ] && [ "$out" = 2 ] || fail "an answer that could not be written was not returned (rc $rc, '$out')"
-  # review of 879c8c521 #3: a listing past its 60 s decides nothing — the record is asked (and here shows a re-run)
+  # review of 879c8c521 #3: a listing past its 60 s decides nothing — the jobs are fetched
   ghc_done; ghc_init "$STATE/ghcache"
-  gh run list -R o/r -w review.yml -e workflow_run -b main -L 5 --json databaseId >/dev/null          # shows 06:00 completed
-  setrun "$RH1" 2026-11-13T07:00:00Z success; jq --argjson id "$RH1" 'map(if .databaseId == $id then .status = "queued" else . end)' "$FX/runs.json" > "$T/r" && mv "$T/r" "$FX/runs.json"
+  gh run list -R o/r -w review.yml -e workflow_run -b main -L 5 --json databaseId >/dev/null
+  jobs_c >/dev/null                                                                                  # stored for its state
   old "$GHC_RUN"/list.*; : > "$FX/calls"; jobs_c >/dev/null
-  grep -q "^api repos/o/r/actions/runs/$RH1\$" "$FX/calls" && grep -q "^api repos/o/r/actions/runs/$RH1/jobs" "$FX/calls" \
-    || fail "an expired listing decided the run state: $(cat "$FX/calls")"
+  grep -q "^api repos/o/r/actions/runs/$RH1/jobs" "$FX/calls" || fail "an expired listing decided the run state: $(cat "$FX/calls")"
+  # review of 3408ac406 #1: a run record with the SAME updatedAt as a newer listing that shows the re-run
+  # (in_progress) never decides — records are no source of state; the jobs are fetched, the stored pass is not used
+  ghc_done; ghc_init "$STATE/ghcache"
+  setrun "$RH1" 2026-11-13T09:00:00Z success; jq '.jobs[1].conclusion = "success" | .jobs[1].status = "completed"' "$FX/jobs-$RH1.json" > "$T/j" && mv "$T/j" "$FX/jobs-$RH1.json"
+  lst_rev; jobs_c >/dev/null                                                                         # stored: completed 09:00
+  gh api "repos/o/r/actions/runs/$RH1" >/dev/null                                                    # the record: completed 09:00
+  jq --argjson id "$RH1" 'map(if .databaseId == $id then .status = "in_progress" | .conclusion = null else . end)' "$FX/runs.json" > "$T/r" && mv "$T/r" "$FX/runs.json"
+  jq '.jobs[1].conclusion = null | .jobs[1].status = "in_progress"' "$FX/jobs-$RH1.json" > "$T/j" && mv "$T/j" "$FX/jobs-$RH1.json"
+  rm -f "$GHC_RUN"/list.*; lst_rev                                                                   # in_progress 09:00
+  : > "$FX/calls"; [ "$(jobs_c)" = null ] || fail "a record with the listing's updatedAt decided: the stored pass of the previous attempt was used"
+  grep -q "^api repos/o/r/actions/runs/$RH1/jobs" "$FX/calls" || fail "equal-timestamp observations: no fetch"
   # review of afb14f77d #4: a binary Actions download (a run's log zip) passes through byte for byte
   printf 'PK\003\004\000\000bin\000ary' > "$FX/runlogs.bin"
   [ "$(gh api "repos/o/r/actions/runs/$RH1/logs" | md5sum)" = "$(md5sum < "$FX/runlogs.bin")" ] || fail "a binary Actions answer was altered"
   ghc_done
 ) || exit 1
-echo "ok - a re-run seen by a newer listing beats a kept answer, an older or expired listing; artifacts never cached; long paths, unwritable caches and binary answers pass"
+echo "ok - a re-run seen by a newer listing, disagreeing or expired listings, equal timestamps: never the stored answer; artifacts never cached; long paths, unwritable caches and binary answers pass"
 echo "dispatcher API budget: run 1 $(count 1) calls, run 2 $(count 2) calls (budgets ${API_BUDGET_COLD:-20} / ${API_BUDGET_WARM:-8})"

@@ -55,7 +55,9 @@ what gets deployed. The workflow is [.github/workflows/review.yml](../.github/wo
   `.github/` — the caller workflow and its sheepdog pin, `.github/sheepdog/tests.sh`, `.github/sheepdog.yml` —,
   `reviewer/`, `scripts/ci/`). The next default-branch run would already execute such a change (a new pin selects the
   workflow that is supposed to check it), so a devfix, a tests-only train candidate or a tests-only `merge-branch.sh`
-  landing that touches it is refused; it goes through a full review (a dev commit, or a `Hotfix:` on main).
+  landing is refused when its LANDING TREE differs from main's in any machinery file (`landing_machinery_files`: the
+  blocked base's own changes and a merge that rolls main's machinery back count too); it goes through a full review
+  (a dev commit, or a `Hotfix:` on main).
 
 ## Findings
 

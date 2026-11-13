@@ -89,7 +89,7 @@ git -C "$TRUSTED" checkout -q --detach origin/$MAIN
 if [ -f "$TRUSTED/.github/sheepdog.yml" ]; then CI_SCRIPTS=$SHEEPDOG_CI; else CI_SCRIPTS=$TRUSTED/scripts/ci; fi
 
 source "$(dirname "${BASH_SOURCE[0]}")/review-notify.sh"
-source "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # review_machinery_files: what a tests-only approval never lands
+source "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machinery_files: what a tests-only approval never lands
 
 # Delivery failures stay retryable, but must never stop dispatch or fixer launch. With notify_outbox=<episode sha> set, a notice
 # goes to the outbox instead (terminal revert notices: delivered by revert_notices_flush, retried until delivered).
@@ -1786,7 +1786,7 @@ Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). You
     (cd "$TRUSTED" && REVIEW_KIND_OUT="$STATE/train.kind" bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" >/dev/null 2>&1) || continue
     # a tests-only approval never lands review machinery, by fast-forward or Train-Merge (review of dev a171d3396 #1/#2)
     if [ "$(cat "$STATE/train.kind" 2>/dev/null)" != review ]; then
-      tmfiles=$(review_machinery_files "$SRC" "$tsha" --not "origin/$MAIN")
+      tmfiles=$(landing_machinery_files "$SRC" "origin/$MAIN" "$tsha")
       if [ -n "$tmfiles" ]; then
         [ -e "$STATE/sent/$tsha.train-machinery" ] || { log "train: $DEV@${tsha:0:9} has a tests-only approval and changes review machinery ($(tr '\n' ' ' <<<"$tmfiles")) — not landed; the next full dev review lands it"; touch "$STATE/sent/$tsha.train-machinery"; }
         continue
@@ -1905,8 +1905,10 @@ $gaps}"
     fi
     # Review machinery never lands on a tests-only approval (review of dev a171d3396 #1/#2): a devfix is not reviewed,
     # and the next main run would already execute a changed workflow / pin / trusted test list / contract script
-    # before any check inside it. Such a repair goes through a full review instead: a commit on dev, or a Hotfix: on main.
-    mfiles=$(review_machinery_files "$SRC" "$fh" --not "$fs" "origin/$MAIN")
+    # before any check inside it. What counts is everything that lands — the landing tree against main's, so S's own
+    # blocked changes and a merge that rolls main's machinery back count too (review of dev c1dcca119 #1-#3). Such a
+    # repair goes through a full review instead: a commit on dev, or a Hotfix: on main.
+    mfiles=$(landing_machinery_files "$SRC" "origin/$MAIN" "$fh")   # S's own (blocked) changes count too
     if [ -n "$mfiles" ]; then
       if [ ! -e "$STATE/sent/$fh.machinery" ]; then
         log "devfix $fref ${fh:0:9}: changes review machinery ($(tr '\n' ' ' <<<"$mfiles")) — not landed on its tests; it needs a full review"

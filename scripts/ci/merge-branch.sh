@@ -33,11 +33,11 @@ if [ "$(cat "$kf")" != review ] \
   exit 1
 fi
 # … and never with review machinery in it (review of dev a171d3396 #1/#2): main's next run would already execute a
-# changed workflow / pin / trusted test list / contract script before any check inside it. Every commit not yet on main
-# counts (conservative: a full dev review round of the head lands it).
+# changed workflow / pin / trusted test list / contract script before any check inside it. What counts is the landing
+# tree against main's (conservative: a full dev review round of the head lands it).
 if [ "$(cat "$kf")" != review ]; then
   . "$here/review-machinery.sh"
-  mfiles=$(review_machinery_files . "$sha" --not "origin/$MAIN")
+  mfiles=$(landing_machinery_files . "origin/$MAIN" "$sha")
   if [ -n "$mfiles" ]; then
     echo "${sha:0:12} has a tests-only approval and changes review machinery ($(tr '\n' ' ' <<<"$mfiles")): it needs a full review — not merged" >&2
     exit 1

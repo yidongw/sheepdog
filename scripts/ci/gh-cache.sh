@@ -6,30 +6,27 @@
 #   ghc_init <cache dir>   → turns the cache on for this process and its children: defines gh() (exported, so the contract
 #                            scripts the dispatcher runs — review-passed.sh, merge-branch.sh — use it too)
 #
-# What gh() answers without a call (everything else, and every write, goes to the real gh):
+# Deliberately small (reviews of baf73755e … 3408ac406: every extra source of truth was a way to serve a stale attempt).
+# What gh() answers without a call — everything else, and every write, is the real gh:
 #   · `gh run list -R <repo> [-w <workflow>] [-e <event>] [-b <branch>] -L <n> --json <fields> [-q <jq>]`: ONE listing
-#     per filter set (same server-side -w/-e/-b filters — review_list's trusted filtering is unchanged) with the union of
-#     the fields and at least 100 runs, kept GHC_LIST_TTL seconds (60); each call gets its first <n> runs, its fields,
-#     its -q. `gh run cancel` / `rerun` / `delete` drop the listings (the next call lists again).
-#   · `gh api [-q <jq>] <path>` (a GET without other flags):
-#       repos/<r>/actions/runs/<id>, …/runs/<id>/jobs — the run's state is "<status> <updatedAt>" from the NEWEST listing
-#           of this dispatcher run that shows it and is still within GHC_LIST_TTL (a run no fresh listing shows: its
-#           record runs/<id>, one call per run). An
-#           answer kept for this run (GHC_LIST_TTL) is used only while that state is the one it was fetched under; a
-#           jobs answer goes on disk once the state is completed and every job in it is completed, and is used while
-#           the state is "completed <the same updatedAt>" (a re-run is listed as not completed / with a new updatedAt);
-#       NOT artifacts (listings or zips): the review attestation is approval evidence, it can expire or be deleted
-#           without a new attempt — every read goes to GitHub (reviews of baf73755e #4, afb14f77d #1);
-#       repos/<r>/actions/jobs/<id>/logs — on disk once a jobs answer showed that job completed (a job id belongs to one
-#           attempt; its log is final);
-#       repos/<r>/actions/workflows/<wf>/runs?… (review-runs.sh's pages) — kept for this run only (GHC_LIST_TTL);
-#       nothing else (binary downloads such as a run's log zip go to the real gh untouched).
-#   `gh run cancel` / `rerun` / `delete` drop every listing and answer kept for this run. Cache files are named by a
-#   hash of the request; a failed answer is never cached, and an answer that cannot be written is still returned.
-#   Disk entries older than GHC_KEEP_DAYS (2) are removed at ghc_init.
-# The cache holds only what the same token read from GitHub; it lives in the dispatcher's private state directory.
+#     per filter set (the same server-side -w/-e/-b filters — review_list's trusted filtering is unchanged) with the
+#     union of the fields and at least 100 runs, kept GHC_LIST_TTL seconds (60); each call gets its first <n> runs, its
+#     fields and its -q. A listing that cannot be made or kept falls back to the caller's own call.
+#   · `gh api [-q <jq>] repos/<r>/actions/runs/<id>/jobs`: the run's state is read ONLY from this dispatcher run's
+#     listings that are still within GHC_LIST_TTL; when they show the run, all with the same "<status> <updatedAt>", and
+#     the status is completed, a jobs answer stored for exactly that state is used (on disk, so later dispatcher runs
+#     reuse it), and a fetched answer whose jobs are all completed is stored for it. No listing, listings that
+#     disagree, or a run not completed: the real call, nothing stored. A re-run is listed as not completed or with a
+#     new updatedAt, so a stored answer of the previous attempt never matches.
+#   · `gh api repos/<r>/actions/jobs/<id>/logs`: on disk once a jobs answer of this dispatcher run showed that job
+#     completed (a job id belongs to one attempt; its log is final).
+#   Never cached: run records, artifacts and attestation zips (approval evidence: they can expire or be deleted without a
+#   new attempt), workflow run pages, binary downloads. `gh run cancel` / `rerun` / `delete` drop the kept listings.
+#   Cache file names are hashes; writes are best effort — an answer is returned even when it cannot be stored. Disk
+#   entries older than GHC_KEEP_DAYS (2) are removed at ghc_init. The cache holds only what the same token read from
+#   GitHub, in the dispatcher's private state directory.
 GHC_LIST_TTL=${GHC_LIST_TTL:-60}
-# (fields every gh since 2.2x knows — no `attempt`: gh 2.4x on the host refuses it; a re-run shows as a new updatedAt)
+# (fields every gh since 2.2x knows — no `attempt`: gh 2.45 on the host refuses it; a re-run shows as a new updatedAt)
 GHC_FIELDS=databaseId,displayTitle,status,conclusion,headBranch,headSha,workflowName,event,createdAt,updatedAt,number,name
 
 ghc_init() { # ghc_init <dir>
@@ -39,7 +36,7 @@ ghc_init() { # ghc_init <dir>
   find "$GHC_DIR/disk" -type f -mtime +"${GHC_KEEP_DAYS:-2}" -delete 2>/dev/null || true
   GHC_RUN=$(mktemp -d "$GHC_DIR/run.XXXXXX") || return 1
   export GHC_DIR GHC_RUN GHC_LIST_TTL GHC_FIELDS
-  export -f gh ghc_fresh ghc_put ghc_key ghc_run_list ghc_api ghc_run_state ghc_jq
+  export -f gh ghc_fresh ghc_put ghc_key ghc_jq ghc_run_list ghc_run_state ghc_api
 }
 ghc_done() { [ -n "${GHC_RUN:-}" ] && rm -rf "$GHC_RUN"; return 0; }
 
@@ -47,11 +44,12 @@ ghc_fresh() { # ghc_fresh <file> <max age s> → 0 when the file exists and is y
   [ -f "$1" ] || return 1
   [ $(( $(date +%s) - $(stat -c %Y "$1" 2>/dev/null || echo 0) )) -lt "$2" ]
 }
-ghc_put() { # ghc_put <file>  (stdin → file, atomically)
-  local t; t=$(mktemp "$(dirname "$1")/.tmp.XXXXXX") || return 1
-  cat > "$t" && mv -f "$t" "$1"
+ghc_put() { # ghc_put <file>  (stdin → file, atomically; best effort)
+  local t; t=$(mktemp "$(dirname "$1")/.tmp.XXXXXX" 2>/dev/null) || return 1
+  if cat > "$t" 2>/dev/null && mv -f "$t" "$1" 2>/dev/null; then return 0; fi
+  rm -f "$t" 2>/dev/null; return 1
 }
-ghc_key() { printf '%s' "$1" | md5sum | cut -c1-24; }   # a bounded file name for any request (review of baf73755e #5)
+ghc_key() { printf '%s' "$1" | md5sum | cut -c1-24; }   # a bounded file name for any request
 ghc_jq() { # ghc_jq <jq filter or ""> < json → the answer as gh prints it (-q: raw strings)
   if [ -n "$1" ]; then jq -r "$1"; else cat; fi
 }
@@ -60,14 +58,15 @@ gh() {
   if [ -z "${GHC_RUN:-}" ] || [ ! -d "$GHC_RUN" ]; then command gh "$@"; return; fi
   case "${1:-} ${2:-}" in
     "run list") shift 2; ghc_run_list "$@" ;;
-    "run cancel"|"run rerun"|"run delete") rm -f "$GHC_RUN"/list.* "$GHC_RUN"/api.* 2>/dev/null; command gh "$@" ;;
+    "run cancel"|"run rerun"|"run delete") rm -f "$GHC_RUN"/list.* 2>/dev/null; command gh "$@" ;;
     "api "*) shift; ghc_api "$@" ;;
     *) command gh "$@" ;;
   esac
 }
 
 ghc_run_list() {
-  local repo="" wf="" ev="" br="" lim=20 fields="" q="" a key f n k
+  local repo="" wf="" ev="" br="" lim=20 fields="" q="" a="" key f n k
+  local -a own
   while [ $# -gt 0 ]; do
     case "$1" in
       -R|--repo) repo=$2; shift 2 ;;
@@ -80,52 +79,39 @@ ghc_run_list() {
       *) command gh run list ${repo:+-R "$repo"} ${wf:+-w "$wf"} ${ev:+-e "$ev"} ${br:+-b "$br"} -L "$lim" ${fields:+--json "$fields"} ${q:+-q "$q"} "$@"; return ;;
     esac
   done
-  # A fresh listing may observe another attempt even when compatibility fallback or
-  # storage failure prevents persisting it. Invalidate both answer tiers first.
-  # Failure to invalidate must fail closed rather than return stale approval data.
-  rm -f "$GHC_RUN"/api.* "$GHC_DIR"/disk/* "$GHC_RUN"/list.* || return 1
+  own=(${repo:+-R "$repo"} ${wf:+-w "$wf"} ${ev:+-e "$ev"} ${br:+-b "$br"} -L "$lim" ${fields:+--json "$fields"} ${q:+-q "$q"})
   # only what the union covers is answered here
-  [ -n "$fields" ] && [[ "$lim" =~ ^[0-9]+$ ]] && [ "$lim" -le 200 ] || { command gh run list ${repo:+-R "$repo"} ${wf:+-w "$wf"} ${ev:+-e "$ev"} ${br:+-b "$br"} -L "$lim" ${fields:+--json "$fields"} ${q:+-q "$q"}; return; }
+  [ -n "$fields" ] && [[ "$lim" =~ ^[0-9]+$ ]] && [ "$lim" -le 200 ] || { command gh run list "${own[@]}"; return; }
   for f in ${fields//,/ }; do
-    case ",$GHC_FIELDS," in *",$f,"*) ;; *) command gh run list ${repo:+-R "$repo"} ${wf:+-w "$wf"} ${ev:+-e "$ev"} ${br:+-b "$br"} -L "$lim" --json "$fields" ${q:+-q "$q"}; return ;; esac
+    case ",$GHC_FIELDS," in *",$f,"*) ;; *) command gh run list "${own[@]}"; return ;; esac
   done
-  key=$(ghc_key "$repo|$wf|$ev|$br")
+  key=$GHC_RUN/list.$(ghc_key "$repo|$wf|$ev|$br")
   n=$(( lim > 100 ? lim : 100 ))
-  if ! ghc_fresh "$GHC_RUN/list.$key" "$GHC_LIST_TTL" || [ "$(cat "$GHC_RUN/list.$key.n" 2>/dev/null || echo 0)" -lt "$n" ]; then
-    # a listing this cache cannot make (whatever the reason) falls back to the caller's own call, uncached
+  if ghc_fresh "$key" "$GHC_LIST_TTL" && [ "$(cat "$key.n" 2>/dev/null || echo 0)" -ge "$n" ]; then a=$(cat "$key" 2>/dev/null) || a=""; fi
+  if [ -z "$a" ]; then
+    # a listing this cache cannot make falls back to the caller's own call, uncached
     if ! a=$(command gh run list ${repo:+-R "$repo"} ${wf:+-w "$wf"} ${ev:+-e "$ev"} ${br:+-b "$br"} -L "$n" --json "$GHC_FIELDS" 2>/dev/null) \
        || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$a"; then
-      command gh run list ${repo:+-R "$repo"} ${wf:+-w "$wf"} ${ev:+-e "$ev"} ${br:+-b "$br"} -L "$lim" --json "$fields" ${q:+-q "$q"}; return
+      command gh run list "${own[@]}"; return
     fi
-    { ghc_put "$GHC_RUN/list.$key" <<<"$a" && echo "$n" > "$GHC_RUN/list.$key.n"; } 2>/dev/null || true
-  else
-    a=$(cat "$GHC_RUN/list.$key")
+    { ghc_put "$key.n" <<<"$n" && ghc_put "$key" <<<"$a"; } || rm -f "$key" "$key.n" 2>/dev/null
   fi
-  [ -n "${a:-}" ] || a=$(cat "$GHC_RUN/list.$key")
   k=$(jq -nc --arg f "$fields" '$f | split(",")')
   jq -c --argjson n "$lim" --argjson k "$k" '[.[:$n][] | with_entries(select(.key as $x | $k | index($x)))]' <<<"$a" | ghc_jq "$q"
 }
 
-ghc_run_state() { # ghc_run_state <run id> → "<status> <updatedAt>" from the latest fresh observations ("" when none)
+ghc_run_state() { # ghc_run_state <run id> → "<status> <updatedAt>" when every fresh listing of this run that shows the
+  # run agrees on it; "" when none shows it or they disagree (then nothing is answered from the cache)
   local f
-  # Normalize all observation sources, then choose the latest server version.
-  # Equal timestamps cannot order a completion and a rerun. Prefer a non-completed
-  # observation at that version so neither jobs cache can reuse the previous attempt.
-  for f in "$GHC_RUN"/list.* "$GHC_RUN"/api.*; do
-    case "$f" in *.n|*.st) continue ;; esac
+  for f in "$GHC_RUN"/list.*; do
+    case "$f" in *.n) continue ;; esac
     ghc_fresh "$f" "$GHC_LIST_TTL" || continue
-    jq -c --argjson id "$1" '
-      (if type == "array" then .[] else .workflow_runs[]?, (select(has("updated_at")) ) end)
-      | select((.databaseId // .id) == $id)
-      | {status, updated: (.updatedAt // .updated_at // "-")}
-    ' "$f" 2>/dev/null
-  done | jq -sr 'sort_by(.updated, .status != "completed") | last // empty | "\(.status) \(.updated)"'
-
-  return 0
+    jq -r --argjson id "$1" '.[]? | select(.databaseId == $id) | "\(.status) \(.updatedAt // "-")"' "$f" 2>/dev/null
+  done | sort -u | awk 'NR == 1 { s = $0 } END { if (NR == 1) print s }'
 }
 
 ghc_api() {
-  local q="" path="" a m disk memo st key rec sub id
+  local q="" path="" a="" m disk st id
   while [ $# -gt 0 ]; do
     case "$1" in
       -q|--jq) q=$2; shift 2 ;;
@@ -134,41 +120,27 @@ ghc_api() {
     esac
   done
   path=${path#/}; path=${path#https://api.github.com/}
-  key=$(ghc_key "$path"); memo=$GHC_RUN/api.$key; disk=$GHC_DIR/disk/$key
-  if [[ "$path" =~ ^(repos/[^/]+/[^/]+/actions/runs/([0-9]+))(/jobs)?$ ]]; then
-    rec=${BASH_REMATCH[1]} id=${BASH_REMATCH[2]} sub=${BASH_REMATCH[3]}
-    st=$(ghc_run_state "$id")
-    # a run no listing shows: for its jobs, the record (one call, kept for this run) gives the state
-    if [ -z "$st" ] && [ -n "$sub" ]; then st=$(ghc_api "$rec" -q '"\(.status) \(.updated_at)"' 2>/dev/null) || st=""; fi
-    if ghc_fresh "$memo" "$GHC_LIST_TTL" && [ "$(cat "$memo.st" 2>/dev/null)" = "$st" ]; then a=$(cat "$memo")
-    elif [ -n "$sub" ] && [ -f "$disk" ] && [ "${st%% *}" = completed ] && [ "$st" = "completed $(cat "$disk.version" 2>/dev/null)" ]; then a=$(cat "$disk")
-    else
+  if [[ "$path" =~ ^repos/[^/]+/[^/]+/actions/runs/([0-9]+)/jobs$ ]]; then
+    st=$(ghc_run_state "${BASH_REMATCH[1]}")
+    disk=$GHC_DIR/disk/jobs.$(ghc_key "$path|$st")   # stored per run state: another state never matches
+    if [ "${st%% *}" = completed ] && [ -f "$disk" ]; then a=$(cat "$disk" 2>/dev/null) || a=""; fi
+    if [ -z "$a" ]; then
       a=$(command gh api "$path") || return 1
-      { ghc_put "$memo" <<<"$a" && printf '%s' "$st" > "$memo.st"; } 2>/dev/null || true
-      # on disk only a final jobs answer: the state is completed and so is every job in the answer (a re-run between
-      # the listing and this call answers for the new attempt: not completed)
-      if [ -n "$sub" ] && [ "${st%% *}" = completed ] \
-         && jq -e '(.jobs | length > 0) and all(.jobs[]; .status == "completed")' >/dev/null 2>&1 <<<"$a"; then
-        { ghc_put "$disk" <<<"$a" && printf '%s' "${st#* }" > "$disk.version"; } 2>/dev/null || true
+      if [ "${st%% *}" = completed ] && jq -e '(.jobs | length > 0) and all(.jobs[]; .status == "completed")' >/dev/null 2>&1 <<<"$a"; then
+        ghc_put "$disk" <<<"$a" || true
       fi
     fi
-    if [ -n "$sub" ]; then   # completed jobs: their logs are final
-      jq -r '.jobs[]? | select(.status == "completed") | .id' <<<"$a" 2>/dev/null | while read -r m; do : > "$GHC_RUN/jobdone.$m"; done 2>/dev/null || true
-    fi
+    # completed jobs: their logs are final
+    jq -r '.jobs[]? | select(.status == "completed") | .id' <<<"$a" 2>/dev/null | while read -r m; do : > "$GHC_RUN/jobdone.$m"; done 2>/dev/null || true
     ghc_jq "$q" <<<"$a"; return
   fi
   if [[ "$path" =~ ^repos/[^/]+/[^/]+/actions/jobs/([0-9]+)/logs$ ]]; then
-    id=${BASH_REMATCH[1]}
-    if [ -f "$disk" ]; then ghc_jq "$q" < "$disk"; return; fi
-    a=$(command gh api "$path") || return 1
-    if [ -f "$GHC_RUN/jobdone.$id" ]; then ghc_put "$disk" <<<"$a" 2>/dev/null || true; fi
-    ghc_jq "$q" <<<"$a"; return
-  fi
-  # a workflow's run pages (review-runs.sh) — JSON; every other endpoint (binary run-log zips, …) goes to the real gh
-  # (review of afb14f77d #4)
-  if [[ "$path" =~ ^repos/[^/]+/[^/]+/actions/workflows/[^/?]+/runs(\?.*)?$ ]]; then
-    if ghc_fresh "$memo" "$GHC_LIST_TTL"; then a=$(cat "$memo")
-    else a=$(command gh api "$path") || return 1; ghc_put "$memo" <<<"$a" 2>/dev/null || true; fi
+    id=${BASH_REMATCH[1]}; disk=$GHC_DIR/disk/log.$(ghc_key "$path")
+    if [ -f "$disk" ]; then a=$(cat "$disk" 2>/dev/null) || a=""; fi
+    if [ -z "$a" ]; then
+      a=$(command gh api "$path") || return 1
+      if [ -f "$GHC_RUN/jobdone.$id" ]; then ghc_put "$disk" <<<"$a" || true; fi
+    fi
     ghc_jq "$q" <<<"$a"; return
   fi
   command gh api "$path" ${q:+-q "$q"}
