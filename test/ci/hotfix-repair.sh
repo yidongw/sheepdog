@@ -26,30 +26,34 @@ cat > "$T/bin/gh" <<SH
 #!/usr/bin/env bash
 [ "\$1" = api ] || exit 1; p=\$2; q=""; [ "\${3:-}" = -q ] && q=\$4
 case "\$p" in
-  *workflows/review.yml/runs*page=1*) o='{"workflow_runs":[{"id":1,"path":".github/workflows/review.yml","display_title":"review $F","status":"completed","conclusion":"success","event":"workflow_run","head_branch":"main"}]}' ;;
+  *workflows/review.yml/runs*page=1*) o='{"workflow_runs":[{"id":1,"path":".github/workflows/review.yml","display_title":"review '"\$SUBJECT"'","status":"completed","conclusion":"success","event":"workflow_run","head_branch":"main"}]}' ;;
   *workflows/review.yml/runs*) o='{"workflow_runs":[]}' ;;
   */jobs) o='{"jobs":[{"name":"sheepdog / tests","conclusion":"success"},{"name":"sheepdog / review","conclusion":"success","steps":[{"name":"Review (blocking)","conclusion":"success"}]}]}' ;;
   */artifacts) o='{"artifacts":[{"id":2,"name":"review-attestation","expired":false}]}' ;;
-  */zip) exec cat "$T/a/attestation.zip" ;;
+  */zip) exec cat "$T/attestation.zip" ;;
   *) exit 1 ;;
 esac
 if [ -n "\$q" ]; then jq -r "\$q" <<<"\$o"; else printf '%s\n' "\$o"; fi
 SH
 chmod +x "$T/bin/gh"
-gate() { # gate <attested base> [<sha>]: review-passed.sh <sha> against deployed P
-  printf '{"head":"%s","base":"%s"}' "$F" "$1" > "$T/review-attestation.json"
-  (cd "$T" && python3 -m zipfile -c "$T/a/attestation.zip" review-attestation.json)
-  PATH="$T/bin:$PATH" GH_TOKEN=x bash "$CI/review-passed.sh" "${2:-$F}" fixture/repo "$P" >/dev/null 2>&1
+gate() { # gate <attested base> [<sha>]: a trusted passing review of <sha> (default F) attesting <base>..<sha>; then
+  # review-passed.sh <sha> against deployed P. The attestation lives outside the fixture repository.
+  local sha=${2:-$F}
+  printf '{"head":"%s","base":"%s"}' "$sha" "$1" > "$T/review-attestation.json"
+  (cd "$T" && rm -f attestation.zip && python3 -m zipfile -c attestation.zip review-attestation.json)
+  SUBJECT=$sha PATH="$T/bin:$PATH" GH_TOKEN=x bash "$CI/review-passed.sh" "$sha" fixture/repo "$P" >/dev/null 2>&1
 }
 check "A: H..F coverage cannot deploy over P by the strict path" eval '! gate "$H"'
 check "A: P..F coverage deploys over P" gate "$P"
 for case in "scripts/ci/autodeploy.sh scripts/ci/autodeploy.sh" "test/guard.ts -" "src/entry.ts docs/entry.ts" "src/entry.ts src/entry.md"; do
   read -r from to <<<"$case"
-  g checkout -q --detach "$P"; mkdir -p "$(dirname "$from")"; echo original > "$from"; g add "$from"; g commit -qm "deployed file"
+  g checkout -q --detach "$P"; mkdir -p "$(dirname "$from")"; echo original > "$from"; g add "$from"; g commit -qm "deployed file"; deployed=$(git rev-parse HEAD)
   if [ "$to" = - ]; then g rm -q "$from"; elif [ "$to" = "$from" ]; then echo changed > "$from"; g add "$from"
   else mkdir -p "$(dirname "$to")"; g mv "$from" "$to"; fi
   gap=$(c "unreviewed gap")
-  check "A: an unreviewed gap ($from → $to) needs coverage" eval '! gate "$P" "$gap"'
+  # gap's own review covered only deployed..gap; the commit below it (deployed file) has no review: not over P
+  check "A: an unreviewed gap ($from → $to) needs coverage" eval '! gate "$deployed" "$gap"'
+  check "A: …while a review of P..gap covers it (control)" gate "$P" "$gap"
 done
 g checkout -q --detach "$F"
 I=$(c "intervening main commit"); c "$(printf 'repair again\n\nReview-Fix-Of: %s\nHotfix: repair' "$F")" >/dev/null
