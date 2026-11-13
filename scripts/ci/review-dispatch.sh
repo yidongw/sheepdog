@@ -62,10 +62,15 @@ log() { echo "[$(date -u +%FT%TZ)] $*" >> "$LOG"; }
 # started from the default branch's .github/workflows/review.yml by a workflow_run event. A branch can push its own
 # review.yml (or a workflow named "Review") with any run title — e.g. "recheck <sha>" with a skipped review job — but only as
 # a push / pull_request run of its own branch, which this never lists.
-review_list() { # review_list <limit> <json fields> <jq filter over the trusted runs' array>
-  gh run list -R "$REPO" -w "${SHEEPDOG_REVIEW_WORKFLOW:-review.yml}" -e workflow_run -b "$MAIN" -L "$1" --json "$2,event,headBranch" 2>/dev/null \
-    | jq -r --arg br "$MAIN" "[.[]? | select(.event == \"workflow_run\" and .headBranch == \$br)] | $3" 2>/dev/null
+# API budget: every review_list call makes the SAME request (100 runs, all the fields any caller reads), so the per-run memo
+# (gh-cache.sh) answers it once per dispatcher run; each caller gets its own first <limit> runs.
+review_list() { # review_list <limit> <json fields (documentation: the request below lists every field a caller reads)> <jq filter over the trusted runs' array>
+  gh run list -R "$REPO" -w "${SHEEPDOG_REVIEW_WORKFLOW:-review.yml}" -e workflow_run -b "$MAIN" -L 100 \
+      --json databaseId,displayTitle,status,conclusion,event,headBranch,headSha 2>/dev/null \
+    | jq -r --arg br "$MAIN" --argjson n "$1" "[.[:\$n][]? | select(.event == \"workflow_run\" and .headBranch == \$br)] | $3" 2>/dev/null
 }
+# The same for the repository-wide listing (the side-branch and superseded-dev cancels): one request per run.
+all_runs_list() { gh run list -R "$REPO" -L 60 --json databaseId,status,displayTitle,headBranch,headSha,workflowName,event; }
 # The dev head's round is still going: its CI run (a push to dev of that sha) or its TRUSTED Review run (review_list's
 # provenance rule) is unfinished. Never a run found by display title alone: any branch can add a workflow whose run is
 # titled "review <dev sha>" and would hold the main→dev merge back (up to MAINMERGE_DEFER_MAX_SEC).
@@ -78,10 +83,11 @@ dev_round_running() { # dev_round_running <dev sha>
   [ "${n:-0}" -gt 0 ]
 }
 [ -e "$STATE/PAUSED" ] && exit 0
-# GitHub API budget (11-13: the host's dispatchers spent ~6000 calls/h of the token's 5000): one run listing per filter set
-# per run, completed runs' jobs / logs / artifacts kept on disk (gh-cache.sh; also used by the contract scripts run below)
+# GitHub API budget (11-13: the host's dispatchers spent ~6000 calls/h of the token's 5000): identical reads are asked once
+# per dispatcher run (a memo wiped by every write and removed at exit), completed jobs' logs kept on disk by job id
+# (gh-cache.sh; also used by the contract scripts run below). Nothing else outlives the run.
 source "$(dirname "${BASH_SOURCE[0]}")/gh-cache.sh"
-if ghc_init "$STATE/ghcache"; then trap ghc_done EXIT; else log "gh cache unavailable: uncached API calls this run"; fi
+if ghc_init "$STATE"; then trap ghc_done EXIT; else log "gh memo unavailable: uncached API calls this run"; fi
 
 git -C "$SRC" fetch -q --prune origin
 [ -d "$TRUSTED" ] || git -C "$SRC" worktree add -q --detach "$TRUSTED" origin/$MAIN
@@ -1302,7 +1308,7 @@ fi
 if [ -z "${DRY:-}" ]; then
   # push events only: a pull_request run is a PR's own check (no trusted workflow replaces it), and
   # PRs are not the merge path (owner 11-09) - leave them alone (review of c3c3ee3f8)
-  gh run list -R "$REPO" -L 60 --json databaseId,status,headBranch,workflowName,event 2>/dev/null \
+  all_runs_list 2>/dev/null \
   | jq -r --arg dev "$DEV" --arg main "$MAIN" '.[] | select(.status != "completed" and .workflowName == "CI" and .event == "push" and .headBranch != $dev and .headBranch != $main and (.headBranch | startswith("devfix/") | not)) | "\(.databaseId) \(.headBranch)"' 2>/dev/null \
   | while read -r id hb; do
       # if, not &&: a run GitHub cannot cancel (stuck "queued" with no jobs) must not end the loop
@@ -1316,8 +1322,8 @@ if [ -z "${DRY:-}" ] && git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/
   dhead=$(git -C "$SRC" rev-parse "origin/$DEV")
   # push-event runs only, like the side-branch cancel above: a pull_request run is a PR's own check
   # (review of 00347f6d0 - this list fetched no event and could cancel a dev PR's run)
-  gh run list -R "$REPO" -L 60 --json databaseId,status,displayTitle,headBranch,headSha,workflowName,event \
-    -q '.[] | select(.status != "completed" and .event != "pull_request") | "\(.databaseId) \(.workflowName) \(.headBranch) \(.headSha) \(.displayTitle)"' 2>/dev/null \
+  all_runs_list 2>/dev/null \
+    | jq -r '.[] | select(.status != "completed" and .event != "pull_request") | "\(.databaseId) \(.workflowName) \(.headBranch) \(.headSha) \(.displayTitle)"' 2>/dev/null \
   | while read -r id wf hb hs title; do
       if [ "$wf" = Review ]; then osha=${title#review }; else [ "$hb" = "$DEV" ] || continue; osha=$hs; fi
       [[ "$osha" =~ ^[0-9a-f]{40}$ ]] && [ "$osha" != "$dhead" ] || continue

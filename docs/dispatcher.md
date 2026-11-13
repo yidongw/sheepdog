@@ -25,13 +25,23 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
 ## GitHub API budget
 
 All of a host's dispatchers usually share one token (5000 REST calls/hour). `scripts/ci/gh-cache.sh` (sourced by the
-dispatcher, and inherited by the contract scripts it runs) is deliberately small: one `gh run list` per filter set per
-run (the same server-side filters, the union of the fields, at least 100 runs, 60 s); a run's jobs on disk, stored and
-used only for the run state ("<status> <updatedAt>") on which every fresh listing of the run agrees and which is
-completed (no listing, disagreeing listings, a re-run: the real call); a completed job's log. Never run records,
-artifacts / attestations, workflow run pages or binary downloads. Writes (`gh run cancel`, …) drop the kept listings.
-`test/ci/review-dispatch-api-budget.sh` runs the whole
-dispatcher against a counting fake `gh`: 16 calls cold, 4 on the next run of the same state (32 / 14 before).
+dispatcher, and inherited by the contract scripts it runs) follows two rules and nothing else:
+
+1. **Per-run memo.** Each dispatcher run gets a private directory (`GHC_RUN_DIR`, removed at exit). Within that one run,
+   identical reads are asked once: `gh run list …` and `gh api` on the JSON Actions endpoints (runs, run records, jobs,
+   artifacts lists, workflow run pages). Every write — `gh run rerun/cancel/delete`, `gh workflow run`, `gh api -X …`,
+   any other `gh` command, `git push` — wipes the memo. The next dispatcher run asks GitHub again, so a re-run is always
+   seen: nothing that can change (listings, records, pages, jobs, artifacts) outlives the run that read it.
+2. **Completed jobs' logs** are kept on disk across runs, by job id (`$STATE/ghcache/logs/<job id>`): a re-run creates
+   new job ids, so a completed job's log never changes. Kept only once a jobs answer of the same run showed the job
+   completed more than two minutes ago; stored and returned byte for byte.
+
+Binary downloads (artifact zips, run log zips) and every other endpoint pass through untouched. A script run outside a
+dispatcher run (no `GHC_RUN_DIR`) calls GitHub directly. To make identical reads, the dispatcher's own listings use one
+request per filter set (`review_list`: 100 runs with every field its callers read; `all_runs_list`).
+`test/ci/gh-cache-memo.sh` tests the rules (including the re-run reproductions of the reviews of 8e5891359 and
+earlier); `test/ci/review-dispatch-api-budget.sh` runs the whole dispatcher against a counting fake `gh`: 15 calls cold,
+5 on the next run of the same state (16 / 4 with the earlier cross-run cache, 32 / 14 before any).
 
 ## Settings
 
