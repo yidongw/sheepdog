@@ -78,3 +78,12 @@ git reset -q --hard "$QB"; printf 'jobs: [unclosed\n' > .github/workflows/review
 git reset -q --hard "$QB"; qcaller "yidongw/sheepdog/.github/workflows/review.yml@$SB" >/dev/null; KIND=tests-only-fix run_both "$QB"
 [ "$prc" != 0 ] && grep -q "tests-only fix round" <<<"$out" || fail "a pin bump in a tests-only fix round was accepted: $out"
 echo "ok - quoted pins are pins; a non-sha replacement, an unparsable caller, a bump in a tests-only fix round: fail closed"
+# review of 172fbf195 #1: the step runs in the candidate checkout — candidate Python modules (yaml.py, sitecustomize.py)
+# and PYTHON* settings must never run on the review host; the pins are still read
+git reset -q --hard "$QB"; qcaller "yidongw/sheepdog/.github/workflows/review.yml@$SB" >/dev/null
+for m in yaml sitecustomize; do printf 'import pathlib\npathlib.Path(%s).write_text("ran")\nfrom importlib import import_module\n' "'$T/pwned-$m'" > "$m.py"; done
+g add -A; g commit -qm "candidate python modules"
+PYTHONPATH=$PWD PYTHONSTARTUP=$PWD/yaml.py run_both "$QB"
+for m in yaml sitecustomize; do [ ! -e "$T/pwned-$m" ] || fail "the pin step executed the candidate's $m.py"; done
+[ "$prc" = 0 ] && grep -qx -- "--pin-to" "$T/rt/args" && grep -qx "$SB" "$T/rt/args" || fail "with candidate Python modules present the bump was not read: $out"
+echo "ok - the pin step runs no candidate Python (isolated interpreter) and still reads the pins"

@@ -78,4 +78,5 @@ for s in "${suites[@]}"; do
   esac
 done
 [ "$bad" = 0 ] || exit 1
-echo "self-review pin ${pin:0:9}: the pinned snapshot passes this tree's ${#suites[@]} review-flow suites"
+np=$(wc -w <<<"$pending"); ex=""; [ "$np" -eq 0 ] || ex=" except $np pending (self-review-pin.pending)"
+echo "self-review pin ${pin:0:9}: the pinned snapshot passes this tree's ${#suites[@]} review-flow suites$ex"

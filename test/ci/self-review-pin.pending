@@ -2,3 +2,4 @@
 #   <suite file name> <the 40-char pin sha> <the protection that is not in the pinned snapshot yet>
 # Allowed only for that exact pin: a pin bump runs every suite against the new pin again. Keep this list empty whenever
 # the newest reviewed main carries the protection — bump the pin instead (docs/self-review.md).
+pin-bump.sh ad09c0b502039a9467f235660cf3d39c01cee3f9 the pin step's isolated python3 -I (review of 172fbf195 #1) is not in the pin yet: the pin bump to this fix follows its main re-check
