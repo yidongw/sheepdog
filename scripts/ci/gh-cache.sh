@@ -93,10 +93,12 @@ ghc_run_list() {
        || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$a"; then
       command gh run list ${repo:+-R "$repo"} ${wf:+-w "$wf"} ${ev:+-e "$ev"} ${br:+-b "$br"} -L "$lim" --json "$fields" ${q:+-q "$q"}; return
     fi
-    ghc_put "$GHC_RUN/list.$key" <<<"$a" && echo "$n" > "$GHC_RUN/list.$key.n"
+    { ghc_put "$GHC_RUN/list.$key" <<<"$a" && echo "$n" > "$GHC_RUN/list.$key.n"; } 2>/dev/null || true
+  else
+    a=$(cat "$GHC_RUN/list.$key")
   fi
   k=$(jq -nc --arg f "$fields" '$f | split(",")')
-  jq -c --argjson n "$lim" --argjson k "$k" '[.[:$n][] | with_entries(select(.key as $x | $k | index($x)))]' "$GHC_RUN/list.$key" | ghc_jq "$q"
+  jq -c --argjson n "$lim" --argjson k "$k" '[.[:$n][] | with_entries(select(.key as $x | $k | index($x)))]' <<<"$a" | ghc_jq "$q"
 }
 
 ghc_run_state() { # ghc_run_state <run id> → "<status> <updatedAt>" from the NEWEST fresh listing of this run that shows it ("" when none)
