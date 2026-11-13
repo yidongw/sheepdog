@@ -101,18 +101,26 @@ ghc_run_list() {
   else
     a=$(cat "$GHC_RUN/list.$key")
   fi
+  [ -n "${a:-}" ] || a=$(cat "$GHC_RUN/list.$key")
   k=$(jq -nc --arg f "$fields" '$f | split(",")')
   jq -c --argjson n "$lim" --argjson k "$k" '[.[:$n][] | with_entries(select(.key as $x | $k | index($x)))]' <<<"$a" | ghc_jq "$q"
 }
 
-ghc_run_state() { # ghc_run_state <run id> → "<status> <updatedAt>" from the NEWEST fresh listing of this run that shows it ("" when none)
+ghc_run_state() { # ghc_run_state <run id> → "<status> <updatedAt>" from the latest fresh observations ("" when none)
   local f
-  # newest first (review of baf73755e #3: an older listing must not override a newer one that saw a re-run)
-  while IFS= read -r f; do   # our own hashed file names: no blanks
-    case "$f" in *.n) continue ;; esac
-    ghc_fresh "$f" "$GHC_LIST_TTL" || continue   # a listing past its 60 s says nothing (review of 879c8c521 #3)
-    jq -r --argjson id "$1" 'first(.[] | select(.databaseId == $id) | "\(.status) \(.updatedAt // "-")") // empty' "$f" 2>/dev/null | head -1 | grep . && return 0
-  done < <(ls -t "$GHC_RUN"/list.* 2>/dev/null)
+  # Normalize all observation sources, then choose the latest server version.
+  # Equal timestamps cannot order a completion and a rerun. Prefer a non-completed
+  # observation at that version so neither jobs cache can reuse the previous attempt.
+  for f in "$GHC_RUN"/list.* "$GHC_RUN"/api.*; do
+    case "$f" in *.n|*.st) continue ;; esac
+    ghc_fresh "$f" "$GHC_LIST_TTL" || continue
+    jq -c --argjson id "$1" '
+      (if type == "array" then .[] else .workflow_runs[]?, (select(has("updated_at")) ) end)
+      | select((.databaseId // .id) == $id)
+      | {status, updated: (.updatedAt // .updated_at // "-")}
+    ' "$f" 2>/dev/null
+  done | jq -sr 'sort_by(.updated, .status != "completed") | last // empty | "\(.status) \(.updated)"'
+
   return 0
 }
 
