@@ -63,14 +63,16 @@ log() { echo "[$(date -u +%FT%TZ)] $*" >> "$LOG"; }
 # review.yml (or a workflow named "Review") with any run title — e.g. "recheck <sha>" with a skipped review job — but only as
 # a push / pull_request run of its own branch, which this never lists.
 # API budget: every review_list call makes the SAME request (100 runs, all the fields any caller reads), so the per-run memo
-# (gh-cache.sh) answers it once per dispatcher run; each caller gets its own first <limit> runs.
+# (gh-cache.sh ghm) answers it once per dispatcher run; each caller gets its own first <limit> runs. Listings only find
+# and route runs: whatever approves, lands or completes something re-reads GitHub with the real gh (review-passed.sh,
+# merge-branch.sh, run_verdict, recheck_reviewed / recheck_base, the devfix tests check, …).
 review_list() { # review_list <limit> <json fields (documentation: the request below lists every field a caller reads)> <jq filter over the trusted runs' array>
-  gh run list -R "$REPO" -w "${SHEEPDOG_REVIEW_WORKFLOW:-review.yml}" -e workflow_run -b "$MAIN" -L 100 \
+  ghm run list -R "$REPO" -w "${SHEEPDOG_REVIEW_WORKFLOW:-review.yml}" -e workflow_run -b "$MAIN" -L 100 \
       --json databaseId,displayTitle,status,conclusion,event,headBranch,headSha 2>/dev/null \
     | jq -r --arg br "$MAIN" --argjson n "$1" "[.[:\$n][]? | select(.event == \"workflow_run\" and .headBranch == \$br)] | $3" 2>/dev/null
 }
 # The same for the repository-wide listing (the side-branch and superseded-dev cancels): one request per run.
-all_runs_list() { gh run list -R "$REPO" -L 60 --json databaseId,status,displayTitle,headBranch,headSha,workflowName,event; }
+all_runs_list() { ghm run list -R "$REPO" -L 60 --json databaseId,status,displayTitle,headBranch,headSha,workflowName,event; }
 # The dev head's round is still going: its CI run (a push to dev of that sha) or its TRUSTED Review run (review_list's
 # provenance rule) is unfinished. Never a run found by display title alone: any branch can add a workflow whose run is
 # titled "review <dev sha>" and would hold the main→dev merge back (up to MAINMERGE_DEFER_MAX_SEC).
@@ -78,14 +80,14 @@ dev_round_running() { # dev_round_running <dev sha>
   local n
   n=$(review_list 60 status,displayTitle "map(select(.status != \"completed\" and .displayTitle == \"review $1\")) | length")
   [ "${n:-0}" -gt 0 ] && return 0
-  n=$(gh run list -R "$REPO" -w CI -e push -b "$DEV" -L 20 --json status,headSha,headBranch,event 2>/dev/null \
+  n=$(ghm run list -R "$REPO" -w CI -e push -b "$DEV" -L 20 --json status,headSha,headBranch,event 2>/dev/null \
     | jq --arg s "$1" --arg b "$DEV" '[.[]? | select(.status != "completed" and .event == "push" and .headBranch == $b and .headSha == $s)] | length' 2>/dev/null)
   [ "${n:-0}" -gt 0 ]
 }
 [ -e "$STATE/PAUSED" ] && exit 0
-# GitHub API budget (11-13: the host's dispatchers spent ~6000 calls/h of the token's 5000): identical reads are asked once
-# per dispatcher run (a memo wiped by every write and removed at exit), completed jobs' logs kept on disk by job id
-# (gh-cache.sh; also used by the contract scripts run below). Nothing else outlives the run.
+# GitHub API budget (11-13: the host's dispatchers spent ~6000 calls/h of the token's 5000): ghm — identical informational
+# reads (listings, findings / notes text) asked once per dispatcher run (a memo wiped by every write, removed at exit),
+# completed jobs' logs kept on disk by job id. gh is always the real gh: approval evidence is never memoised (gh-cache.sh).
 source "$(dirname "${BASH_SOURCE[0]}")/gh-cache.sh"
 if ghc_init "$STATE"; then trap ghc_done EXIT; else log "gh memo unavailable: uncached API calls this run"; fi
 
@@ -186,13 +188,13 @@ findings_cap() { # stdin: review-gate lines → every line of the first FINDINGS
     { cur = ""; if (no++ < 20) print }
     END { if (nd) print "(" nd " more findings not listed, see the run)" }'
 }
-findings() { # findings <run id> → text (blocking findings only: the reviewer's NIT lines are notes, see notes_of)
-  local run=$1 jobs tests_ok rid
-  jobs=$(gh api "repos/$REPO/actions/runs/$run/jobs")
+findings() { # findings <run id> [<its jobs answer, already read>] → text (blocking findings only: the reviewer's NIT lines are notes, see notes_of)
+  local run=$1 jobs=${2:-} tests_ok rid
+  if [ -n "$jobs" ]; then ghc_note_jobs <<<"$jobs"; else jobs=$(ghm api "repos/$REPO/actions/runs/$run/jobs"); fi
   tests_ok=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "tests") | .conclusion' <<<"$jobs")
   rid=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "review") | .id' <<<"$jobs")
   if [ -n "$rid" ]; then
-    gh api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' \
+    ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' \
       | grep -E '^(review-gate: (BLOCKED|FINDING|ROUTE|reviewer|no parseable|NOTE)|evidence:|\[gates .*ERROR)' | findings_cap || true
   fi
   # a CANCELLED tests job is never a code finding: the dispatcher cancels it itself once the review blocked ("tests no
@@ -201,16 +203,16 @@ findings() { # findings <run id> → text (blocking findings only: the reviewer'
   if [ "$tests_ok" != success ] && [ "$tests_ok" != cancelled ]; then
     echo "trusted tests job: ${tests_ok:-not run}"
     local tid; tid=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "tests") | .id' <<<"$jobs")
-    [ -n "$tid" ] && gh api "repos/$REPO/actions/jobs/$tid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //; s/\x1b\[[0-9;]*m//g' \
+    [ -n "$tid" ] && ghm api "repos/$REPO/actions/jobs/$tid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //; s/\x1b\[[0-9;]*m//g' \
       | grep -E '^ *(FAIL |× |error TS|##\[error\])' | sort -u | head -15 || true
   fi
 }
 
 notes_of() { # notes_of <run id> → the reviewer's non-blocking notes ("" when none), prefixed for a message
   local rid n
-  rid=$(gh api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null | jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "review") | .id' | head -1)
+  rid=$(ghm api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null | jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "review") | .id' | head -1)
   [ -n "$rid" ] || return 0
-  n=$(gh api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' \
+  n=$(ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' \
     | grep -E '^review-gate: (NOTE|NIT)' | sed -E 's/^review-gate: NOTE \(non-blocking\): //; s/^review-gate: NIT \(non-blocking\): /nit: /' | head -8 || true)
   [ -n "$n" ] && printf '\nreview notes (non-blocking): %s' "$n"
   return 0
@@ -1345,15 +1347,19 @@ recheck_run() { # recheck_run <sha> → the newest completed "recheck <sha>" run
   [ -n "$hotfix_runs" ] || hotfix_runs=$(review_list 100 databaseId,displayTitle,status . || true); [ -n "$hotfix_runs" ] || hotfix_runs='[]'
   jq -r --arg t "recheck $1" '[.[]? | select(.displayTitle == $t and .status == "completed")][0].databaseId // empty' <<<"$hotfix_runs" 2>/dev/null || true
 }
-review_job_state() { # review_job_state <run id> → the conclusion of that run's review job ("" when none)
-  gh api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null | jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].conclusion // ""' 2>/dev/null || true
+review_jobs() { gh api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null; }   # the real gh: these jobs decide completion
+review_job_state() { # review_job_state <run id> [<its jobs answer>] → the conclusion of that run's review job ("" when none)
+  local j=${2:-}; [ -n "$j" ] || j=$(review_jobs "$1" || true)
+  jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].conclusion // ""' <<<"$j" 2>/dev/null || true
 }
-recheck_reviewed() { case "$(review_job_state "$1")" in success|failure|timed_out) return 0 ;; *) return 1 ;; esac; }
-recheck_base() { # recheck_base <run id> <head> → the base of the range that run reviewed; <head>^1 for a run without the line
-  local jid b=""
-  jid=$(gh api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null | jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].id // empty' 2>/dev/null || true)
+recheck_reviewed() { case "$(review_job_state "$1" "${2:-}")" in success|failure|timed_out) return 0 ;; *) return 1 ;; esac; }
+recheck_base() { # recheck_base <run id> <head> [<its jobs answer>] → the base of the range that run reviewed; <head>^1 for a run without the line
+  local j jid b=""
+  # the range a run reviewed: attribution (routing), not approval — the memo (ghm) may answer
+  if [ -n "${3:-}" ]; then j=$3; ghc_note_jobs <<<"$j"; else j=$(ghm api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null || true); fi
+  jid=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].id // empty' <<<"$j" 2>/dev/null || true)
   if [ -n "$jid" ]; then
-    b=$(gh api "repos/$REPO/actions/jobs/$jid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' | sed -nE 's/^review-range: ([0-9a-f]{40}) [0-9a-f]{40}$/\1/p' | head -1 || true)
+    b=$(ghm api "repos/$REPO/actions/jobs/$jid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' | sed -nE 's/^review-range: ([0-9a-f]{40}) [0-9a-f]{40}$/\1/p' | head -1 || true)
   fi
   if [ -z "$b" ] || ! git -C "$SRC" merge-base --is-ancestor "$b" "$2" 2>/dev/null; then b=$(git -C "$SRC" rev-parse -q --verify "$2^1" 2>/dev/null || true); fi
   printf '%s\n' "$b"
@@ -1375,7 +1381,8 @@ recheck_covering() { # recheck_covering <H> → "<D> <run>": the first later mai
     rid=$(recheck_run "$d")
     [ -n "$rid" ] || continue
     if [ -z "${cov_base[$d]+x}" ]; then
-      if recheck_reviewed "$rid"; then cov_base[$d]=$(recheck_base "$rid" "$d"); cov_base[$d]=${cov_base[$d]:--}; else cov_base[$d]=-; fi
+      local rj; rj=$(review_jobs "$rid" || true)
+      if recheck_reviewed "$rid" "$rj"; then cov_base[$d]=$(recheck_base "$rid" "$d" "$rj"); cov_base[$d]=${cov_base[$d]:--}; else cov_base[$d]=-; fi
     fi
     b=${cov_base[$d]}; [ "$b" != - ] || continue
     if ! git -C "$SRC" merge-base --is-ancestor "$1" "$b"; then echo "$d $rid"; return 0; fi
@@ -1445,16 +1452,16 @@ main_plan() { # main_plan <H> <findings> <range base> → "<n> <depth> <culprit>
   done <<<"$att"
   return 0
 }
-preexisting_record() { # preexisting_record <H> <run id> → once per run: the reviewer's pre-existing findings (non-blocking: the range
+preexisting_record() { # preexisting_record <H> <run id> [<its jobs answer, already read>] → once per run: the reviewer's pre-existing findings (non-blocking: the range
   # did not introduce or worsen them) appended to $STATE/preexisting-findings.log — recorded, never assigned. review-gate prints
   # them as "review-gate: NIT (non-blocking): <verdict>: [pre-existing] <finding> (<evidence>)". The run is marked processed
   # only after its log was fetched and recorded; a failed / empty fetch is retried next run.
   local m="$STATE/sent/$1.preexisting-$2" jobs rid jlog p
   [ -z "${DRY:-}" ] && [ ! -e "$m" ] || return 0
-  jobs=$(gh api "repos/$REPO/actions/runs/$2/jobs" 2>/dev/null) || return 0
+  if [ -n "${3:-}" ]; then jobs=$3; ghc_note_jobs <<<"$jobs"; else jobs=$(ghm api "repos/$REPO/actions/runs/$2/jobs" 2>/dev/null) || return 0; fi
   rid=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].id // empty' <<<"$jobs" 2>/dev/null) || return 0
   if [ -z "$rid" ]; then touch "$m"; return 0; fi   # no review job: nothing to record
-  jlog=$(gh api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null) || return 0
+  jlog=$(ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null) || return 0
   [ -n "$jlog" ] || return 0
   p=$(sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^ ]+ //' <<<"$jlog" | grep -E '^review-gate: (NIT|NOTE) \(non-blocking\): .*\[pre-existing\]' | head -20 || true)
   if [ -n "$p" ]; then { echo "[$(date -u +%FT%TZ)] main ${1:0:9} (run $2):"; printf '%s\n' "$p"; echo; } >> "$STATE/preexisting-findings.log" || return 0; fi
@@ -1738,25 +1745,25 @@ for hsha in $(hotfix_candidates); do
   hn=$((hn + 1)); [ "$hn" -le 40 ] || break   # at most 40 per run — counted among commits that have a review run
   # its own reviewer never ran (cancelled while waiting: a newer main head's reviewer took the batch) → covered by that
   # batched re-check and handled there; not reviewed yet → wait
-  if ! recheck_reviewed "$hrun"; then
+  # Judge this main re-check run itself (not a pre-landing dev run of the same sha): its jobs, read once, with the real gh
+  hjobs=$(review_jobs "$hrun" || echo '{}'); [ -n "$hjobs" ] || hjobs='{}'
+  if ! recheck_reviewed "$hrun" "$hjobs"; then
     if hcov=$(recheck_covering "$hsha"); then
       if [ -n "${DRY:-}" ]; then echo "DRY HOTFIX ${hsha:0:9}: covered by the batched re-check of ${hcov%% *} — handled there"
       else log "HOTFIX ${hsha:0:9}: its reviewer was superseded; covered by the batched re-check of ${hcov%% *} (run ${hcov#* }) — handled there"; touch "$STATE/sent/$hsha.hotfix-complete"; fi
     fi
     continue
   fi
-  hbase=$(recheck_base "$hrun" "$hsha")
-  # Judge this main re-check run itself (not a pre-landing dev run of the same sha).
-  hjobs=$(gh api "repos/$REPO/actions/runs/$hrun/jobs" 2>/dev/null || echo '{}')
+  hbase=$(recheck_base "$hrun" "$hsha" "$hjobs")
   # Same bar as review-passed.sh / autodeploy: the whole run succeeded (status job included) …
   if [ "$(gh api "repos/$REPO/actions/runs/$hrun" -q .conclusion 2>/dev/null)" = success ] \
      && [ "$(jq '[.jobs[]? | select((.name | sub("^.* / "; "")) == "tests" and .conclusion == "success")] | length' <<<"$hjobs")" -gt 0 ] \
      && [ "$(jq '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review" and .conclusion == "success") | .steps[] | select((.name | startswith("Review (blocking")) and .conclusion == "success")] | length' <<<"$hjobs")" -gt 0 ]; then
     if [ -n "${DRY:-}" ]; then echo "DRY HOTFIX ${hsha:0:9} on main: review passed"
-    else log "HOTFIX ${hsha:0:9} on main: review passed (the controller deploys it)"; preexisting_record "$hsha" "$hrun"; touch "$STATE/sent/$hsha.hotfix-complete"; fi
+    else log "HOTFIX ${hsha:0:9} on main: review passed (the controller deploys it)"; preexisting_record "$hsha" "$hrun" "$hjobs"; touch "$STATE/sent/$hsha.hotfix-complete"; fi
   else
-    hf=$(findings "$hrun")
-    preexisting_record "$hsha" "$hrun"
+    hf=$(findings "$hrun" "$hjobs")
+    preexisting_record "$hsha" "$hrun" "$hjobs"
     main_blocked "$hsha" "$hf" "$hbase" "$hrun"
   fi
 done

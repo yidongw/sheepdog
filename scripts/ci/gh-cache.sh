@@ -1,25 +1,30 @@
 #!/usr/bin/env bash
-# gh-cache.sh — fewer GitHub API calls per dispatcher run, without ever answering from an older dispatcher run (sourced
-# by review-dispatch.sh; 11-13: eight dispatchers on one token spent ~6000 calls/h against GitHub's 5000/h).
+# gh-cache.sh — fewer GitHub API calls per dispatcher run, never for approval evidence (sourced by review-dispatch.sh;
+# 11-13: eight dispatchers on one token spent ~6000 calls/h against GitHub's 5000/h).
 #
-#   ghc_init <state dir>   → turns it on for this process and its children: defines gh() and git() (exported, so the
-#                            contract scripts the dispatcher runs — review-passed.sh, merge-branch.sh — use them too)
+#   ghc_init <state dir>   → turns it on for this dispatcher run: defines ghm() (this process only) and the write
+#                            wrappers gh() / git() (exported, so a write by a child script — merge-branch.sh — counts too)
 #   ghc_done               → removes this run's memo (the dispatcher's EXIT trap)
 #
-# Two rules, nothing else (reviews of baf73755e … 8e5891359: every cross-run answer about a run — listings, records,
-# workflow pages, jobs, artifacts — was a way to serve the previous attempt of a re-run as approval evidence):
-#   1. Per-run memo. GHC_RUN_DIR is a private directory created by ghc_init and removed at exit. Within ONE dispatcher
-#      run, identical read requests are answered once: `gh run list …` (keyed by all its arguments except -q) and
-#      `gh api <path> [-q <jq>]` for the JSON Actions endpoints (repos/<o>/<r>/actions/runs…, …/actions/workflows/…,
-#      keyed by the path; -q is applied locally, as gh prints it). Every answer is GitHub's answer from this run; the next
-#      dispatcher run asks again, so a re-run is always seen. Any write — `gh run rerun/cancel/delete`, `gh workflow run`,
-#      `gh api` with flags (-X, -f, …), any other gh command, `git push` — wipes the memo before and after it.
-#   2. Completed jobs' logs on disk across runs ($STATE/ghcache/logs/<job id>). A re-run creates new job ids, so the log
-#      of a job id that has completed never changes. A log is stored only when a jobs answer of THIS run showed that job
-#      completed more than two minutes ago. Stored and returned byte for byte (files and redirection only).
-# Everything else — artifacts' zips, run log zips, any other endpoint — is the real gh, its output untouched. Without
-# GHC_RUN_DIR (a script run outside a dispatcher run) gh() is the real gh. A request the memo cannot store is answered by
-# the real gh. Stored logs older than GHC_KEEP_DAYS (2) and abandoned run directories (> 60 min) are removed at ghc_init.
+# THE SPLIT (reviews of baf73755e … d95e275d3: every cached answer about a run — across runs, then within one run —
+# was a way to serve the previous attempt of a re-run as approval evidence):
+#   · `gh` is ALWAYS the real gh for reads. Everything that decides pass / land / deploy / complete reads through it:
+#     review-passed.sh, merge-branch.sh, review-coverage.sh (review_verdict, review_attestation, …), review-runs.sh, and
+#     the dispatcher's own landing / train / devfix / hotfix-complete / verdict checks. ghm is not exported: a child
+#     script cannot reach the memo at all (test/ci/gh-cache-memo.sh enforces both).
+#   · `ghm` — the per-run memo — only for informational / routing reads in review-dispatch.sh: which runs exist and
+#     what is pending (review_list, all_runs_list, the dev CI listing) and notification text (findings, notes,
+#     pre-existing findings). Stale by a few seconds at worst, which can delay an action by one dispatcher run, never
+#     approve one: every approval re-reads GitHub. Identical reads within ONE dispatcher run are asked once (gh run
+#     list keyed by its arguments except -q; gh api on the JSON Actions runs/workflows endpoints keyed by the path, -q
+#     applied locally as gh prints it). Any write — gh run rerun/cancel/delete, gh workflow run, gh api with flags,
+#     any other gh command, git push — wipes it. The next dispatcher run asks again.
+#   · Across runs only the log of a completed job, by job id, read through ghm ($STATE/ghcache/logs/<id>; a re-run makes
+#     new job ids, so a completed job's log never changes): stored when a ghm jobs answer of the same run showed the job
+#     completed more than two minutes ago; files and redirection only, byte for byte.
+# Binary downloads (artifact zips, run log zips) and other endpoints pass through ghm untouched. Without GHC_RUN_DIR
+# ghm is the real gh. A request the memo cannot store is answered by the real gh. Stored logs older than GHC_KEEP_DAYS
+# (2) and abandoned run directories (> 60 min) are removed at ghc_init.
 
 ghc_init() { # ghc_init <state dir>
   GHC_DIR=$1/ghcache
@@ -29,16 +34,16 @@ ghc_init() { # ghc_init <state dir>
   find "$GHC_DIR/logs" -type f -mtime +"${GHC_KEEP_DAYS:-2}" -delete 2>/dev/null || true
   GHC_RUN_DIR=$(mktemp -d "$GHC_DIR/run.XXXXXX") || return 1
   export GHC_DIR GHC_RUN_DIR
-  export -f gh git ghc_on ghc_wipe ghc_key ghc_out ghc_fetch ghc_api
+  export -f gh git ghc_wipe ghc_on   # the write wrappers only: ghm and its helpers stay in this process
 }
-ghc_done() { [ -n "${GHC_RUN_DIR:-}" ] && rm -rf "$GHC_RUN_DIR"; return 0; }
+ghc_done() { [ -n "${GHC_RUN_DIR:-}" ] && command rm -rf "$GHC_RUN_DIR" "$GHC_RUN_DIR.disabled"; return 0; }
 
+# a wipe that cannot delete the memo disables it for the rest of the run (a sibling marker: seen by subshells and
+# children too); when even the marker cannot be written the write itself is not made (review of 43c8601d9 #2, dc21c1e68)
 ghc_on() { [ -n "${GHC_RUN_DIR:-}" ] && [ -d "$GHC_RUN_DIR" ] && [ ! -e "$GHC_RUN_DIR.disabled" ]; }
 ghc_wipe() {
   [ -n "${GHC_RUN_DIR:-}" ] || return 0
-  if ! rm -f "$GHC_RUN_DIR"/m.*; then
-    # A sibling marker survives command substitutions and exported child shells.
-    # Stop the mutation if even disabling this memo cannot be recorded.
+  if ! rm -f "$GHC_RUN_DIR"/m.* 2>/dev/null; then
     printf 'gh-cache: invalidation failed; disabling memo reuse\n' >&2
     : > "$GHC_RUN_DIR.disabled" || return 1
   fi
@@ -64,8 +69,19 @@ git() {
   command git "$@"
 }
 
-gh() {
-  ghc_on || { command gh "$@"; return; }
+gh() { # the real gh; a write wipes the memo
+  case "${1:-} ${2:-}" in
+    "run list"|"run view"|"run watch") command gh "$@" ;;
+    "api "*) local x; for x in "${@:2}"; do
+               case "$x" in -q|--jq) ;; -*) local rc=0; ghc_wipe || return 1; command gh "$@" || rc=$?; ghc_wipe || return 1; return "$rc" ;; esac
+             done
+             command gh "$@" ;;
+    *) local rc=0; ghc_wipe || return 1; command gh "$@" || rc=$?; ghc_wipe || return 1; return "$rc" ;;   # anything else may write
+  esac
+}
+
+ghm() { # the per-run memo: informational / routing reads of review-dispatch.sh only (see the header)
+  ghc_on || { gh "$@"; return; }
   case "${1:-} ${2:-}" in
     "run list")
       local -a a=(); local q="" f rc=0
@@ -81,9 +97,17 @@ gh() {
       fi
       ghc_out "$f" "$q" ;;
     "api "*) shift; ghc_api "$@" ;;
-    "run view"|"run watch") command gh "$@" ;;   # reads; not memoised
-    *) local rc=0; ghc_wipe || return 1; command gh "$@" || rc=$?; ghc_wipe || return 1; return "$rc" ;;   # anything else may write
+    *) gh "$@" ;;
   esac
+}
+
+ghc_note_jobs() { # ghc_note_jobs < <jobs answer> — the jobs it shows completed (more than 2 min ago) have final logs:
+  # ghm may keep those logs across runs (a jobs answer the dispatcher read itself, through ghm or the real gh)
+  ghc_on || { cat > /dev/null; return 0; }
+  jq -r '.jobs[]? | select(.status == "completed" and (.completed_at // "") != ""
+           and ((.completed_at | sub("\\.[0-9]+"; "") | fromdateiso8601) < now - 120)) | .id' 2>/dev/null \
+    | while read -r id; do : > "$GHC_RUN_DIR/done.$id"; done 2>/dev/null || true
+  return 0
 }
 
 ghc_api() {
@@ -92,7 +116,7 @@ ghc_api() {
   while [ $# -gt 0 ]; do
     case "$1" in
       -q|--jq) q=$2; shift 2 ;;
-      -*) ghc_wipe || return 1; command gh api "${orig[@]}" || rc=$?; ghc_wipe || return 1; return "$rc" ;;   # -X, -f, -F, --input, …: may write
+      -*) gh api "${orig[@]}"; return ;;   # -X, -f, -F, --input, …: may write (gh wipes)
       *) [ -z "$p" ] || { command gh api "${orig[@]}"; return; }; p=$1; shift ;;
     esac
   done
@@ -120,12 +144,7 @@ ghc_api() {
       ghc_fetch "$f" api "$p" || rc=$?
       [ "$rc" != 1 ] || return 1
       [ "$rc" != 2 ] || { command gh api "${orig[@]}"; return; }
-      # a jobs answer: the jobs it shows completed (more than 2 min ago) have final logs
-      if [[ "$p" =~ /actions/runs/[0-9]+/jobs ]]; then
-        jq -r '.jobs[]? | select(.status == "completed" and (.completed_at // "") != ""
-                 and ((.completed_at | sub("\\.[0-9]+"; "") | fromdateiso8601) < now - 120)) | .id' "$f" 2>/dev/null \
-          | while read -r id; do : > "$GHC_RUN_DIR/done.$id"; done 2>/dev/null || true
-      fi
+      if [[ "$p" =~ /actions/runs/[0-9]+/jobs ]]; then ghc_note_jobs < "$f"; fi
     fi
     ghc_out "$f" "$q"; return
   fi

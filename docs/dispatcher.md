@@ -25,23 +25,32 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
 ## GitHub API budget
 
 All of a host's dispatchers usually share one token (5000 REST calls/hour). `scripts/ci/gh-cache.sh` (sourced by the
-dispatcher, and inherited by the contract scripts it runs) follows two rules and nothing else:
+dispatcher) splits the reads in two:
 
-1. **Per-run memo.** Each dispatcher run gets a private directory (`GHC_RUN_DIR`, removed at exit). Within that one run,
-   identical reads are asked once: `gh run list …` and `gh api` on the JSON Actions endpoints (runs, run records, jobs,
-   artifacts lists, workflow run pages). Every write — `gh run rerun/cancel/delete`, `gh workflow run`, `gh api -X …`,
-   any other `gh` command, `git push` — wipes the memo. The next dispatcher run asks GitHub again, so a re-run is always
-   seen: nothing that can change (listings, records, pages, jobs, artifacts) outlives the run that read it.
-2. **Completed jobs' logs** are kept on disk across runs, by job id (`$STATE/ghcache/logs/<job id>`): a re-run creates
-   new job ids, so a completed job's log never changes. Kept only once a jobs answer of the same run showed the job
-   completed more than two minutes ago; stored and returned byte for byte.
+- **Approval evidence is never cached.** `gh` is always the real `gh` for reads. Everything that decides pass / land /
+  deploy / complete reads through it, in the dispatcher's own process and in the contract scripts it runs:
+  `review-passed.sh`, `merge-branch.sh`, `review-coverage.sh` (`review_verdict`, `review_attestation`, …),
+  `review-runs.sh`, and the dispatcher's landing / train / devfix-tests / hotfix-complete / verdict checks
+  (`run_verdict`, `review_jobs` → `recheck_reviewed`, the re-check's run record). One such jobs answer is read once
+  per decision and handed to the helpers that need it, instead of being memoised.
+- **`ghm`, the per-run memo, only for routing and notification reads** of `review-dispatch.sh`: which runs exist and
+  what is pending (`review_list`, `all_runs_list`, the dev CI listing) and the text of findings / notes / pre-existing
+  findings, plus the range a re-check reviewed (`recheck_base`, attribution). Each dispatcher run gets a private
+  directory (`GHC_RUN_DIR`, removed at exit); identical `ghm` reads within that run are asked once. Every write —
+  `gh run rerun/cancel/delete`, `gh workflow run`, `gh api -X …`, any other `gh` command, `git push` (wrappers exported
+  to child scripts) — wipes it. Stale by seconds at worst, which can delay an action by one dispatcher run, never
+  approve one. `ghm` is not exported: a child script cannot reach the memo.
+- **Completed jobs' logs** are kept across runs by job id (`$STATE/ghcache/logs/<job id>`; a re-run creates new job
+  ids, so a completed job's log never changes), read through `ghm`: stored once a jobs answer of the same run showed
+  the job completed more than two minutes ago, byte for byte. Nothing else outlives the dispatcher run.
 
-Binary downloads (artifact zips, run log zips) and every other endpoint pass through untouched. A script run outside a
-dispatcher run (no `GHC_RUN_DIR`) calls GitHub directly. To make identical reads, the dispatcher's own listings use one
-request per filter set (`review_list`: 100 runs with every field its callers read; `all_runs_list`).
-`test/ci/gh-cache-memo.sh` tests the rules (including the re-run reproductions of the reviews of 8e5891359 and
-earlier); `test/ci/review-dispatch-api-budget.sh` runs the whole dispatcher against a counting fake `gh`: 15 calls cold,
-5 on the next run of the same state (16 / 4 with the earlier cross-run cache, 32 / 14 before any).
+Binary downloads (artifact zips, run log zips) and other endpoints pass through untouched. To make identical reads,
+the dispatcher's listings use one request per filter set (`review_list`: 100 runs with every field its callers read;
+`all_runs_list`). `test/ci/gh-cache-memo.sh` tests the rules — including the reviewers' re-run fixtures (run record,
+workflow page, listing, failed write) within one dispatcher run and across runs, through `review_verdict` and
+`review-passed.sh` as a dispatcher child — and enforces the split (only the routing readers above use `ghm`; no
+approval script mentions it). `test/ci/review-dispatch-api-budget.sh` runs the whole dispatcher against a counting fake
+`gh`: 18 calls cold, 5 on the next run of the same state.
 
 ## Settings
 

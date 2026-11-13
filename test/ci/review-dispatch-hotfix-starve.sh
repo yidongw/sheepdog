@@ -4,6 +4,7 @@
 # run; a run-less commit leaves the set once a completed main review covered it; an H about to leave the 7-day window is
 # escalated (supervisor, once) instead of vanishing.
 set -euo pipefail
+ghm() { gh "$@"; }; ghc_note_jobs() { cat > /dev/null; }   # gh-cache.sh (the per-run memo of review-dispatch.sh): here the fake gh itself
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 command_not_found_handle() { echo "FAIL: command not found: $1 (a helper the test did not extract or stub)" >&2; kill -TERM $$ 2>/dev/null; exit 127; }
 cd "$(dirname "$0")/../.."

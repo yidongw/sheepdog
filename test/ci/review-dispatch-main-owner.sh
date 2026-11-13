@@ -6,6 +6,7 @@
 # (1 → STRONG_FIXER_EFFORT, ≥ 2 → STRONG_FIXER_EFFORT_ESCALATED). No round budget on main. Fixer repairs name their
 # findings (Fixes-Finding:) and ride the owner's next notice (digest). Steer goes through the T3 MCP tool, with a fallback.
 set -euo pipefail
+ghm() { gh "$@"; }; ghc_note_jobs() { cat > /dev/null; }   # gh-cache.sh (the per-run memo of review-dispatch.sh): here the fake gh itself
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 command_not_found_handle() { echo "FAIL: command not found: $1 (a helper the test did not extract or stub)" >&2; kill -TERM $$ 2>/dev/null; exit 127; }
 cd "$(dirname "$0")/../.."

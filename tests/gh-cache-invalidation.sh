@@ -16,13 +16,13 @@ chmod +x "$t/bin/gh"
 export PATH="$t/bin:$PATH" BACKEND_STATE="$t/state"
 echo pass > "$BACKEND_STATE"
 ghc_init "$t"
-test "$(gh run list)" = pass
+test "$(ghm run list)" = pass
 # Deterministic deletion failure, including when the test runs as root.
 rm() { return 1; }
 export -f rm
 gh run rerun 1 2>"$t/error"
 test -s "$t/error"
-test "$(gh run list)" = failure
+test "$(ghm run list)" = failure
 # The parent must also observe disabling performed in a subshell.
 test -e "$GHC_RUN_DIR.disabled"
 echo 'invalidation failure regression: PASS'

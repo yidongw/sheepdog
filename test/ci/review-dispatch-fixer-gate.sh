@@ -3,6 +3,7 @@
 # live, keeps the once-per-sha+key receipt unconsumed, prefers main-side fixes, releases ended/stale holders
 # and drops queued requests nobody makes any more.
 set -euo pipefail
+ghm() { gh "$@"; }; ghc_note_jobs() { cat > /dev/null; }   # gh-cache.sh (the per-run memo of review-dispatch.sh): here the fake gh itself
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 # Any command that is not found — a dispatcher helper the test did not extract — fails the whole test at once, even
 # inside an if / || condition (review of 02828988f #7: "culprits_repaired: command not found" printed, test exited 0).

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Cutover migration must never turn an uncertain activation boundary into permanent exclusion of a blocked fix.
 set -euo pipefail
+ghm() { gh "$@"; }; ghc_note_jobs() { cat > /dev/null; }   # gh-cache.sh (the per-run memo of review-dispatch.sh): here the fake gh itself
 source "$(dirname "$0")/lib/no-real-t3.sh"
 cd "$(dirname "$0")/../.."
 D=scripts/ci/review-dispatch.sh

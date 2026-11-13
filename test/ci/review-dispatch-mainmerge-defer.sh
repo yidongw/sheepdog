@@ -2,6 +2,7 @@
 # MAIN→dev merges wait while the dev head's review is running (supervisor 11-12: every main hotfix made a new dev head and
 # cancelled the running dev review; dev went 3 h without a finished round). At most MAINMERGE_DEFER_MAX_SEC.
 set -euo pipefail
+ghm() { gh "$@"; }; ghc_note_jobs() { cat > /dev/null; }   # gh-cache.sh (the per-run memo of review-dispatch.sh): here the fake gh itself
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 # Any command that is not found — a dispatcher helper the test did not extract — fails the whole test at once, even
 # inside an if / || condition (review of 02828988f #7: "culprits_repaired: command not found" printed, test exited 0).

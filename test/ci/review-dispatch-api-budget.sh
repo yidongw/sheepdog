@@ -5,8 +5,10 @@
 # a newer head under review; a devfix branch) against a fake `gh` that answers from fixture files and counts every
 # invocation. T3 and the wake relay are stubs (nothing real is reached).
 #   · run 1 (cold) and run 2 (a minute later, same state) stay within their call budgets (gh-cache.sh: a per-run memo of
-#     identical reads, completed jobs' logs kept by job id; 16 / 4 with the earlier cross-run cache, 32 / 14 before it);
-#   · within a run no read is asked twice; run 2 fetches no completed job's log again and lists each filter set once;
+#     the dispatcher's routing reads, completed jobs' logs kept by job id; approval evidence is always read from GitHub —
+#     18 / 5; 16 / 4 with the earlier cross-run cache that also served approvals, 32 / 14 before any);
+#   · within a run the dispatcher asks none of its own reads twice (review-passed.sh / merge-branch.sh always read
+#     GitHub themselves); run 2 fetches no completed job's log again and lists each filter set once;
 #   · the answers are the same as without the memo: the blocked re-check's findings reach the same notices;
 #   · nothing about a run is kept: run 3 asks the re-check's jobs again; only job logs are left on disk;
 #   · the listing asks only for fields the host's gh (2.45) knows (11-13: `attempt` made every listing fail).
@@ -19,6 +21,8 @@ FX=$T/fx; mkdir -p "$FX" "$T/bin"; export FX
 cat > "$T/bin/gh" <<'SH'
 #!/usr/bin/env bash
 echo "$*" >> "$FX/calls"
+# who asked: the approval scripts (review-passed.sh, merge-branch.sh) always read GitHub themselves, never the memo
+case "$(ps -o args= -p "$PPID" 2>/dev/null)" in *review-passed.sh*|*merge-branch.sh*) echo "$*" >> "$FX/approval-calls" ;; esac
 exec python3 "$FX/../bin/fakegh.py" "$@"
 SH
 cat > "$T/bin/fakegh.py" <<'PY'
@@ -147,8 +151,8 @@ for f in "$FX"/log-*.txt; do sed -i 's/^/2026-11-13T00:00:00.0000000Z /' "$f"; d
 export PATH="$T/bin:$PATH" REPO=o/r SRC=$T/src STATE=$T/state GH_TOKEN=x T3_PROJECT=mcp:p SUPERVISOR_THREAD=mcp:22222222-2222-2222-2222-222222222222 \
        DISPATCH_THREAD=mcp:33333333-3333-3333-3333-333333333333 T3_MCP_FAKE=$T/bin/t3mcp WAKE_URL=http://127.0.0.1:9 MAIN_BRANCH=main
 mkdir -p "$STATE"
-dispatch() { : > "$FX/calls"; bash "$ROOT/scripts/ci/review-dispatch.sh" > "$T/out.$1" 2>&1 || { cat "$T/out.$1" >&2; fail "dispatcher run $1 exited non-zero"; }
-  cp "$FX/calls" "$T/calls.$1"; }
+dispatch() { : > "$FX/calls"; : > "$FX/approval-calls"; bash "$ROOT/scripts/ci/review-dispatch.sh" > "$T/out.$1" 2>&1 || { cat "$T/out.$1" >&2; fail "dispatcher run $1 exited non-zero"; }
+  cp "$FX/calls" "$T/calls.$1"; cp "$FX/approval-calls" "$T/approval.$1"; }
 count() { wc -l < "$T/calls.$1"; }
 dispatch 1
 dispatch 2
@@ -157,16 +161,18 @@ echo "gh invocations: run 1 $(count 1), run 2 $(count 2)"
 lists=$(grep -c '^run list' "$T/calls.2" || true)
 [ "$lists" -le 3 ] || fail "run 2 listed runs $lists times (one listing per filter set: review, CI dev, all)"
 if grep -E "^api repos/o/r/actions/jobs/(${RH1}2|${RH2}2)/logs" "$T/calls.2"; then fail "run 2 fetched a completed job's log again"; fi
-# within one run every identical read is one call (the per-run memo; writes in between wipe it)
+# within one run the dispatcher's own reads are asked once (the memo for routing reads; each approval jobs answer read
+# once and reused) — the approval scripts' reads are not deduplicated: they always ask GitHub
 for c in 1 2; do
-  d=$(grep -E '^api ' "$T/calls.$c" | grep -vE '/zip$' | sort | uniq -d)
+  d=$(grep -E '^api ' "$T/calls.$c" | grep -vxFf "$T/approval.$c" | sort | uniq -d)
   [ -z "$d" ] || fail "run $c asked the same API read twice: $d"
 done
+grep -q 'artifacts' "$T/approval.1" || fail "fixture: review-passed.sh made no reads in run 1"
 # a re-run between two dispatcher runs is read again: the blocked re-check's jobs are asked in run 3 (nothing is kept)
 dispatch 3
 grep -q "^api repos/o/r/actions/runs/$RH2/jobs" "$T/calls.3" || fail "run 3 did not ask the re-check's jobs again: $(cat "$T/calls.3")"
 find "$STATE/ghcache" -type f | grep -v '/ghcache/logs/' && fail "the dispatcher left something other than job logs in its cache"
-[ "$(count 1)" -le "${API_BUDGET_COLD:-15}" ] || fail "run 1: $(count 1) gh calls (budget ${API_BUDGET_COLD:-15})"
+[ "$(count 1)" -le "${API_BUDGET_COLD:-18}" ] || fail "run 1: $(count 1) gh calls (budget ${API_BUDGET_COLD:-18})"
 [ "$(count 2)" -le "${API_BUDGET_WARM:-5}" ] || fail "run 2: $(count 2) gh calls (budget ${API_BUDGET_WARM:-5})"
 grep -q "MAIN ${H2:0:9}: finding(s) 1 → owner" "$STATE/dispatch.log" || fail "the blocked re-check's finding was not read: $(cat "$STATE/dispatch.log")"
-echo "dispatcher API budget: run 1 $(count 1) calls, run 2 $(count 2) calls (budgets ${API_BUDGET_COLD:-15} / ${API_BUDGET_WARM:-5})"
+echo "dispatcher API budget: run 1 $(count 1) calls, run 2 $(count 2) calls (budgets ${API_BUDGET_COLD:-18} / ${API_BUDGET_WARM:-5})"

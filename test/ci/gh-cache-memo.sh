@@ -6,10 +6,12 @@
 #   · nothing about a run outlives the dispatcher run: a re-run between two runs is always seen;
 #   · a completed job's log is kept across runs by job id, byte for byte (NUL / binary bytes included), and only when a
 #     jobs answer of the run showed the job completed; binary downloads pass through untouched and are never kept;
-#   · the approval consumers (review_verdict, review_attested, review-passed.sh) see the current attempt of a re-run,
-#     whichever source revealed the re-run first — the reviewer's reproductions of dev b5de20258 (run 43487250364) and
-#     c4ca24b30 (run 43490068206): run record, workflow page, another filter's listing, a failing listing (the
-#     compatibility fallback), a listing whose write fails — and of the earlier rounds;
+#   · approval evidence is never memoised (review of dev 4c4fc9d04, run 43495888972): gh is always the real gh; only
+#     review-dispatch.sh's routing / notification readers use ghm (the memo), ghm is not exported, and no approval
+#     script mentions it (enforced below). The reviewer's fixtures run WITHIN ONE dispatcher run with the memo holding
+#     the passed attempt 1: a failed re-run revealed by the run record, a workflow page, a listing or a listing whose
+#     write fails → review_verdict says blocked and review-passed.sh (as a dispatcher child) rejects it; likewise
+#     across runs (reviews of b5de20258, c4ca24b30, c6dfe26bb);
 #   · without a dispatcher run (no GHC_RUN_DIR) gh is the real gh, every call; an unwritable memo still answers.
 set -euo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"
@@ -97,25 +99,28 @@ JOBS=repos/o/r/actions/runs/7/jobs
 source "$ROOT/scripts/ci/gh-cache.sh"
 setrun completed success 2026-11-13T00:10:00Z 1
 ghc_init "$STATE"; : > "$FX/calls"
-gh "${LIST[@]}" >/dev/null; [ "$(gh "${LIST[@]}" -q '.[0].conclusion')" = success ] || fail "listing -q"
-gh api "$JOBS" >/dev/null; [ "$(gh api "$JOBS" -q '.jobs[1].conclusion')" = success ] || fail "jobs -q"
-gh api repos/o/r/actions/runs/7 >/dev/null; gh api repos/o/r/actions/runs/7 -q .status >/dev/null
-gh api "repos/o/r/actions/workflows/review.yml/runs?event=workflow_run&branch=main&per_page=100&page=1" >/dev/null
-gh api "repos/o/r/actions/workflows/review.yml/runs?event=workflow_run&branch=main&per_page=100&page=1" >/dev/null
+ghm "${LIST[@]}" >/dev/null; [ "$(ghm "${LIST[@]}" -q '.[0].conclusion')" = success ] || fail "listing -q"
+ghm api "$JOBS" >/dev/null; [ "$(ghm api "$JOBS" -q '.jobs[1].conclusion')" = success ] || fail "jobs -q"
+ghm api repos/o/r/actions/runs/7 >/dev/null; ghm api repos/o/r/actions/runs/7 -q .status >/dev/null
+ghm api "repos/o/r/actions/workflows/review.yml/runs?event=workflow_run&branch=main&per_page=100&page=1" >/dev/null
+ghm api "repos/o/r/actions/workflows/review.yml/runs?event=workflow_run&branch=main&per_page=100&page=1" >/dev/null
 [ "$(wc -l < "$FX/calls")" = 4 ] || fail "identical reads within one run were asked again: $(cat "$FX/calls")"
-[ "$(gh "${LIST[@]}" -q '.[0] | {status, conclusion}')" = '{"conclusion":"success","status":"completed"}' ] || fail "-q output differs from gh's (compact, sorted)"
-echo "ok - identical reads within one dispatcher run: one call each"
+# gh — what every approval reads through — is the real gh, every call, inside a dispatcher run too
+: > "$FX/calls"; gh api "$JOBS" >/dev/null; gh api "$JOBS" >/dev/null; gh "${LIST[@]}" >/dev/null; gh "${LIST[@]}" >/dev/null
+[ "$(wc -l < "$FX/calls")" = 4 ] || fail "gh answered from the memo: $(cat "$FX/calls")"
+[ "$(ghm "${LIST[@]}" -q '.[0] | {status, conclusion}')" = '{"conclusion":"success","status":"completed"}' ] || fail "-q output differs from gh's (compact, sorted)"
+echo "ok - ghm: identical reads within one dispatcher run, one call each; gh: always the real call"
 
 # ── every write wipes the memo ──
 for w in "gh run rerun 7 -R o/r" "gh run cancel 7 -R o/r" "gh run delete 7 -R o/r" "gh workflow run review.yml -R o/r" \
          "gh api -X POST repos/o/r/actions/runs/7/rerun" "gh pr create" "git push"; do
-  gh api "$JOBS" >/dev/null; : > "$FX/calls"
+  ghm api "$JOBS" >/dev/null; : > "$FX/calls"
   if [ "$w" = "git push" ]; then
     git init -q --bare "$T/r.git" 2>/dev/null || true; git init -q "$T/w" 2>/dev/null || true
     git -C "$T/w" -c user.name=t -c user.email=t@t commit -q --allow-empty -m x
     git -C "$T/w" push -q "$T/r.git" HEAD:refs/heads/main
   else $w >/dev/null 2>&1 || true; fi
-  gh api "$JOBS" >/dev/null
+  ghm api "$JOBS" >/dev/null
   [ "$(calls "actions/runs/7/jobs$")" = 1 ] || fail "after '$w' the memo answered: $(cat "$FX/calls")"
 done
 echo "ok - rerun / cancel / delete / workflow run / gh api -X / other gh commands / git push wipe the memo"
@@ -124,97 +129,131 @@ echo "ok - rerun / cancel / delete / workflow run / gh api -X / other gh command
 ghc_done; [ ! -d "$GHC_RUN_DIR" ] || fail "the memo directory outlived the run"
 setrun completed failure 2026-11-13T00:20:00Z 2   # re-run between the two dispatcher runs: failed
 ghc_init "$STATE"; : > "$FX/calls"
-[ "$(gh api "$JOBS" -q '.jobs[1].conclusion')" = failure ] || fail "the next dispatcher run got the previous attempt's jobs"
-[ "$(gh "${LIST[@]}" -q '.[0].conclusion')" = failure ] || fail "the next dispatcher run got the previous listing"
+[ "$(ghm api "$JOBS" -q '.jobs[1].conclusion')" = failure ] || fail "the next dispatcher run got the previous attempt's jobs"
+[ "$(ghm "${LIST[@]}" -q '.[0].conclusion')" = failure ] || fail "the next dispatcher run got the previous listing"
 find "$STATE/ghcache" -path "$GHC_RUN_DIR" -prune -o -type f -print | grep -v '/logs/' && fail "something other than job logs is stored across runs"
 echo "ok - the next dispatcher run asks again (a re-run between runs is always seen); only job logs are stored"
 
 # ── completed jobs' logs: by job id, byte for byte; only once a jobs answer showed the job completed ──
 ghc_done; ghc_init "$STATE"; setrun completed failure 2026-11-13T00:25:00Z 4
 printf 'ok\000NUL\377\376 bytes\r\nreview-gate: BLOCKED #1 x\n\000' > "$FX/log-42"
-: > "$FX/calls"; gh api repos/o/r/actions/jobs/42/logs > "$T/l0"
+: > "$FX/calls"; ghm api repos/o/r/actions/jobs/42/logs > "$T/l0"
 [ -e "$STATE/ghcache/logs/42" ] && fail "a log was stored though no jobs answer of this run showed the job completed"
-gh api "$JOBS" >/dev/null   # shows job 42 completed (2026-11-13: long ago)
-gh api repos/o/r/actions/jobs/42/logs > "$T/l1"
+ghm api "$JOBS" >/dev/null   # shows job 42 completed (2026-11-13: long ago)
+ghm api repos/o/r/actions/jobs/42/logs > "$T/l1"
 ghc_done; ghc_init "$STATE"; : > "$FX/calls"
-gh api repos/o/r/actions/jobs/42/logs > "$T/l2"
+ghm api repos/o/r/actions/jobs/42/logs > "$T/l2"
 [ ! -s "$FX/calls" ] || fail "a stored completed job's log was fetched again: $(cat "$FX/calls")"
 cmp -s "$FX/log-42" "$T/l0" && cmp -s "$FX/log-42" "$T/l1" && cmp -s "$FX/log-42" "$T/l2" || fail "a job log was altered (NUL / binary bytes)"
 cmp -s "$FX/log-42" "$STATE/ghcache/logs/42" || fail "the stored log differs from GitHub's"
 # a job that completed less than two minutes ago: its log may still be incomplete — not stored
 setrun in_progress null 2026-11-13T00:30:00Z 3; printf 'partial\n' > "$FX/log-32"
 jq --arg t "$(date -u +%FT%TZ)" '.status = "completed" | .conclusion = "success" | .done_at = $t' "$FX/run.json" > "$T/r" && mv "$T/r" "$FX/run.json"
-gh api "$JOBS" >/dev/null; gh api repos/o/r/actions/jobs/32/logs >/dev/null
+ghm api "$JOBS" >/dev/null; ghm api repos/o/r/actions/jobs/32/logs >/dev/null
 [ -e "$STATE/ghcache/logs/32" ] && fail "the log of a job completed seconds ago was stored"
 # binary downloads pass through byte for byte and are never kept
 : > "$FX/calls"
-gh api repos/o/r/actions/artifacts/3/zip > "$T/z1"; gh api repos/o/r/actions/artifacts/3/zip > "$T/z2"; gh api repos/o/r/actions/runs/7/logs > "$T/z3"
+ghm api repos/o/r/actions/artifacts/3/zip > "$T/z1"; ghm api repos/o/r/actions/artifacts/3/zip > "$T/z2"; ghm api repos/o/r/actions/runs/7/logs > "$T/z3"
 cmp -s "$FX/blob.bin" "$T/z1" && cmp -s "$FX/blob.bin" "$T/z2" && cmp -s "$FX/blob.bin" "$T/z3" || fail "a binary download was altered"
 [ "$(wc -l < "$FX/calls")" = 3 ] || fail "a binary download was answered from a memo: $(cat "$FX/calls")"
 echo "ok - completed job logs kept by job id, byte for byte; recent / unconfirmed logs and binary downloads never kept"
 
-# ── the approval consumers see the current attempt of a re-run (reviews of 8e5891359 #1-#3 and earlier) ──
-review_api() { gh api "repos/o/r/$1"; }
+# ── approval evidence is never memoised: the reviewer's fixtures WITHIN ONE dispatcher run (review of d95e275d3 /
+#    4c4fc9d04 #1; earlier: 8e5891359 #1-#3, c4ca24b30 #1-#2) ──
+review_api() { gh api "repos/o/r/$1"; }   # review-passed.sh's own definition: the approval consumers read through gh
 REVIEW_DEFAULT_BRANCH=main
 source "$ROOT/scripts/ci/review-runs.sh"
 source "$ROOT/scripts/ci/review-coverage.sh"
-for via in record page other-filter failing-listing failed-write none; do
+for via in record page listing failed-write none; do
   ghc_done; ghc_init "$STATE"
   setrun completed success 2026-11-13T00:10:00Z 1
-  # dispatcher run A: everything a consumer reads about attempt 1 (the successful one)
-  gh "${LIST[@]}" >/dev/null; gh run list -R o/r -L 60 --json databaseId,status >/dev/null
+  # the dispatcher's routing reads fill the memo with attempt 1 (listings, jobs, record, page); the consumers pass it
+  ghm "${LIST[@]}" >/dev/null; ghm run list -R o/r -L 60 --json databaseId,status >/dev/null; ghm api "$JOBS" >/dev/null
+  ghm api repos/o/r/actions/runs/7 >/dev/null; ghm api "repos/o/r/actions/workflows/review.yml/runs?event=workflow_run&branch=main&per_page=100&page=1" >/dev/null
   [ "$(review_verdict 7)" = pass ] || fail "($via) setup: attempt 1 passes"
   review_attested 7 || fail "($via) setup: attested"
-  ghc_done
-  # the re-run fails; dispatcher run B learns it first from <via>, then asks the consumers
+  # the re-run fails — in the SAME dispatcher run (no ghc_done); a fresh read reveals it first via <via>
   setrun completed failure 2026-11-13T00:20:00Z 2
-  ghc_init "$STATE"
   case "$via" in
     record) [ "$(gh api repos/o/r/actions/runs/7 -q .conclusion)" = failure ] || fail "record" ;;
     page) review_runs completed | jq -e 'select(.conclusion == "failure")' >/dev/null || fail "page" ;;
-    other-filter) [ "$(gh run list -R o/r -L 60 --json databaseId,conclusion -q '.[0].conclusion')" = failure ] || fail "other filter" ;;
-    failing-listing) touch "$FX/list-fails"; gh "${LIST[@]}" >/dev/null 2>&1 && fail "the failing listing was answered" ;;
-    failed-write) # another filter's listing shows the failed re-run but cannot be written (review of c4ca24b30)
-      chmod 500 "$GHC_RUN_DIR"
-      [ "$(gh run list -R o/r -L 60 --json databaseId,conclusion -q '.[0].conclusion')" = failure ] || fail "failed write: listing"
-      v=$(review_verdict 7) || v=none; chmod 700 "$GHC_RUN_DIR"
-      [ "$v" = blocked ] || fail "(failed-write) review_verdict with an unwritable memo: '$v'" ;;
+    listing) [ "$(gh run list -R o/r -L 60 --json databaseId,conclusion -q '.[0].conclusion')" = failure ] || fail "listing" ;;
+    failed-write) chmod 500 "$GHC_RUN_DIR"   # a listing of another filter that cannot be written
+      [ "$(ghm run list -R o/r -L 50 --json databaseId,conclusion -q '.[0].conclusion')" = failure ] || fail "failed write: listing" ;;
     none) ;;
   esac
+  : > "$FX/calls"
   v=$(review_verdict 7) || v=none
-  [ "$v" = blocked ] || fail "($via) review_verdict of the failed re-run: '$v' (the previous attempt's jobs were served)"
-  rm -f "$FX/list-fails"
-  # and the reverse order within the same dispatcher run is consistent too: the consumers asked again see attempt 2
-  [ "$(review_verdict 7)" = blocked ] || fail "($via) second consumer"
+  chmod 700 "$GHC_RUN_DIR"
+  [ "$v" = blocked ] || fail "($via) review_verdict in the same dispatcher run: '$v' (the memoised attempt-1 jobs were served)"
+  [ "$(calls "actions/runs/7/jobs$")" = 1 ] || fail "($via) review_verdict did not read the jobs from GitHub: $(cat "$FX/calls")"
+  # ghm itself still answers attempt 1 here (routing may lag one dispatcher run) — the consumers never read it
+  [ "$(ghm api "$JOBS" -q '.jobs[1].conclusion')" = success ] || fail "fixture: the memo holds attempt 1"
 done
-# an artifact that expired between two dispatcher runs is seen expired
-ghc_done; setrun completed success 2026-11-13T00:10:00Z 1; ghc_init "$STATE"; review_attested 7 || fail "attested"
-ghc_done; jq '.expired = true' "$FX/run.json" > "$T/r" && mv "$T/r" "$FX/run.json"; ghc_init "$STATE"
-if review_attested 7; then fail "an expired attestation still counted in the next dispatcher run"; fi
-echo "ok - review_verdict / review_attested see the current attempt after a re-run seen via record, page, another filter, a failing listing"
+# an artifact that expires during the run is seen expired by the consumer
+ghc_done; setrun completed success 2026-11-13T00:10:00Z 1; ghc_init "$STATE"; ghm api repos/o/r/actions/runs/7/artifacts >/dev/null
+review_attested 7 || fail "attested"
+jq '.expired = true' "$FX/run.json" > "$T/r" && mv "$T/r" "$FX/run.json"
+if review_attested 7; then fail "an expired attestation still counted (memoised artifacts list)"; fi
+echo "ok - review_verdict / review_attested read GitHub: a failed re-run in the same dispatcher run (record, page, listing, failed write) blocks"
 
-# review-passed.sh as the dispatcher runs it (a child: the exported memo); a passed attempt 1, then a failed re-run
+# review-passed.sh as the dispatcher runs it (a child, memo filled with the passed attempt 1, same dispatcher run)
 git init -q "$T/clone"; cd "$T/clone"
 SHA=$(git -c user.name=t -c user.email=t@t commit -q --allow-empty -m x && git rev-parse HEAD)
 jq --arg t "review $SHA" '.title = $t | .expired = false' "$FX/run.json" > "$T/r" && mv "$T/r" "$FX/run.json"
 jq -nc --arg h "$SHA" '{head: $h, base: $h, kind: "review"}' > "$T/review-attestation.json"; (cd "$T" && python3 -c "
 import zipfile; z = zipfile.ZipFile('$FX/blob.bin', 'w'); z.write('review-attestation.json'); z.close()")
-ghc_done; ghc_init "$STATE"
-REPO=o/r bash "$ROOT/scripts/ci/review-passed.sh" "$SHA" >/dev/null 2>&1 || fail "setup: review-passed.sh passes attempt 1"
-ghc_done; jq '.status = "completed" | .conclusion = "failure" | .attempt = 2' "$FX/run.json" > "$T/r" && mv "$T/r" "$FX/run.json"
-ghc_init "$STATE"
-gh api repos/o/r/actions/runs/7 >/dev/null   # the record shows the failed re-run first
-if REPO=o/r bash "$ROOT/scripts/ci/review-passed.sh" "$SHA" >/dev/null 2>&1; then fail "review-passed.sh approved the failed re-run"; fi
+for via in record page listing failed-write; do
+  ghc_done; ghc_init "$STATE"
+  jq '.status = "completed" | .conclusion = "success" | .attempt = 1' "$FX/run.json" > "$T/r" && mv "$T/r" "$FX/run.json"
+  ghm api "$JOBS" >/dev/null; ghm api repos/o/r/actions/runs/7/artifacts >/dev/null; ghm "${LIST[@]}" >/dev/null
+  REPO=o/r bash "$ROOT/scripts/ci/review-passed.sh" "$SHA" >/dev/null 2>&1 || fail "($via) setup: review-passed.sh passes attempt 1"
+  jq '.status = "completed" | .conclusion = "failure" | .attempt = 2' "$FX/run.json" > "$T/r" && mv "$T/r" "$FX/run.json"
+  case "$via" in
+    record) gh api repos/o/r/actions/runs/7 >/dev/null ;;
+    page) gh api "repos/o/r/actions/workflows/review.yml/runs?event=workflow_run&branch=main&per_page=100&page=1" >/dev/null ;;
+    listing) gh run list -R o/r -L 60 --json databaseId,conclusion >/dev/null ;;
+    failed-write) chmod 500 "$GHC_RUN_DIR"; ghm run list -R o/r -L 50 --json databaseId,conclusion >/dev/null ;;
+  esac
+  rc=0; REPO=o/r bash "$ROOT/scripts/ci/review-passed.sh" "$SHA" >/dev/null 2>&1 || rc=$?
+  chmod 700 "$GHC_RUN_DIR"
+  [ "$rc" != 0 ] || fail "($via) review-passed.sh (a dispatcher child) approved the failed re-run in the same dispatcher run"
+done
 cd "$ROOT"
-echo "ok - review-passed.sh (a child of the dispatcher run) rejects the failed re-run"
+echo "ok - review-passed.sh as a dispatcher child rejects a failed re-run seen in the same run (record, page, listing, failed write)"
+
+# ── the split, enforced: only the dispatcher's routing reads use ghm; no approval path can reach the memo ──
+( bash -c 'declare -F ghm ghc_api ghc_fetch >/dev/null' ) && fail "ghm is visible to child scripts (exported)"
+for f in "$ROOT"/scripts/ci/*.sh; do
+  case "$(basename "$f")" in gh-cache.sh|review-dispatch.sh|test-*) continue ;; esac
+  if grep -nE '\bghm\b|GHC_RUN_DIR|ghc_(api|fetch|out)' "$f"; then fail "$(basename "$f") reaches the memo (approval scripts read GitHub)"; fi
+done
+D=$ROOT/scripts/ci/review-dispatch.sh
+ALLOWED=" review_list all_runs_list dev_round_running findings notes_of recheck_base preexisting_record "
+bad=$(awk -v ok="$ALLOWED" '/^[a-z_]+\(\) \{/ { fn = $1; sub(/\(\)$/, "", fn) } /^[^ #]/ && !/^[a-z_]+\(\) \{/ && !/^ / { fn = "" }
+  /(^|[^a-z_])ghm / && !/^[[:space:]]*#/ { if (index(ok, " " fn " ") == 0) print NR ": " (fn == "" ? "(top level)" : fn) }' "$D")
+[ -z "$bad" ] || fail "ghm used outside the routing / notification readers of review-dispatch.sh: $bad"
+for fn in review-passed.sh merge-branch.sh run_verdict review_jobs; do
+  grep -qE "ghm .*$fn|$fn.*ghm " "$D" && fail "$fn is wired to the memo"
+done
+echo "ok - ghm only in review-dispatch.sh's routing readers ($ALLOWED); approval scripts never reach the memo"
+
+# ── a wipe that cannot delete the memo disables it for the run (review of 43c8601d9 #2) ──
+ghc_done; setrun completed success 2026-11-13T00:10:00Z 1; ghc_init "$STATE"
+ghm api "$JOBS" >/dev/null; setrun completed failure 2026-11-13T00:20:00Z 2
+( rm() { return 1; }; export -f rm; gh run rerun 7 -R o/r 2> "$T/wipe.err" ) || fail "a write failed though the memo could be disabled"
+grep -q 'invalidation failed' "$T/wipe.err" && [ -e "$GHC_RUN_DIR.disabled" ] || fail "a failed wipe was not recorded"
+[ "$(ghm api "$JOBS" -q '.jobs[1].conclusion')" = failure ] || fail "the memo answered after a failed wipe"
+ghc_done; [ ! -e "$GHC_RUN_DIR.disabled" ] || fail "the disabled marker outlived the run"
+echo "ok - a wipe that cannot delete the memo disables it for the rest of the run"
 
 # ── outside a dispatcher run: the real gh every time; an unwritable memo still answers ──
 ghc_done
-( unset GHC_RUN_DIR; : > "$FX/calls"; gh api "$JOBS" >/dev/null; gh api "$JOBS" >/dev/null
+( unset GHC_RUN_DIR; : > "$FX/calls"; ghm api "$JOBS" >/dev/null; ghm api "$JOBS" >/dev/null
   [ "$(calls "actions/runs/7/jobs$")" = 2 ] || fail "outside a dispatcher run the memo answered" ) || exit 1
 ghc_init "$STATE"; chmod 500 "$GHC_RUN_DIR" "$STATE/ghcache/logs"
-out=$(gh api "$JOBS" -q '.jobs | length') && [ "$out" = 2 ] || fail "an unwritable memo: no answer ('$out')"
-[ "$(gh "${LIST[@]}" -q 'length')" = 1 ] || fail "an unwritable memo: no listing"
-cmp -s "$FX/log-12" <(gh api repos/o/r/actions/jobs/12/logs) || fail "an unwritable store: the log"
+out=$(ghm api "$JOBS" -q '.jobs | length') && [ "$out" = 2 ] || fail "an unwritable memo: no answer ('$out')"
+[ "$(ghm "${LIST[@]}" -q 'length')" = 1 ] || fail "an unwritable memo: no listing"
+cmp -s "$FX/log-12" <(ghm api repos/o/r/actions/jobs/12/logs) || fail "an unwritable store: the log"
 chmod 700 "$GHC_RUN_DIR" "$STATE/ghcache/logs"; ghc_done
 echo "ok - no dispatcher run: uncached; unwritable memo / store: still the real answers"

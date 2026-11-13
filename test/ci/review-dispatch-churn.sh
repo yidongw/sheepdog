@@ -4,6 +4,7 @@
 # a fix whose Verify: says NOT RUN or names no fails-before test is reported; conflict tasks decide CLOSE first;
 # Review-Disputed: trailers and the previous findings reach the re-review prompt.
 set -euo pipefail
+ghm() { gh "$@"; }; ghc_note_jobs() { cat > /dev/null; }   # gh-cache.sh (the per-run memo of review-dispatch.sh): here the fake gh itself
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 # Any command that is not found — a dispatcher helper the test did not extract — fails the whole test at once, even
 # inside an if / || condition (review of 02828988f #7: "culprits_repaired: command not found" printed, test exited 0).
