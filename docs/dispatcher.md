@@ -26,10 +26,12 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
 All of a host's dispatchers usually share one token (5000 REST calls/hour). `scripts/ci/gh-cache.sh` (sourced by the
 dispatcher, and inherited by the contract scripts it runs) answers repeated reads within a run and the final records of
 completed runs from `$STATE/ghcache`: one `gh run list` per filter set per run (the same server-side filters, the union
-of the fields, at least 100 runs, 60 s), the jobs / artifacts / record of a run once a listing shows it completed (kept
-while the listing shows it completed with the same updatedAt; a re-run is read again), a completed job's log, an artifact's zip. Writes
-(`gh run cancel`, …) are never cached and drop the listings. `test/ci/review-dispatch-api-budget.sh` runs the whole
-dispatcher against a counting fake `gh`: 13 calls cold, 3 on the next run of the same state (32 / 14 before).
+of the fields, at least 100 runs, 60 s); a run's jobs on disk once the newest listing (or the run's record) shows it
+completed, used while it still shows the same updatedAt (a re-run is read again); a completed job's log; an artifact's
+zip — answered from disk only when this run's artifacts listing (always read fresh: artifacts expire) showed it
+unexpired. Writes (`gh run cancel`, …) are never cached and drop everything kept for the run.
+`test/ci/review-dispatch-api-budget.sh` runs the whole
+dispatcher against a counting fake `gh`: 13 calls cold, 4 on the next run of the same state (32 / 14 before).
 
 ## Settings
 
