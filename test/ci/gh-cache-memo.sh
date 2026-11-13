@@ -7,8 +7,9 @@
 #   · a completed job's log is kept across runs by job id, byte for byte (NUL / binary bytes included), and only when a
 #     jobs answer of the run showed the job completed; binary downloads pass through untouched and are never kept;
 #   · the approval consumers (review_verdict, review_attested, review-passed.sh) see the current attempt of a re-run,
-#     whichever source revealed the re-run first — the reviewer's reproductions of dev b5de20258 (run 43487250364:
-#     run record, workflow page, another filter's listing, a failing listing) and of the earlier rounds;
+#     whichever source revealed the re-run first — the reviewer's reproductions of dev b5de20258 (run 43487250364) and
+#     c4ca24b30 (run 43490068206): run record, workflow page, another filter's listing, a failing listing (the
+#     compatibility fallback), a listing whose write fails — and of the earlier rounds;
 #   · without a dispatcher run (no GHC_RUN_DIR) gh is the real gh, every call; an unwritable memo still answers.
 set -euo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"
@@ -157,7 +158,7 @@ review_api() { gh api "repos/o/r/$1"; }
 REVIEW_DEFAULT_BRANCH=main
 source "$ROOT/scripts/ci/review-runs.sh"
 source "$ROOT/scripts/ci/review-coverage.sh"
-for via in record page other-filter failing-listing none; do
+for via in record page other-filter failing-listing failed-write none; do
   ghc_done; ghc_init "$STATE"
   setrun completed success 2026-11-13T00:10:00Z 1
   # dispatcher run A: everything a consumer reads about attempt 1 (the successful one)
@@ -173,6 +174,11 @@ for via in record page other-filter failing-listing none; do
     page) review_runs completed | jq -e 'select(.conclusion == "failure")' >/dev/null || fail "page" ;;
     other-filter) [ "$(gh run list -R o/r -L 60 --json databaseId,conclusion -q '.[0].conclusion')" = failure ] || fail "other filter" ;;
     failing-listing) touch "$FX/list-fails"; gh "${LIST[@]}" >/dev/null 2>&1 && fail "the failing listing was answered" ;;
+    failed-write) # another filter's listing shows the failed re-run but cannot be written (review of c4ca24b30)
+      chmod 500 "$GHC_RUN_DIR"
+      [ "$(gh run list -R o/r -L 60 --json databaseId,conclusion -q '.[0].conclusion')" = failure ] || fail "failed write: listing"
+      v=$(review_verdict 7) || v=none; chmod 700 "$GHC_RUN_DIR"
+      [ "$v" = blocked ] || fail "(failed-write) review_verdict with an unwritable memo: '$v'" ;;
     none) ;;
   esac
   v=$(review_verdict 7) || v=none
