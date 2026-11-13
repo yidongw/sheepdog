@@ -94,7 +94,7 @@ ghc_run_list() {
        || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$a"; then
       command gh run list "${own[@]}"; return
     fi
-    { ghc_put "$key.n" <<<"$n" && ghc_put "$key" <<<"$a"; } || rm -f "$key" "$key.n" 2>/dev/null
+    { ghc_put "$key.n" <<<"$n" && ghc_put "$key" <<<"$a"; } || { rm -f "$key" "$key.n" 2>/dev/null || :; }
   fi
   k=$(jq -nc --arg f "$fields" '$f | split(",")')
   jq -c --argjson n "$lim" --argjson k "$k" '[.[:$n][] | with_entries(select(.key as $x | $k | index($x)))]' <<<"$a" | ghc_jq "$q"

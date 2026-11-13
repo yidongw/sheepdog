@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -s inherit_errexit
 root=$(cd "$(dirname "$0")/../.." && pwd)
 t=$(mktemp -d)
-trap 'rm -rf "$t"' EXIT
+trap 'command rm -rf "$t"' EXIT
 mkdir "$t/bin"
 cat > "$t/bin/gh" <<'GH'
 #!/usr/bin/env bash
@@ -18,7 +19,12 @@ printf '%s\n' '[{"databaseId":1,"status":"completed"}]' > "$GHC_RUN/list.$key"
 echo 100 > "$GHC_RUN/list.$key.n"
 touch -d '5 minutes ago' "$GHC_RUN/list.$key"
 ghc_put() { return 1; }
-for state in expired absent; do
+# Simulate a directory that refuses cleanup as well as cache writes.
+rm() { command rm "$@"; }
+for state in expired absent cleanup_failure; do
+  if [ "$state" = cleanup_failure ]; then
+    rm() { return 1; }
+  fi
   if [ "$state" = absent ]; then rm -f "$GHC_RUN"/list.*; fi
   result=$(gh run list -L 1 --json status)
   jq -e '. == [{"status":"queued"}]' <<<"$result" >/dev/null
