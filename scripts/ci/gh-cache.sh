@@ -100,9 +100,11 @@ ghc_run_list() {
   jq -c --argjson n "$lim" --argjson k "$k" '[.[:$n][] | with_entries(select(.key as $x | $k | index($x)))]' <<<"$a" | ghc_jq "$q"
 }
 
-ghc_run_state() { # ghc_run_state <run id> → "<status> <updatedAt>" from the NEWEST fresh listing of this run that shows it ("" when none)
+ghc_run_state() { # ghc_run_state <run id> → "<status> <updatedAt>" from the latest fresh observations ("" when none)
   local f
   # Normalize all observation sources, then choose the latest server version.
+  # Equal timestamps cannot order a completion and a rerun. Prefer a non-completed
+  # observation at that version so neither jobs cache can reuse the previous attempt.
   for f in "$GHC_RUN"/list.* "$GHC_RUN"/api.*; do
     case "$f" in *.n|*.st) continue ;; esac
     ghc_fresh "$f" "$GHC_LIST_TTL" || continue
@@ -111,7 +113,7 @@ ghc_run_state() { # ghc_run_state <run id> → "<status> <updatedAt>" from the N
       | select((.databaseId // .id) == $id)
       | {status, updated: (.updatedAt // .updated_at // "-")}
     ' "$f" 2>/dev/null
-  done | jq -sr 'sort_by(.updated) | last // empty | "\(.status) \(.updated)"'
+  done | jq -sr 'sort_by(.updated, .status != "completed") | last // empty | "\(.status) \(.updated)"'
 
   return 0
 }
