@@ -13,7 +13,8 @@
 #     its -q. `gh run cancel` / `rerun` / `delete` drop the listings (the next call lists again).
 #   · `gh api [-q <jq>] <path>` (a GET without other flags):
 #       repos/<r>/actions/runs/<id>, …/runs/<id>/jobs — the run's state is "<status> <updatedAt>" from the NEWEST listing
-#           of this dispatcher run that shows it (a run no listing shows: its record runs/<id>, one call per run). An
+#           of this dispatcher run that shows it and is still within GHC_LIST_TTL (a run no fresh listing shows: its
+#           record runs/<id>, one call per run). An
 #           answer kept for this run (GHC_LIST_TTL) is used only while that state is the one it was fetched under; a
 #           jobs answer goes on disk once the state is completed and every job in it is completed, and is used while
 #           the state is "completed <the same updatedAt>" (a re-run is listed as not completed / with a new updatedAt);
@@ -23,7 +24,8 @@
 #           when this dispatcher run's artifacts listing showed that artifact unexpired;
 #       repos/<r>/actions/jobs/<id>/logs — on disk once a jobs answer showed that job completed (a job id belongs to one
 #           attempt; its log is final);
-#       anything else under repos/<r>/actions/ (e.g. a workflow's run pages) — kept for this run only (GHC_LIST_TTL).
+#       repos/<r>/actions/workflows/<wf>/runs?… (review-runs.sh's pages) — kept for this run only (GHC_LIST_TTL);
+#       nothing else (binary downloads such as a run's log zip go to the real gh untouched).
 #   `gh run cancel` / `rerun` / `delete` drop every listing and answer kept for this run. Cache files are named by a
 #   hash of the request; a failed answer is never cached, and an answer that cannot be written is still returned.
 #   Disk entries older than GHC_KEEP_DAYS (2) are removed at ghc_init.
@@ -99,11 +101,12 @@ ghc_run_list() {
   jq -c --argjson n "$lim" --argjson k "$k" '[.[:$n][] | with_entries(select(.key as $x | $k | index($x)))]' "$GHC_RUN/list.$key" | ghc_jq "$q"
 }
 
-ghc_run_state() { # ghc_run_state <run id> → "<status> <updatedAt>" from the NEWEST listing of this run that shows it ("" when none)
+ghc_run_state() { # ghc_run_state <run id> → "<status> <updatedAt>" from the NEWEST fresh listing of this run that shows it ("" when none)
   local f
   # newest first (review of baf73755e #3: an older listing must not override a newer one that saw a re-run)
   while IFS= read -r f; do   # our own hashed file names: no blanks
     case "$f" in *.n) continue ;; esac
+    ghc_fresh "$f" "$GHC_LIST_TTL" || continue   # a listing past its 60 s says nothing (review of 879c8c521 #3)
     jq -r --argjson id "$1" 'first(.[] | select(.databaseId == $id) | "\(.status) \(.updatedAt // "-")") // empty' "$f" 2>/dev/null | head -1 | grep . && return 0
   done < <(ls -t "$GHC_RUN"/list.* 2>/dev/null)
   return 0
@@ -164,7 +167,9 @@ ghc_api() {
     if [ -f "$GHC_RUN/jobdone.$id" ]; then ghc_put "$disk" <<<"$a" 2>/dev/null || true; fi
     ghc_jq "$q" <<<"$a"; return
   fi
-  if [[ "$path" =~ ^repos/[^/]+/[^/]+/actions/ ]]; then
+  # a workflow's run pages (review-runs.sh) — JSON; every other endpoint (binary run-log zips, …) goes to the real gh
+  # (review of afb14f77d #4)
+  if [[ "$path" =~ ^repos/[^/]+/[^/]+/actions/workflows/[^/?]+/runs(\?.*)?$ ]]; then
     if ghc_fresh "$memo" "$GHC_LIST_TTL"; then a=$(cat "$memo")
     else a=$(command gh api "$path") || return 1; ghc_put "$memo" <<<"$a" 2>/dev/null || true; fi
     ghc_jq "$q" <<<"$a"; return

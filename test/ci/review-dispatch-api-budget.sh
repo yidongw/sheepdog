@@ -69,6 +69,8 @@ if a[0] == "api":
         if not os.path.exists(f): sys.exit(1)
         b = io.BytesIO(); z = zipfile.ZipFile(b, "w"); z.write(f, "review-attestation.json"); z.close()
         sys.stdout.buffer.write(b.getvalue()); sys.exit(0)
+    m = re.fullmatch(r"actions/runs/(\d+)/logs", path)
+    if m: sys.stdout.buffer.write(open(f"{FX}/runlogs.bin", "rb").read()); sys.exit(0)
     m = re.fullmatch(r"actions/jobs/(\d+)/logs", path)
     if m:
         f = f"{FX}/log-{m.group(1)}.txt"
@@ -223,7 +225,17 @@ echo "ok - stored completed runs are answered without a call; a re-run is read a
   out=$(gh api "repos/o/r/actions/runs/$RH2/jobs" -q '.jobs | length'); rc=$?
   chmod 700 "$GHC_RUN" "$GHC_DIR/disk"
   [ "$rc" = 0 ] && [ "$out" = 2 ] || fail "an answer that could not be written was not returned (rc $rc, '$out')"
+  # review of 879c8c521 #3: a listing past its 60 s decides nothing — the record is asked (and here shows a re-run)
+  ghc_done; ghc_init "$STATE/ghcache"
+  gh run list -R o/r -w review.yml -e workflow_run -b main -L 5 --json databaseId >/dev/null          # shows 06:00 completed
+  setrun "$RH1" 2026-11-13T07:00:00Z success; jq --argjson id "$RH1" 'map(if .databaseId == $id then .status = "queued" else . end)' "$FX/runs.json" > "$T/r" && mv "$T/r" "$FX/runs.json"
+  old "$GHC_RUN"/list.*; : > "$FX/calls"; jobs_c >/dev/null
+  grep -q "^api repos/o/r/actions/runs/$RH1\$" "$FX/calls" && grep -q "^api repos/o/r/actions/runs/$RH1/jobs" "$FX/calls" \
+    || fail "an expired listing decided the run state: $(cat "$FX/calls")"
+  # review of afb14f77d #4: a binary Actions download (a run's log zip) passes through byte for byte
+  printf 'PK\003\004\000\000bin\000ary' > "$FX/runlogs.bin"
+  [ "$(gh api "repos/o/r/actions/runs/$RH1/logs" | md5sum)" = "$(md5sum < "$FX/runlogs.bin")" ] || fail "a binary Actions answer was altered"
   ghc_done
 ) || exit 1
-echo "ok - a re-run seen by a newer listing beats a kept answer and an older listing; artifacts read fresh; long paths and unwritable caches still answer"
+echo "ok - a re-run seen by a newer listing beats a kept answer, an older or expired listing; artifacts read fresh; long paths, unwritable caches and binary answers pass"
 echo "dispatcher API budget: run 1 $(count 1) calls, run 2 $(count 2) calls (budgets ${API_BUDGET_COLD:-20} / ${API_BUDGET_WARM:-8})"
