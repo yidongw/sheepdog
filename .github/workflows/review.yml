@@ -295,7 +295,7 @@ jobs:
         if: steps.range.outputs.kind == 'review'
         working-directory: candidate
         run: |
-          re=$(sed 's/[.]/\\./g' <<<"$SHEEPDOG_REPO")
+          re=${SHEEPDOG_REPO//./\\.}
           pin_at() { git show "$1:.github/workflows/$SHEEPDOG_REVIEW_WORKFLOW" 2>/dev/null | sed -nE "s#^ *uses: $re/\\.github/workflows/review\\.yml@([0-9a-f]{40})( .*)?\$#\\1#p" | head -1; }
           old=$(pin_at "$REVIEW_BASE"); new=$(pin_at HEAD)
           if [ -z "$old" ] || [ -z "$new" ] || [ "$old" = "$new" ]; then echo "no sheepdog pin bump in this range (${old:0:12} → ${new:0:12})"; exit 0; fi
