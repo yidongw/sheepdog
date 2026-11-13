@@ -58,3 +58,22 @@ it.skipIf(process.platform !== "linux")("blocking verdict → exit 1 with ROUTE 
 it.skipIf(process.platform !== "linux")("no parseable verdict → exit 2 (not a pass)", () => {
   expect(fixture("the model rambled").run().status).toBe(2);
 });
+
+// review of 0f5d80c10 #5: a partial or invalid --pin-* set fails (exit 2) instead of silently reviewing without the
+// sheepdog diff; a complete one reaches the container (both files bound read-only).
+it.skipIf(process.platform !== "linux")("pin bump arguments: all or nothing, each valid", () => {
+  const f = fixture('VERDICT: {"verdict":"clean","finding":"","evidence":"read a.txt"}');
+  const diff = path.join(f.root, "pin.diff"); const log = path.join(f.root, "pin.log");
+  writeFileSync(diff, "d"); writeFileSync(log, "l");
+  const full = ["--pin-repo", "yidongw/sheepdog", "--pin-from", "a".repeat(40), "--pin-to", "b".repeat(40), "--pin-diff", diff, "--pin-log", log];
+  const without = (flag: string) => { const i = full.indexOf(flag); return [...full.slice(0, i), ...full.slice(i + 2)]; };
+  for (const flag of ["--pin-repo", "--pin-from", "--pin-to", "--pin-diff", "--pin-log"]) expect(f.run(without(flag)).status).toBe(2);
+  expect(f.run(full.map((x) => (x === "yidongw/sheepdog" ? "" : x))).status).toBe(2);
+  expect(f.run(full.map((x) => (x === "b".repeat(40) ? "main" : x))).status).toBe(2);
+  expect(f.run(full.map((x) => (x === log ? path.join(f.root, "missing") : x))).status).toBe(2);
+  const r = f.run(full);
+  expect(r.status).toBe(0);
+  const argv = readFileSync(path.join(f.root, "argv"), "utf8").split("\n");
+  expect(argv).toContain(`${diff}:${diff}:ro`);
+  expect(argv).toContain(`${log}:${log}:ro`);
+});

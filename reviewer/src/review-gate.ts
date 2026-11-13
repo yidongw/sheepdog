@@ -21,7 +21,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 
 import { loadEnvFile } from "./env-file.ts";
-import { gateBlockedLines, isGatewayLoopStop, parseVerdict, priorRoundFromLog, runHeadlessReviewer } from "./reviewer.ts";
+import { buildPinBumpBlock, gateBlockedLines, isGatewayLoopStop, parseVerdict, priorRoundFromLog, runHeadlessReviewer } from "./reviewer.ts";
 import type { PinBump, ReviewFinding } from "./reviewer.ts";
 
 function flag(name: string): string | undefined {
@@ -70,11 +70,12 @@ async function main(): Promise<number> {
     if (known) { prior.knownOpen = known; console.log(`review-gate: ${known.split("\n").length} known open finding(s) attached`); }
   }
   let pin: PinBump | undefined;
-  const pinTo = flag("pin-to");
-  if (pinTo) {
-    pin = { repo: flag("pin-repo") ?? "", from: flag("pin-from") ?? "", to: pinTo, diffFile: flag("pin-diff") ?? "", logFile: flag("pin-log") ?? "" };
-    if (!/^[0-9a-f]{40}$/.test(pin.from) || !/^[0-9a-f]{40}$/.test(pin.to) || !existsSync(pin.diffFile) || !existsSync(pin.logFile)) {
-      console.error("review-gate: --pin-* given but incomplete (repo, 40-hex from/to, existing diff and log files)");
+  const pinFlags = ["pin-repo", "pin-from", "pin-to", "pin-diff", "pin-log"];
+  if (pinFlags.some((f) => process.argv.includes(`--${f}`))) {
+    // All or nothing, each one valid (review of 0f5d80c10 #5): a partial set must not drop the sheepdog diff silently.
+    pin = { repo: flag("pin-repo") ?? "", from: flag("pin-from") ?? "", to: flag("pin-to") ?? "", diffFile: flag("pin-diff") ?? "", logFile: flag("pin-log") ?? "" };
+    if (!buildPinBumpBlock(pin) || !existsSync(pin.diffFile) || !existsSync(pin.logFile)) {
+      console.error("review-gate: --pin-* given but incomplete or invalid (owner/name repo, 40-hex from and to, existing diff and log files)");
       return 2;
     }
     console.log(`review-gate: sheepdog pin bump ${pin.from.slice(0, 9)}..${pin.to.slice(0, 9)} — its diff is reviewed with the range`);

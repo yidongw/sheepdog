@@ -5,13 +5,15 @@
 # Train-Merge heads (merge resolutions) and the tests-only dev fixes they bring — each once.
 #
 #   hotfix-review-base.sh [<head>]
-#     → base = the newest first-parent ancestor of <head> whose main review ("recheck <sha>") COMPLETED: its blocking
+#     → base = the newest ancestor of <head> (by commit date, on either side of a merge: a hotfix re-checked on main and
+#       taken into dev as a merge's second parent, with main then fast-forwarded to dev — pikeway 4a488e66c) whose main
+#       review ("recheck <sha>") COMPLETED: its blocking
 #       step "Review (blocking …" succeeded, or failed with the reviewer's "review-gate: BLOCKED #n" verdict in the log.
 #       A review job that was cancelled, skipped, timed out or died before the reviewer gave a verdict reviewed nothing:
 #       its commits ride this range. Nothing is moved past (no "reviewed elsewhere" shortcut on main).
 #       Only trusted runs count (review-runs.sh), and only a review whose attestation artifact is still usable is a
 #       base (review-passed.sh's chain needs it): one without is passed over and the range grows to an older base.
-#       None found within REVIEW_BASE_DEPTH (50) first-parent commits → the deployed sha (tag `deployed`, moved by the
+#       None found within REVIEW_BASE_DEPTH (50) ancestors → the deployed sha (tag `deployed`, moved by the
 #       host autodeploy) when it is below <head>, else <head>^1 — never ancient history.
 #     A repair is reviewed in its range with the previous findings (prior-findings.sh).
 #
@@ -41,7 +43,7 @@ if [ -n "$d" ] && [ "$d" != "$head" ] && git merge-base --is-ancestor "$d" "$hea
 runs=$(review_runs | jq -r 'select(.display_title | test("^recheck [0-9a-f]{40}$")) | "\(.display_title[8:]) \(.id)"')
 base=""
 if [ -n "$runs" ]; then
-  for c in $(git rev-list --first-parent -n "$DEPTH" "$parent"); do
+  for c in $(git rev-list --date-order -n "$DEPTH" "$parent"); do
     for id in $(awk -v c="$c" '$1 == c { print $2 }' <<<"$runs"); do
       review_link "$id" "$c" "$anchor" "$head" 0 && { base=$c; break 2; }
       echo "hotfix-review-base: the review of ${c:0:12} (run $id) has no usable coverage chain — not a base, its commits are reviewed again" >&2

@@ -61,9 +61,17 @@ else:
     if list(on) != ["workflow_run"] or on["workflow_run"].get("workflows") != ["CI"]: bad.append("self-review.yml: must be workflow_run of CI only")
     if sr.get("name") != "Review": bad.append("self-review.yml: the workflow is named Review (the runner guard admits only it)")
     js = sr["jobs"]
-    if [j.get("uses") for j in js.values()] != ["./.github/workflows/review.yml"]: bad.append("self-review.yml: one job calling ./.github/workflows/review.yml")
 for f, d in docs.items():
     if f.startswith(".github/") and not f.endswith(("self-review.yml", "/review.yml")) and "self-hosted" in yaml.safe_dump(d): bad.append(f"{f}: a self-hosted runner outside self-review.yml")
+# review of 0f5d80c10 #4: sheepdog's trusted test list runs ci.yml's linters, the same pinned commands
+ts = open(".github/sheepdog/tests.sh").read()
+lint = next(j for j in docs[".github/workflows/ci.yml"]["jobs"].values() if "actionlint" in yaml.safe_dump(j))
+for st in lint["steps"]:
+    for line in (st.get("run") or "").splitlines():
+        if line.strip() and line.strip() not in ts: bad.append(f".github/sheepdog/tests.sh: ci.yml lint line missing: {line.strip()[:80]}")
+sr_uses = [j.get("uses") for j in (sr or {}).get("jobs", {}).values()]
+if not (len(sr_uses) == 1 and re.fullmatch(r"yidongw/sheepdog/\.github/workflows/review\.yml@[0-9a-f]{40}", sr_uses[0] or "")):
+    bad.append("self-review.yml: sheepdog reviews itself with a pinned, already reviewed sha (never ./ = the candidate's or main's latest)")
 for b in bad: print("FAIL:", b)
 sys.exit(1 if bad else 0)
 PY

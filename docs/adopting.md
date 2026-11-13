@@ -52,6 +52,7 @@ access to production, ideally reset between jobs. The job has a read-only `GITHU
 Runs no candidate code. It needs:
 
 - Docker, with the image `alpine:3.20` present (`docker run --pull=never`), and `socat` on the host's `/usr`;
+- `python3` with PyYAML (the pin bump step reads the caller workflow as YAML);
 - the `codex` CLI (its npm package; the native binary is mounted read-only into the container);
 - a codex home (`CODEREVIEW_CODEX_HOME`) whose `config.toml` names a provider on a **loopback** `base_url` — the
   reviewer relays exactly that endpoint into the network-less container through a unix socket, and adds the provider's

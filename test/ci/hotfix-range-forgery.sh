@@ -55,7 +55,7 @@ chmod +x "$T/bin/curl"; export PATH=$T/bin:$PATH GH_TOKEN=x REPO=o/r
 
 git init -q -b main "$T/repo"; cd "$T/repo"
 g() { git -c user.name=t -c user.email=t@t "$@"; }
-c() { echo "$1" >> "f-$1"; g add -A; g commit -q -m "$1" ${2:+-m "$2"}; git rev-parse HEAD; }
+c() { echo "$1 $RANDOM$RANDOM" >> "f-$1"; g add -A; g commit -q -m "$1" ${2:+-m "$2"}; git rev-parse HEAD; }
 RUNS=(); n=0
 publish() { (IFS=,; echo "[${RUNS[*]}]") > "$FX/runs.json"; }
 # run <head> <base> [job conclusion] [blocking step conclusion] [event] [branch] [workflow path]
@@ -159,5 +159,18 @@ reset_case; long=$(python3 -c 'print("x" * 4096)')
 for i in $(seq 1 100); do g commit -q --allow-empty -m "$i $long"; done
 base=$(bash -eo pipefail "$CI/hotfix-review-base.sh" HEAD 2>/dev/null) || base=ERR
 check "a 100-commit range with 4 KB subjects yields its base under pipefail" test "$base" = "$A"
+# The first range after a migration in pikeway's topology (pikeway 4a488e66c, run 43433775427): main is fast-forwarded to
+# dev heads, and dev took the last re-checked hotfix in as a merge's SECOND parent. Walking only main's first-parent
+# chain (down the dev side) skipped that re-check and fell back to an old one far below, re-gating commits from before
+# the gates. The base is the newest (by commit date) ancestor whose re-check completed, on either side of a merge.
+git init -q -b main "$T/topo"; cd "$T/topo"; RUNS=(); n=0; k=0
+cd8() { k=$((k + 1)); GIT_COMMITTER_DATE="2026-11-13T00:00:${k}Z" GIT_AUTHOR_DATE="2026-11-13T00:00:${k}Z" c "$@"; }
+R=$(cd8 root); P=$(cd8 p "Hotfix: p"); run "$P" "$R"
+g checkout -q -b dev; D1=$(cd8 d1); D2=$(cd8 d2)
+g checkout -q main; HM=$(cd8 hm "Hotfix: hm"); run "$HM" "$P"
+g checkout -q dev; k=$((k + 1)); GIT_COMMITTER_DATE="2026-11-13T00:00:${k}Z" g merge -q --no-ff -m "merge main into dev" main; MD=$(git rev-parse HEAD)
+g checkout -q main; g merge -q --ff-only dev; N=$(cd8 n "Hotfix: n")
+range; check "pikeway topology: the range starts at the hotfix re-checked on the merge's second-parent side" test "$base" = "$HM"
+check "…and still carries the dev side and the merge" covers "$D1" "$D2" "$MD" "$N"
 [ "$fails" = 0 ] || { echo "$fails checks failed" >&2; exit 1; }
 echo 'all main range checks passed'
