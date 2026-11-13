@@ -52,6 +52,18 @@ for f, d in docs.items():
         ro = j.get("runs-on", "")
         if "self-hosted" in str(ro): bad.append(f"{f} {name}: sheepdog's own CI never runs on self-hosted runners")
         if "secrets." in yaml.safe_dump(j).replace("secrets.GITHUB_TOKEN", ""): bad.append(f"{f} {name}: no secrets in sheepdog's own CI")
+# sheepdog's self-review caller: only workflow_run (the default branch's file), only the local reusable workflow, and
+# the self-hosted review runner is named nowhere else in sheepdog's own workflows.
+sr = docs.get(".github/workflows/self-review.yml")
+if sr is None: bad.append("self-review.yml missing")
+else:
+    on = sr.get(True, sr.get("on"))
+    if list(on) != ["workflow_run"] or on["workflow_run"].get("workflows") != ["CI"]: bad.append("self-review.yml: must be workflow_run of CI only")
+    if sr.get("name") != "Review": bad.append("self-review.yml: the workflow is named Review (the runner guard admits only it)")
+    js = sr["jobs"]
+    if [j.get("uses") for j in js.values()] != ["./.github/workflows/review.yml"]: bad.append("self-review.yml: one job calling ./.github/workflows/review.yml")
+for f, d in docs.items():
+    if f.startswith(".github/") and not f.endswith(("self-review.yml", "/review.yml")) and "self-hosted" in yaml.safe_dump(d): bad.append(f"{f}: a self-hosted runner outside self-review.yml")
 for b in bad: print("FAIL:", b)
 sys.exit(1 if bad else 0)
 PY

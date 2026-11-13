@@ -35,7 +35,8 @@ Required (no defaults — they are host and repository specific):
 | `SUPERVISOR_THREAD` | the thread that hears what no author can be told |
 | `DISPATCH_THREAD` | the `Thread:` of the commits the dispatcher makes (the CI owner) |
 
-Optional: `MAIN_BRANCH` (`main`), `FIXER_PROVIDER` / `FIXER_MODEL`, `STRONG_FIXER_PROVIDER` / `STRONG_FIXER_MODEL` /
+Optional: `MAIN_BRANCH` (`main`), `SHEEPDOG_REVIEW_WORKFLOW` (the caller file, `review.yml`; `self-review.yml` for sheepdog
+itself, [self-review.md](self-review.md)), `FIXER_PROVIDER` / `FIXER_MODEL`, `STRONG_FIXER_PROVIDER` / `STRONG_FIXER_MODEL` /
 `STRONG_FIXER_EFFORT`, `FIXER_HOST_RULES` (host rules every fixer task states), `WAKE_URL` (the local wake relay for
 Discord thread ids, default `http://localhost:3011`), `FIXER_WT_ROOT`, `FIX_ROUNDS_MAX`, `FIX_ROUNDS_MAX_RISK`,
 `DEV_REVERT_AFTER_SEC`, `AUTHOR_FIX_WINDOW_SEC`, `MAIN_OWNER_CLAIM_SEC`.

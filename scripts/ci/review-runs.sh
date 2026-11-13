@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # THE provenance rule for a Review run used as evidence (sourced by dev-review-base.sh, hotfix-review-base.sh,
 # review-passed.sh and prior-findings.sh — range selection, repair eligibility and approval read the same runs):
-# a run counts only when GitHub started it from the default branch's .github/workflows/review.yml by a workflow_run
+# a run counts only when GitHub started it from the default branch's .github/workflows/review.yml (\$SHEEPDOG_REVIEW_WORKFLOW) by a workflow_run
 # event (event == "workflow_run", head_branch == the default branch, path == the workflow file). A branch can add its
 # own workflow that is listed under review.yml with any title, job and step names — but only as a push / pull_request /
 # … run of its own branch, never as a workflow_run run of the default branch. Titles and step names are read only
 # from runs that pass this rule.
 #
 # The caller defines  review_api <path below repos/<owner>/<repo>/>  → the JSON answer on stdout, non-zero on failure.
+# The caller workflow's file name: review.yml for every adopter (docs/adopting.md); sheepdog's own caller is
+# self-review.yml (its review.yml is the reusable workflow). SHEEPDOG_REVIEW_WORKFLOW names it (a plain file name).
 REVIEW_BRANCH=${REVIEW_DEFAULT_BRANCH:-${MAIN_BRANCH:-main}}
-REVIEW_TRUSTED_JQ='select(.event == "workflow_run" and .head_branch == $br and .path == ".github/workflows/review.yml")'
+REVIEW_WF=${SHEEPDOG_REVIEW_WORKFLOW:-review.yml}
+[[ "$REVIEW_WF" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]] || { echo "SHEEPDOG_REVIEW_WORKFLOW must be a workflow file name, got '$REVIEW_WF'" >&2; return 2 2>/dev/null || exit 2; }
+REVIEW_TRUSTED_JQ='select(.event == "workflow_run" and .head_branch == $br and .path == ".github/workflows/'"$REVIEW_WF"'")'
 
 review_runs() { # review_runs [<status>] → the trusted Review runs, one JSON object per line, newest first; every page (cap 20)
   local p r n
   for p in $(seq 1 20); do
-    r=$(review_api "actions/workflows/review.yml/runs?event=workflow_run&branch=$REVIEW_BRANCH${1:+&status=$1}&per_page=100&page=$p" 2>/dev/null) || break
+    r=$(review_api "actions/workflows/$REVIEW_WF/runs?event=workflow_run&branch=$REVIEW_BRANCH${1:+&status=$1}&per_page=100&page=$p" 2>/dev/null) || break
     # the end of the list is decided on the page as the API returned it, never on what is left after filtering
     n=$(jq '.workflow_runs | length' <<<"$r" 2>/dev/null) || break
     [ "${n:-0}" -gt 0 ] || break

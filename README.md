@@ -29,7 +29,7 @@ a full commit sha; nothing is copied into the repository except a short caller w
 | [scripts/ci/](scripts/ci/) | The review contract in bash: range selection (`hotfix-review-base.sh`, `dev-review-base.sh`), the trusted-run rule (`review-runs.sh`), the merge authority (`review-passed.sh`, `review-coverage.sh`, `review-repair.sh`, `merge-branch.sh`), the review ledger (`prior-findings.sh`), commit gates, and the dispatcher (`review-dispatch.sh`, `review-notify.sh`, `t3-mcp.sh`) |
 | [test/](test/) | Shell suites over fake git histories and a fake GitHub API (`bash test/run.sh`); the reviewer's vitest suites live in `reviewer/test/` |
 | [examples/.github/](examples/.github/) | What an adopting repository adds |
-| [docs/](docs/) | [The review contract](docs/contract.md), [adopting sheepdog](docs/adopting.md), [the dispatcher](docs/dispatcher.md), [security model](SECURITY.md), [roadmap](docs/roadmap.md), [prior art](docs/reference/) |
+| [docs/](docs/) | [The review contract](docs/contract.md), [adopting sheepdog](docs/adopting.md), [the dispatcher](docs/dispatcher.md), [reviewing sheepdog itself and pin bumps](docs/self-review.md), [security model](SECURITY.md), [roadmap](docs/roadmap.md), [prior art](docs/reference/) |
 
 ## Adopting sheepdog (short version)
 

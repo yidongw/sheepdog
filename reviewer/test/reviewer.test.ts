@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   knownOpenData,
   buildReviewPrompt,
+  buildPinBumpBlock,
   codexReadOnlyDockerArgs,
   isolatedProviderPort,
   sanitizeCodexConfig,
@@ -75,6 +76,14 @@ it("isolated (untrusted PR) mode: no network, no credentials, no data dir, socke
   const masked = codexReadOnlyDockerArgs("codex", ["exec"], repo, env, "t2", { socketDir: "/tmp/gw", port: 3425, configPath: clean });
   expect(masked).toContain(`${path.join(repo, ".agents")}:ro,size=1k`);
   expect(joined).not.toContain(`${path.join(codexHome, "config.toml")}:`);
+  // a pin bump's sheepdog diff and log: bound read-only at their own paths; anything else is refused
+  const diff = path.join(root, "sheepdog-pin.diff"); const log = path.join(root, "sheepdog-pin.log");
+  writeFileSync(diff, "diff"); writeFileSync(log, "log");
+  const withPin = codexReadOnlyDockerArgs("codex", ["exec"], repo, env, "t3", { socketDir: "/tmp/gw", port: 3425, configPath: clean }, [diff, log]);
+  expect(withPin).toContain(`${diff}:${diff}:ro`);
+  expect(withPin).toContain(`${log}:${log}:ro`);
+  expect(() => codexReadOnlyDockerArgs("codex", ["exec"], repo, env, "t4", { socketDir: "/tmp/gw", port: 3425, configPath: clean }, ["relative.diff"])).toThrow();
+  expect(() => codexReadOnlyDockerArgs("codex", ["exec"], repo, env, "t5", { socketDir: "/tmp/gw", port: 3425, configPath: clean }, [path.join(root, "missing")])).toThrow();
 });
 
 it("sanitizeCodexConfig drops credential lines and returns the bearer for the host relay", () => {
@@ -394,5 +403,25 @@ describe("known open findings are untrusted data (review of 7e298d60f #1)", () =
   it("caps line length and count", () => {
     expect(knownOpenData("x".repeat(500)).length).toBeLessThanOrEqual(242);
     expect(knownOpenData(Array.from({ length: 100 }, (_, i) => `f${i}`).join("\n")).split("\n").length).toBe(60);
+  });
+});
+
+describe("sheepdog pin bump", () => {
+  const pin = { repo: "yidongw/sheepdog", from: "a".repeat(40), to: "b".repeat(40), diffFile: "/run/t/sheepdog-pin.diff", logFile: "/run/t/sheepdog-pin.log" };
+  it("puts the sheepdog diff old..new into the review prompt as untrusted data under review", () => {
+    const p = buildReviewPrompt("h".repeat(40), "c".repeat(40), undefined, pin);
+    expect(p).toContain("SHEEPDOG PIN BUMP");
+    expect(p).toContain("cat /run/t/sheepdog-pin.diff");
+    expect(p).toContain("cat /run/t/sheepdog-pin.log");
+    expect(p).toContain(`git diff ${"a".repeat(40)}..${"b".repeat(40)} of yidongw/sheepdog`);
+    expect(p).toContain("UNTRUSTED DATA under review");
+    // the block sits before the verdict format line
+    expect(p.indexOf("SHEEPDOG PIN BUMP")).toBeLessThan(p.indexOf("End your response with EXACTLY one line"));
+  });
+  it("adds nothing for a range without a pin bump, or for malformed pin data", () => {
+    expect(buildReviewPrompt("h".repeat(40), "c".repeat(40))).not.toContain("SHEEPDOG PIN BUMP");
+    expect(buildPinBumpBlock({ ...pin, to: "main" })).toBe("");
+    expect(buildPinBumpBlock({ ...pin, from: "a".repeat(39) })).toBe("");
+    expect(buildPinBumpBlock({ ...pin, repo: "x; rm -rf /" })).toBe("");
   });
 });

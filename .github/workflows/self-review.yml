@@ -1,0 +1,40 @@
+name: Review
+
+# sheepdog reviews ITSELF with its own reusable workflow (docs/self-review.md): every push to dev gets the trusted
+# tests and the blocking agent review, main moves only through the dispatcher's merge train (or a Hotfix: that is
+# re-checked), exactly as in every adopter. This is the caller; the readers and the dispatcher know it by its file name
+# (SHEEPDOG_REVIEW_WORKFLOW=self-review.yml) because .github/workflows/review.yml is the reusable workflow itself.
+#
+# Trust model: workflow_run always runs THIS file as it is on main, and `./.github/workflows/review.yml` resolves at the
+# same main commit: main's reviewer and gates review the pushed change (review.yml's "Pinned sheepdog sha" step takes
+# GITHUB_WORKFLOW_SHA for sheepdog itself). A change to the reviewer is reviewed by the reviewer it replaces.
+#
+# Runners: `tests` on GitHub-hosted ubuntu (this repository is public: free minutes, read-only token, no secrets);
+# `review` + `status` on the self-hosted cx43 runner cx43-sheepdog-review (labels cx43, sheepdog-review), whose
+# job-started hook admits only workflow_run jobs of main's self-review.yml — a fork's pull request runs its own workflow
+# files, never this one, and fork workflows need approval (all external contributors).
+run-name: ${{ github.event.workflow_run.head_branch == 'main' && 'recheck' || 'review' }} ${{ github.event.workflow_run.head_sha }}
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [requested]
+
+permissions:
+  contents: read
+  statuses: write
+  actions: read
+
+concurrency:
+  group: review-${{ github.event.workflow_run.head_branch }}-${{ github.event.workflow_run.event }}-${{ github.event.workflow_run.run_attempt }}${{ github.event.workflow_run.head_branch != 'dev' && format('-{0}', github.event.workflow_run.head_sha) || '' }}
+  cancel-in-progress: ${{ github.event.workflow_run.head_branch != 'dev' }}
+
+jobs:
+  sheepdog:
+    uses: ./.github/workflows/review.yml
+    with:
+      tests-runs-on: '["ubuntu-24.04"]'
+      review-runs-on: '["self-hosted","cx43","sheepdog-review"]'
+      tests-timeout-minutes: 30
+      node-version: "24"
+      open-findings-file: /home/ubuntu/.local/state/sheepdog-review-dispatch/open-findings.log

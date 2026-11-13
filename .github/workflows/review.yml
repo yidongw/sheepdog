@@ -188,8 +188,20 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       # The pinned sheepdog sha, from GitHub's record of this run (referenced_workflows), not from any input: a caller
       # that references this workflow by a tag or branch is refused (fail closed) — callers pin a full commit sha.
+      #   sheepdog reviewing ITSELF (the caller is sheepdog's self-review.yml, which calls ./.github/workflows/review.yml):
+      #   the sheepdog sha is the default-branch commit that started this run (GITHUB_WORKFLOW_SHA) — main's reviewer
+      #   reviews the pushed change, as in every adopter. The caller's workflow file names the trusted runs.
       - name: Pinned sheepdog sha
         run: |
+          wf=${CALLER_WORKFLOW_REF%%@*}; wf=${wf##*/}
+          [[ "$wf" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]] || { echo "::error::cannot read the caller workflow file from '$CALLER_WORKFLOW_REF'"; exit 1; }
+          echo "SHEEPDOG_REVIEW_WORKFLOW=$wf" >> "$GITHUB_ENV"
+          if [ "$GITHUB_REPOSITORY" = "$SHEEPDOG_REPO" ]; then
+            [[ "$GITHUB_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no workflow sha"; exit 1; }
+            echo "sheepdog: reviewing itself with its default branch at $GITHUB_WORKFLOW_SHA"
+            echo "SHEEPDOG_SHA=$GITHUB_WORKFLOW_SHA" >> "$GITHUB_ENV"
+            exit 0
+          fi
           refs=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" | jq -c '.referenced_workflows // []')
           entry=$(jq -c --arg p "$SHEEPDOG_REPO/.github/workflows/review.yml@" '[.[] | select(.path | startswith($p))][0] // empty' <<<"$refs")
@@ -201,12 +213,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHEEPDOG_REPO: ${{ inputs.sheepdog-repository }}
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
       - name: sheepdog (gates + reviewer, the pinned sha)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: ${{ inputs.sheepdog-repository }}
           ref: ${{ env.SHEEPDOG_SHA }}
           path: .sheepdog
+          fetch-depth: 0 # a pin bump's diff (old..new) and the check that the new pin is on sheepdog's main
           persist-credentials: false
       - name: Trusted repository files (the caller's default branch)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -274,6 +288,31 @@ jobs:
           EXTRA_GATES: ${{ inputs.extra-gates }}
           VERIFICATION_DIR: ${{ inputs.verification-dir }}
           LARGE_FILES_ALLOWED: ${{ inputs.large-files-allowed }}
+      # A range that moves this repository's sheepdog pin ships the sheepdog change old..new — the CI that tests and reviews
+      # this repository from then on (docs/pin-bumps.md): the new pin must be on sheepdog's main (main moves only through
+      # sheepdog's own reviewed train or a re-checked Hotfix:), and the sheepdog diff is reviewed with the range.
+      - name: sheepdog pin bump (the new pin is on sheepdog's main; its diff joins the review)
+        if: steps.range.outputs.kind == 'review'
+        working-directory: candidate
+        run: |
+          re=$(sed 's/[.]/\\./g' <<<"$SHEEPDOG_REPO")
+          pin_at() { git show "$1:.github/workflows/$SHEEPDOG_REVIEW_WORKFLOW" 2>/dev/null | sed -nE "s#^ *uses: $re/\\.github/workflows/review\\.yml@([0-9a-f]{40})( .*)?\$#\\1#p" | head -1; }
+          old=$(pin_at "$REVIEW_BASE"); new=$(pin_at HEAD)
+          if [ -z "$old" ] || [ -z "$new" ] || [ "$old" = "$new" ]; then echo "no sheepdog pin bump in this range (${old:0:12} → ${new:0:12})"; exit 0; fi
+          S=$GITHUB_WORKSPACE/.sheepdog
+          git -C "$S" fetch -q origin "+refs/heads/main:refs/remotes/origin/main"
+          git -C "$S" cat-file -e "$old^{commit}" 2>/dev/null || git -C "$S" fetch -q origin "$old"
+          git -C "$S" cat-file -e "$new^{commit}" 2>/dev/null || git -C "$S" fetch -q origin "$new"
+          if ! git -C "$S" merge-base --is-ancestor "$new" origin/main; then
+            echo "::error::the new sheepdog pin ${new:0:12} is not on $SHEEPDOG_REPO's main: pin only sheepdog commits that passed sheepdog's own review"; exit 1
+          fi
+          d=$RUNNER_TEMP/sheepdog-pin; rm -rf "$d"; mkdir -p "$d"
+          git -C "$S" diff "$old" "$new" > "$d/sheepdog-pin.diff"
+          git -C "$S" log --stat "$new" --not "$old" > "$d/sheepdog-pin.log"
+          echo "sheepdog pin bump ${old:0:12} → ${new:0:12}: $(git -C "$S" rev-list --count "$new" --not "$old") commit(s), $(wc -l < "$d/sheepdog-pin.diff") diff line(s) join the review"
+          { echo "PIN_FROM=$old"; echo "PIN_TO=$new"; } >> "$GITHUB_ENV"
+        env:
+          SHEEPDOG_REPO: ${{ inputs.sheepdog-repository }}
       # The isolated reviewer runs `docker run --pull=never alpine:3.20`; never `docker image prune -a` on review hosts.
       - name: Reviewer image present
         run: docker image inspect alpine:3.20 >/dev/null 2>&1 || docker pull -q alpine:3.20
@@ -315,9 +354,14 @@ jobs:
         working-directory: candidate
         run: |
           export SHEEPDOG_ENV_FILE="${REVIEWER_ENV_FILE:-${SHEEPDOG_ENV_FILE:-${FOXHOLE_ENV_PATH:-}}}"
-          node ../.sheepdog/reviewer/src/review-gate.ts --base "$REVIEW_BASE" --head HEAD --prior "$RUNNER_TEMP/prior-findings.txt" --known-open "$RUNNER_TEMP/known-open.txt"
+          pin=()
+          if [ -n "${PIN_TO:-}" ]; then
+            pin=(--pin-repo "$SHEEPDOG_REPO" --pin-from "$PIN_FROM" --pin-to "$PIN_TO" --pin-diff "$RUNNER_TEMP/sheepdog-pin/sheepdog-pin.diff" --pin-log "$RUNNER_TEMP/sheepdog-pin/sheepdog-pin.log")
+          fi
+          node ../.sheepdog/reviewer/src/review-gate.ts --base "$REVIEW_BASE" --head HEAD --prior "$RUNNER_TEMP/prior-findings.txt" --known-open "$RUNNER_TEMP/known-open.txt" "${pin[@]}"
         env:
           REVIEWER_ENV_FILE: ${{ inputs.reviewer-env-file }}
+          SHEEPDOG_REPO: ${{ inputs.sheepdog-repository }}
       # (d) only this run's attestation, also for a blocked review (a repaired blocked round is a link of the chain)
       - if: ${{ !cancelled() && steps.attest.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

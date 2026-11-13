@@ -5,7 +5,7 @@ name: CI
 # this repository's branches or pull requests.
 on:
   push:
-    branches: [main]
+    branches: [main, dev, 'devfix/**'] # dev / devfix pushes also start self-review.yml (workflow_run of this workflow)
   pull_request:
 
 permissions:

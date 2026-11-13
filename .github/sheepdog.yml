@@ -1,0 +1,5 @@
+# sheepdog reviews itself with its own flow (docs/self-review.md). The caller is .github/workflows/self-review.yml.
+version: 1
+main-branch: main
+dev-branch: dev
+# caller file: self-review.yml (the dispatcher wrapper exports SHEEPDOG_REVIEW_WORKFLOW=self-review.yml)

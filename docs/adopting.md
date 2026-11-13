@@ -82,5 +82,7 @@ and the attested ranges cover everything since the deployed sha), and after a su
 
 ## Upgrading sheepdog
 
-Change the sha in `.github/workflows/review.yml` (one line). That change goes through the review like any other; the
+Change the sha in `.github/workflows/review.yml` (one line). That change goes through the review like any other, and
+the review also covers what it ships: the new sha must be on sheepdog's `main` (which only moves after sheepdog's own
+review), and sheepdog's diff old..new is handed to the reviewer with the range ([self-review.md](self-review.md)). The
 new sheepdog version is used for the runs after it lands on the default branch.

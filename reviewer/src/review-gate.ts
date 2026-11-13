@@ -3,6 +3,10 @@
  * reviewer (reviewer.ts) and turn the verdict into an exit code.
  *
  *   node reviewer/src/review-gate.ts --base <sha> --head <sha> [--prior <file>] [--known-open <file>]
+ *        [--pin-repo <owner/name> --pin-from <sha> --pin-to <sha> --pin-diff <file> --pin-log <file>]
+ *
+ * --pin-*: the range moves the caller's sheepdog pin; the sheepdog diff from..to (prepared by review.yml from sheepdog's
+ * history) is reviewed with the range.
  *
  * Exit codes: 0 clean · 1 the reviewer found a blocking problem (ducktape / missed-class / regression) · 2 no verdict
  * (the reviewer failed, timed out, or printed nothing parseable). 2 is deliberately a failure too: a review that did not
@@ -18,7 +22,7 @@ import { existsSync, readFileSync } from "node:fs";
 
 import { loadEnvFile } from "./env-file.ts";
 import { gateBlockedLines, isGatewayLoopStop, parseVerdict, priorRoundFromLog, runHeadlessReviewer } from "./reviewer.ts";
-import type { ReviewFinding } from "./reviewer.ts";
+import type { PinBump, ReviewFinding } from "./reviewer.ts";
 
 function flag(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -65,12 +69,22 @@ async function main(): Promise<number> {
     const known = readFileSync(knownOpenFile, "utf8").trim();
     if (known) { prior.knownOpen = known; console.log(`review-gate: ${known.split("\n").length} known open finding(s) attached`); }
   }
-  let run = await runHeadlessReviewer(head, process.cwd(), timeoutMs, base, { prior });
+  let pin: PinBump | undefined;
+  const pinTo = flag("pin-to");
+  if (pinTo) {
+    pin = { repo: flag("pin-repo") ?? "", from: flag("pin-from") ?? "", to: pinTo, diffFile: flag("pin-diff") ?? "", logFile: flag("pin-log") ?? "" };
+    if (!/^[0-9a-f]{40}$/.test(pin.from) || !/^[0-9a-f]{40}$/.test(pin.to) || !existsSync(pin.diffFile) || !existsSync(pin.logFile)) {
+      console.error("review-gate: --pin-* given but incomplete (repo, 40-hex from/to, existing diff and log files)");
+      return 2;
+    }
+    console.log(`review-gate: sheepdog pin bump ${pin.from.slice(0, 9)}..${pin.to.slice(0, 9)} — its diff is reviewed with the range`);
+  }
+  let run = await runHeadlessReviewer(head, process.cwd(), timeoutMs, base, { prior, pin });
   // A model gateway's loop guard can end a turn after repeated identical tool results; that is not a verdict. One
   // fresh attempt.
   if (!run.error && !parseVerdict(run.stdout) && isGatewayLoopStop(run.stdout)) {
     console.error("review-gate: gateway stopped a polling loop, one fresh attempt");
-    run = await runHeadlessReviewer(head, process.cwd(), timeoutMs, base, { prior });
+    run = await runHeadlessReviewer(head, process.cwd(), timeoutMs, base, { prior, pin });
   }
   if (run.error) {
     console.error(`review-gate: reviewer ${run.timedOut ? "timed out" : "failed"}: ${run.error}`);

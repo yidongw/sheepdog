@@ -63,7 +63,7 @@ log() { echo "[$(date -u +%FT%TZ)] $*" >> "$LOG"; }
 # review.yml (or a workflow named "Review") with any run title — e.g. "recheck <sha>" with a skipped review job — but only as
 # a push / pull_request run of its own branch, which this never lists.
 review_list() { # review_list <limit> <json fields> <jq filter over the trusted runs' array>
-  gh run list -R "$REPO" -w review.yml -e workflow_run -b "$MAIN" -L "$1" --json "$2,event,headBranch" 2>/dev/null \
+  gh run list -R "$REPO" -w "${SHEEPDOG_REVIEW_WORKFLOW:-review.yml}" -e workflow_run -b "$MAIN" -L "$1" --json "$2,event,headBranch" 2>/dev/null \
     | jq -r --arg br "$MAIN" "[.[]? | select(.event == \"workflow_run\" and .headBranch == \$br)] | $3" 2>/dev/null
 }
 # The dev head's round is still going: its CI run (a push to dev of that sha) or its TRUSTED Review run (review_list's
