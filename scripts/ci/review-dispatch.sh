@@ -1352,7 +1352,56 @@ review_job_state() { # review_job_state <run id> [<its jobs answer>] → the con
   local j=${2:-}; [ -n "$j" ] || j=$(review_jobs "$1" || true)
   jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].conclusion // ""' <<<"$j" 2>/dev/null || true
 }
-recheck_reviewed() { case "$(review_job_state "$1" "${2:-}")" in success|failure|timed_out) return 0 ;; *) return 1 ;; esac; }
+recheck_prereview_failed() { # recheck_prereview_failed <run id> [<its jobs answer>] → prints the review job's first failed step and
+  # returns 0 when that job failed BEFORE the code review ran: the job failed / timed out and its blocking step "Review (blocking …"
+  # never ran to an outcome (skipped, absent): the range, the commit gates or the setup failed. Such a run reviewed nothing — it is
+  # an infrastructure failure, never a code finding (tralyx 11-14: "Review-Fix-Of must name an ancestor" in the range step of
+  # every main re-check was routed as finding #0 to the strongest fixer, whose dispute-only commit started the next failing
+  # re-check — an endless loop).
+  local j=${2:-} st
+  [ -n "$j" ] || j=$(review_jobs "$1" || true)
+  case "$(review_job_state "$1" "$j")" in failure|timed_out) ;; *) return 1 ;; esac
+  st=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review") | .steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] // ""' <<<"$j" 2>/dev/null || true)
+  case "$st" in success|failure|cancelled) return 1 ;; esac
+  jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review") | .steps[]? | select(.conclusion == "failure" or .conclusion == "timed_out") | .name][0] // "(no failed step recorded)"' <<<"$j" 2>/dev/null || echo '(unknown step)'
+}
+# a re-check REVIEWED its range when its review job ran to an outcome — not when it failed before the code review ran
+recheck_reviewed() {
+  case "$(review_job_state "$1" "${2:-}")" in success|failure|timed_out) ;; *) return 1 ;; esac
+  ! recheck_prereview_failed "$1" "${2:-}" >/dev/null
+}
+main_infra() { # main_infra <H> <run id> <its jobs answer> <failed step> → the supervisor hears ONCE per episode of the same failing step on
+  # the same main line (an episode ends when a completed main review covers its first head); nobody else is woken, nothing is
+  # assigned. The episode file $STATE/infra-<step> holds "<first head> <run>"; later heads of the episode are logged once each.
+  local h=$1 run=$2 j=$3 step=$4 slug f h0 r0 jid ex url
+  slug=$(printf '%s' "$step" | tr -c 'A-Za-z0-9' _ | cut -c1-40); f="$STATE/infra-$slug"
+  url="https://github.com/$REPO/actions/runs/$run"
+  if [ -s "$f" ]; then
+    read -r h0 r0 < "$f" || true
+    if [ -n "${h0:-}" ] && git -C "$SRC" merge-base --is-ancestor "$h0" "$h" 2>/dev/null && ! recheck_covering "$h0" >/dev/null; then
+      if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$h.infra-logged" ]; then
+        log "MAIN ${h:0:9}: re-check run $run failed before the code review (step '$step') — same episode as ${h0:0:9} (run ${r0:-?}), supervisor already told; no fixer"
+        touch "$STATE/sent/$h.infra-logged"
+      fi
+      return 0
+    fi
+  fi
+  jid=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].id // empty' <<<"$j" 2>/dev/null || true)
+  ex=""
+  if [ -n "$jid" ]; then
+    ex=$(ghm api "repos/$REPO/actions/jobs/$jid/logs" 2>/dev/null | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^ ]+ //; s/\x1b\[[0-9;]*m//g' \
+      | grep -vE '^(##\[(group|endgroup)\]|shell: |  [A-Z_]+: )' | grep -v '^$' \
+      | awk '/^##\[error\]/ { for (i = (n > 12 ? n - 11 : 1); i <= n; i++) print buf[i % 12]; print; exit } { n++; buf[n % 12] = $0 }' \
+      | cut -c1-240 || true)
+  fi
+  if [ -n "${DRY:-}" ]; then echo "DRY MAIN ${h:0:9}: re-check failed before the code review (step '$step') — supervisor told once, no fixer"; return 0; fi
+  echo "$h $run" > "$f"
+  log "MAIN ${h:0:9}: re-check run $run failed before the code review (step '$step') — infrastructure, not a finding: supervisor told, no owner / fixer woken"
+  notify_best_effort "$h" "infra.$slug" "$SUPERVISOR_THREAD" "[review-dispatch] the main re-check of ${h:0:9} failed BEFORE the code review ran (review job step: $step). This is a CI / review-machinery failure, not a code finding: no owner or fixer is woken for it, and the main heads after ${h:0:9} that fail the same step are only logged until a main review completes again. Their commits stay in the next main review's range.
+run: $url
+log excerpt:
+${ex:-(log unavailable)}"
+}
 recheck_base() { # recheck_base <run id> <head> [<its jobs answer>] → the base of the range that run reviewed; <head>^1 for a run without the line
   local j jid b=""
   # the range a run reviewed: attribution (routing), not approval — the memo (ghm) may answer
@@ -1422,6 +1471,14 @@ fix_target() { # fix_target <commit> → the commit its (last) Review-Fix-Of: tr
   [ "$t" != "$(git -C "$SRC" rev-parse "$1")" ] && git -C "$SRC" merge-base --is-ancestor "$t" "$1" 2>/dev/null || return 2
   printf '%s\n' "$t"
 }
+dispute_only() { # dispute_only <commit> → 0 when it carries Review-Fix-Of: but changes no file (a non-merge commit with its parent's
+  # tree): a fixer's dispute or note, not a repair. It has no code a finding could be in, so it never takes a finding (main_plan
+  # pins it on the commit it disputes) and is no hop of a repair chain (fix_depth) — tralyx 11-14: each dispute-only commit
+  # became the "repair that did not hold" of the next re-check, at the strongest fixer, effort escalating.
+  [ "$(git -C "$SRC" rev-list --parents -n1 "$1" 2>/dev/null | wc -w)" = 2 ] || return 1
+  [ "$(git -C "$SRC" rev-parse -q --verify "$1^{tree}" 2>/dev/null)" = "$(git -C "$SRC" rev-parse -q --verify "$1^^{tree}" 2>/dev/null)" ] || return 1
+  grep -qE '^Review-Fix-Of: [0-9a-f]{7,40}[[:space:]]*$' <<<"$(git -C "$SRC" show -s --format=%B "$1" 2>/dev/null)"
+}
 fix_depth() { # fix_depth <commit> → "<depth> <root>": its Review-Fix-Of: links back to the first commit that is no fix. The walk
   # follows every link (cycle-guarded; each target must be a verified ancestor, so it ends); a link it cannot verify gives the
   # root "-" (unknown — the owner is then unknown, never an intermediate repair's author)
@@ -1430,13 +1487,14 @@ fix_depth() { # fix_depth <commit> → "<depth> <root>": its Review-Fix-Of: link
     rc=0; nx=$(fix_target "$s") || rc=$?
     [ "$rc" = 1 ] && break
     if [ "$rc" != 0 ] || [[ "$seen" == *" $nx "* ]]; then echo "$((n + 1)) -"; return 0; fi
-    seen="$seen$s "; s=$nx; n=$((n + 1))
+    dispute_only "$s" || n=$((n + 1))   # a dispute-only commit is no repair: no hop
+    seen="$seen$s "; s=$nx
   done
   echo "$n $s"
 }
 main_plan() { # main_plan <H> <findings> <range base> → "<n> <depth> <culprit> <root> <owner|-> <risk 0|1>" per blocking finding
   # (n=0: no blocking finding parsed — the tests failed / no verdict — pinned on H)
-  local h=$1 f=$2 att n route c t d root owner risk
+  local h=$1 f=$2 att n route c t d root owner risk k nx
   att=$(att_base="$3" attribution "$h" "$f")
   # unnumbered blocking diagnostics (failed trusted tests, TS errors, a reviewer that failed) are an assignment of their own
   # (n=0), next to the numbered findings — never dropped because numbered ones exist too
@@ -1444,6 +1502,9 @@ main_plan() { # main_plan <H> <findings> <range base> → "<n> <depth> <culprit>
   while read -r n route c t; do
     [ -n "$n" ] || continue
     if [ "$c" = - ]; then c=$h; fi
+    # a dispute-only culprit has no code: the finding belongs to the commit it disputes (its verified Review-Fix-Of: target)
+    k=0
+    while [ "$k" -lt 64 ] && dispute_only "$c" && nx=$(fix_target "$c"); do c=$nx; k=$((k + 1)); done
     read -r d root <<<"$(fix_depth "$c")"
     owner=-; if [ "$root" != - ]; then owner=$(thread_of "$root"); owner=${owner:--}; fi
     risk=0
@@ -1751,6 +1812,10 @@ for hsha in $(hotfix_candidates); do
     if hcov=$(recheck_covering "$hsha"); then
       if [ -n "${DRY:-}" ]; then echo "DRY HOTFIX ${hsha:0:9}: covered by the batched re-check of ${hcov%% *} — handled there"
       else log "HOTFIX ${hsha:0:9}: its reviewer was superseded; covered by the batched re-check of ${hcov%% *} (run ${hcov#* }) — handled there"; touch "$STATE/sent/$hsha.hotfix-complete"; fi
+    elif hstep=$(recheck_prereview_failed "$hrun" "$hjobs"); then
+      # failed before the code review: infrastructure — the supervisor, once per episode; no finding, no owner, no fixer.
+      # H stays open: the next main review that completes covers it (above).
+      main_infra "$hsha" "$hrun" "$hjobs" "$hstep"
     fi
     continue
   fi

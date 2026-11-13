@@ -232,7 +232,7 @@ for f in "$ROOT"/scripts/ci/*.sh; do
   if grep -nE '\bghm\b|GHC_RUN_DIR|ghc_(api|fetch|out)' "$f"; then fail "$(basename "$f") reaches the memo (approval scripts read GitHub)"; fi
 done
 D=$ROOT/scripts/ci/review-dispatch.sh
-ALLOWED=" review_list all_runs_list dev_round_running findings notes_of recheck_base preexisting_record "
+ALLOWED=" review_list all_runs_list dev_round_running findings notes_of recheck_base preexisting_record main_infra "   # main_infra: the log excerpt of a supervisor notice
 bad=$(awk -v ok="$ALLOWED" '/^[a-z_]+\(\) \{/ { fn = $1; sub(/\(\)$/, "", fn) } /^[^ #]/ && !/^[a-z_]+\(\) \{/ && !/^ / { fn = "" }
   /(^|[^a-z_])ghm / && !/^[[:space:]]*#/ { if (index(ok, " " fn " ") == 0) print NR ": " (fn == "" ? "(top level)" : fn) }' "$D")
 [ -z "$bad" ] || fail "ghm used outside the routing / notification readers of review-dispatch.sh: $bad"

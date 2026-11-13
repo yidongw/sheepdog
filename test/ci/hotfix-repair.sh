@@ -12,7 +12,11 @@ check() { local what=$1; shift; if "$@"; then echo "ok - $what"; else echo "FAIL
 g() { git -c user.name=fixture -c user.email=fixture@example.com -c core.hooksPath=/dev/null "$@"; }
 c() { echo x > "f-$RANDOM$RANDOM"; g add -A; g commit -qm "$1"; git rev-parse HEAD; }
 base() { GITHUB_API_URL=http://127.0.0.1:9 REPO=o/r GH_TOKEN=x bash "$CI/hotfix-review-base.sh" 2>/dev/null; }
-base_fails() { ! GITHUB_API_URL=http://127.0.0.1:9 REPO=o/r GH_TOKEN=x bash "$CI/hotfix-review-base.sh" >/dev/null 2>&1; }
+# a Review-Fix-Of: naming no ancestor (tralyx fd935e7c5, 11-14) never stops the range: a warning, and HEAD is reviewed in
+# full as an ordinary commit (test/ci/review-fix-of-nonancestor.sh: no repair privilege anywhere)
+base_warns() { local b
+  b=$(GITHUB_API_URL=http://127.0.0.1:9 REPO=o/r GH_TOKEN=x bash "$CI/hotfix-review-base.sh" 2>"$T/warn") || return 1
+  git rev-list "$b..HEAD" | grep -qx "$(git rev-parse HEAD)" && grep -q 'which is not its ancestor' "$T/warn"; }
 in_range() { git rev-list "$(base)..HEAD" | grep -qx "$1"; }
 
 # A. a repair is reviewed alone (owner 11-12: one hotfix review round); the deploy gate checks coverage
@@ -59,7 +63,7 @@ g checkout -q --detach "$F"
 I=$(c "intervening main commit"); c "$(printf 'repair again\n\nReview-Fix-Of: %s\nHotfix: repair' "$F")" >/dev/null
 check "A: a repair after an intervening commit is reviewed from that commit" test "$(base)" = "$I"
 c "$(printf 'invalid repair\n\nReview-Fix-Of: %040d' 0 | tr 0 a)" >/dev/null
-check "A: a Review-Fix-Of: naming no ancestor fails the range" base_fails
+check "A: a Review-Fix-Of: naming no ancestor is a warning; the commit stays in the range" base_warns
 
 # B. interleaved repairs and a divergent repair merge, each reviewed once
 git init -q -b main "$T/b"; cd "$T/b"
@@ -84,7 +88,7 @@ M=$(git rev-parse HEAD); c "$(printf 'repair train\n\nReview-Fix-Of: %s' "$M")" 
 check "C: a later repair naming the train merge is reviewed alone" test "$(base)" = "$M"
 g checkout -qb unrelated "$P"; U=$(c "unrelated change"); g checkout -q main-side
 c "$(printf 'invalid repair\n\nReview-Fix-Of: %s' "$U")" >/dev/null
-check "C: a Review-Fix-Of: naming a commit beside main fails the range" base_fails
+check "C: a Review-Fix-Of: naming a commit beside main is a warning; the commit stays in the range" base_warns
 
 # D. the main repair prompt: pushes to main, reports to the dispatch log, dependency rules; optional model settings
 cd "$T"; FN=$(awk '/^wake_fixer\(\) \{/ {on=1} on {print} on && /^}/ {exit}' "$CI/review-dispatch.sh")

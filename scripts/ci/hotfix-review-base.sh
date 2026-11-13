@@ -15,7 +15,8 @@
 #       base (review-passed.sh's chain needs it): one without is passed over and the range grows to an older base.
 #       None found within REVIEW_BASE_DEPTH (50) ancestors → the deployed sha (tag `deployed`, moved by the
 #       host autodeploy) when it is below <head>, else <head>^1 — never ancient history.
-#     A repair is reviewed in its range with the previous findings (prior-findings.sh).
+#     A repair is reviewed in its range with the previous findings (prior-findings.sh). A Review-Fix-Of: that names no
+#     ancestor is a warning, never an abort: that commit is reviewed as an ordinary commit.
 #
 # "Last reviewed" comes from the Review runs themselves (GitHub API, the workflow's read-only token), not from a marker
 # ref the review job would push: a marker needs contents: write in the job that checks out the candidate, is lost when
@@ -60,10 +61,17 @@ if [ -z "$base" ]; then
   if [ -n "$d" ] && [ "$d" != "$head" ] && git merge-base --is-ancestor "$d" "$head"; then base=$d; else base=$parent; fi
   echo "hotfix-review-base: no completed main review found among the last $DEPTH first-parent commits — reviewing ${base:0:12}..${head:0:12} (deployed tag: ${d:-none})" >&2
 fi
-# a Review-Fix-Of: trailer in the range must name an ancestor (never trust a trailer that points elsewhere)
+# A Review-Fix-Of: trailer that names no ancestor (or the commit itself) is never trusted — but it never stops the range
+# either (tralyx fd935e7c5, 11-14: a main hotfix named a dev sha; every later main re-check aborted here before any
+# review, and each abort was routed as a finding → an endless chain of dispute-only commits). Main reviews every commit of
+# the range in full anyway (no skip mode); such a commit simply gets no repair privilege anywhere: the privilege paths
+# check the ancestry themselves (review-repair.sh repaired, dev-review-base.sh --only-fixes, prior-findings.sh, the
+# dispatcher's devfix landing).
 for c in $(git rev-list "$base..$head"); do
-  for t in $(git show -s --format=%B "$c" | sed -nE 's/^Review-Fix-Of: ([0-9a-f]{40})$/\1/p'); do
-    if [ "$t" = "$c" ] || ! git merge-base --is-ancestor "$t" "$c" 2>/dev/null; then echo 'Review-Fix-Of must name an ancestor' >&2; exit 1; fi
+  for t in $(git show -s --format=%B "$c" | sed -nE 's/^Review-Fix-Of: ([0-9a-f]{40})[[:space:]]*$/\1/p'); do
+    if [ "$t" = "$c" ] || ! git merge-base --is-ancestor "$t" "$c" 2>/dev/null; then
+      echo "hotfix-review-base: warning: ${c:0:12} carries Review-Fix-Of: ${t:0:12}, which is not its ancestor — ignored; ${c:0:12} is reviewed as an ordinary commit (no repair privilege)" >&2
+    fi
   done
 done
 printf '%s\n' "$base"

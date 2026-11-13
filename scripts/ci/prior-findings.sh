@@ -9,7 +9,15 @@ REPO=${REPO:-${GITHUB_REPOSITORY:?REPO=owner/name is required}}
 API=${GITHUB_API_URL:-https://api.github.com}
 api() { curl -fsSL -m 30 -H "Authorization: Bearer ${GH_TOKEN:-}" -H "Accept: application/vnd.github+json" "$API/repos/$REPO/$1"; }
 note() { echo "prior-findings: $*" >&2; }   # diagnostics go to the job log; stdout is the ledger
-fixes=$(git log --format=%B "$1..$2" 2>/dev/null | sed -nE 's/^Review-Fix-Of: ([0-9a-f]{40})[[:space:]]*$/\1/p' | awk '!seen[$0]++')
+# only trailers that name an ancestor of their commit: a previous round's findings narrow the re-review (the reviewer
+# treats ancestors of S as reviewed then), so a trailer naming a non-ancestor (tralyx fd935e7c5 → dev 1de3ade46, 11-14)
+# must not attach S's round — that commit is reviewed as an ordinary commit
+fixes=$(for c in $(git rev-list "$1..$2" 2>/dev/null); do
+  for t in $(git show -s --format=%B "$c" | sed -nE 's/^Review-Fix-Of: ([0-9a-f]{40})[[:space:]]*$/\1/p'); do
+    if [ "$t" != "$c" ] && git merge-base --is-ancestor "$t" "$c" 2>/dev/null; then echo "$t"
+    else echo "prior-findings: ${c:0:12} names ${t:0:12}, not its ancestor — ignored" >&2; fi
+  done
+done | awk '!seen[$0]++')
 [ -n "$fixes" ] || exit 0
 # 11-13: the review.yml step ran without GH_TOKEN — every call was a 404 on the private repo and nothing said why
 [ -n "${GH_TOKEN:-}" ] || { note "no GH_TOKEN — previous findings of $(tr '\n' ' ' <<<"$fixes")unavailable"; exit 0; }

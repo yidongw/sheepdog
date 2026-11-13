@@ -100,11 +100,13 @@ reset_runs; run 14 "$F2" success "$H3"
 test "$(base HEAD)" = "$F2"                                  # the merge head itself: from the last review
 H4=$(c "hotfix four" "Hotfix: four")
 test "$(base HEAD)" = "$F2"                                  # above the merge: still from the last review, M included
-# a Review-Fix-Of: naming a non-ancestor is refused
-c "bogus" "Review-Fix-Of: $(printf 'a%.0s' $(seq 40))
-Hotfix: bogus" >/dev/null
-if base HEAD >/dev/null; then echo "non-ancestor Review-Fix-Of accepted" >&2; exit 1; fi
-echo 'train merges reviewed on main; non-ancestor trailers refused'
+# a Review-Fix-Of: naming a non-ancestor is ignored with a warning — never an abort that stops every later main review
+# (tralyx fd935e7c5, 11-14); the commit stays in the range (test/ci/review-fix-of-nonancestor.sh: no repair privilege)
+BG=$(c "bogus" "Review-Fix-Of: $(printf 'a%.0s' $(seq 40))
+Hotfix: bogus")
+test "$(base HEAD)" = "$F2" || { echo "a non-ancestor Review-Fix-Of: stopped the main range" >&2; exit 1; }
+(cd "$T/src" && PATH=$T/bin:$PATH GH_TOKEN=x REPO=o/r bash "$BASE_SH" HEAD 2>&1 >/dev/null) | grep -q "warning: ${BG:0:12} carries Review-Fix-Of:" || { echo "no warning for a non-ancestor Review-Fix-Of:" >&2; exit 1; }
+echo 'train merges reviewed on main; non-ancestor trailers ignored with a warning'
 
 # 5. review.yml: tests per sha, ONE main reviewer group, no main skip, Train-Merge / Review-Fix-Of heads re-checked, the
 #    review-range line for the dispatcher
