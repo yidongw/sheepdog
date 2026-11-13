@@ -21,6 +21,16 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
 - **Open findings**: findings whose fix rounds are spent are kept in `$STATE/open-findings.log`, which the review job
   passes to the reviewer (`open-findings-file`) so repeats are recognised as pre-existing.
 
+## GitHub API budget
+
+All of a host's dispatchers usually share one token (5000 REST calls/hour). `scripts/ci/gh-cache.sh` (sourced by the
+dispatcher, and inherited by the contract scripts it runs) answers repeated reads within a run and the final records of
+completed runs from `$STATE/ghcache`: one `gh run list` per filter set per run (the same server-side filters, the union
+of the fields, at least 100 runs, 60 s), the jobs / artifacts / record of a run once a listing shows it completed (kept
+while the listing shows the same attempt; a re-run is read again), a completed job's log, an artifact's zip. Writes
+(`gh run cancel`, …) are never cached and drop the listings. `test/ci/review-dispatch-api-budget.sh` runs the whole
+dispatcher against a counting fake `gh`: 13 calls cold, 3 on the next run of the same state (32 / 14 before).
+
 ## Settings
 
 Required (no defaults — they are host and repository specific):
