@@ -6,7 +6,7 @@
 # pin-bump step or the self-review.yml run reader).
 #
 # Every review-flow suite of THIS tree (test/ci/*.sh except the dispatcher's — they exercise review-dispatch.sh /
-# review-notify.sh, which run from the host's trusted main checkout, never from the pin — and except this file) is run
+# review-notify.sh / gh-cache.sh, which run from the host's trusted main checkout, never from the pin — and except this file) is run
 # against the pinned tree: the pinned snapshot's scripts/, .github/ and reviewer/, with this tree's test/ci/ on top.
 # A suite the pin does not pass fails this test, unless test/ci/self-review-pin.pending names it for exactly this pin:
 #     <suite file name> <the 40-char pin> <why: the protection that is on dev/main but not yet in the pin>
@@ -59,7 +59,7 @@ suites=()
 for f in "$ROOT"/test/ci/*.sh; do
   s=$(basename "$f")
   [ "$s" = "$SELF" ] && continue
-  grep -qE 'review-dispatch\.sh|review-notify\.sh' "$f" && continue   # the dispatcher's suites
+  grep -qE 'review-dispatch\.sh|review-notify\.sh|gh-cache\.sh' "$f" && continue   # the dispatcher's suites
   suites+=("$s")
 done
 [ "${#suites[@]}" -ge 10 ] || fail "only ${#suites[@]} review-flow suites found"
