@@ -39,6 +39,7 @@ while IFS= read -r line; do
   [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || fail "self-review-pin.pending: '$suite' needs the full pin sha"
   [ "$sha" = "$pin" ] || fail "self-review-pin.pending: '$suite' is pending for ${sha:0:9}, the pin is now ${pin:0:9} — re-run it against the new pin (drop the line)"
   [ -n "${why// }" ] || fail "self-review-pin.pending: '$suite' needs a reason"
+  [ "$suite" != dev-review-machinery-kind.sh ] || fail "the executing pin must classify machinery repairs for full review; this suite cannot be pending"
   pending+="$suite "
 done < <(cat "$ROOT/test/ci/self-review-pin.pending" 2>/dev/null || true)
 

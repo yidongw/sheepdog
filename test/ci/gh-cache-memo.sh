@@ -136,21 +136,24 @@ echo "ok - the next dispatcher run asks again (a re-run between runs is always s
 
 # ── completed jobs' logs: by job id, byte for byte; only once a jobs answer showed the job completed ──
 ghc_done; ghc_init "$STATE"; setrun completed failure 2026-11-13T00:25:00Z 4
-printf 'ok\000NUL\377\376 bytes\r\nreview-gate: BLOCKED #1 x\n\000' > "$FX/log-42"
+printf 'partial log\n' > "$FX/log-42"
 : > "$FX/calls"; ghm api repos/o/r/actions/jobs/42/logs > "$T/l0"
-[ -e "$STATE/ghcache/logs/42" ] && fail "a log was stored though no jobs answer of this run showed the job completed"
+[ -e "$STATE/ghcache/logs/final.42" ] && fail "a log was stored though no jobs answer of this run showed the job completed"
+printf 'ok\000NUL\377\376 bytes\r\nreview-gate: BLOCKED #1 x\n\000' > "$FX/log-42"
 ghm api "$JOBS" >/dev/null   # shows job 42 completed (2026-11-13: long ago)
 ghm api repos/o/r/actions/jobs/42/logs > "$T/l1"
+cmp -s "$FX/log-42" "$T/l1" || fail "the unconfirmed prefix was promoted after completion instead of refetching the final log"
+[ "$(calls 'actions/jobs/42/logs$')" = 2 ] || fail "completion did not trigger a second log fetch"
 ghc_done; ghc_init "$STATE"; : > "$FX/calls"
 ghm api repos/o/r/actions/jobs/42/logs > "$T/l2"
 [ ! -s "$FX/calls" ] || fail "a stored completed job's log was fetched again: $(cat "$FX/calls")"
-cmp -s "$FX/log-42" "$T/l0" && cmp -s "$FX/log-42" "$T/l1" && cmp -s "$FX/log-42" "$T/l2" || fail "a job log was altered (NUL / binary bytes)"
-cmp -s "$FX/log-42" "$STATE/ghcache/logs/42" || fail "the stored log differs from GitHub's"
+cmp -s <(printf 'partial log\n') "$T/l0" && cmp -s "$FX/log-42" "$T/l1" && cmp -s "$FX/log-42" "$T/l2" || fail "a job log was altered (NUL / binary bytes)"
+cmp -s "$FX/log-42" "$STATE/ghcache/logs/final.42" || fail "the stored log differs from GitHub's"
 # a job that completed less than two minutes ago: its log may still be incomplete — not stored
 setrun in_progress null 2026-11-13T00:30:00Z 3; printf 'partial\n' > "$FX/log-32"
 jq --arg t "$(date -u +%FT%TZ)" '.status = "completed" | .conclusion = "success" | .done_at = $t' "$FX/run.json" > "$T/r" && mv "$T/r" "$FX/run.json"
 ghm api "$JOBS" >/dev/null; ghm api repos/o/r/actions/jobs/32/logs >/dev/null
-[ -e "$STATE/ghcache/logs/32" ] && fail "the log of a job completed seconds ago was stored"
+[ -e "$STATE/ghcache/logs/final.32" ] && fail "the log of a job completed seconds ago was stored"
 # binary downloads pass through byte for byte and are never kept
 : > "$FX/calls"
 ghm api repos/o/r/actions/artifacts/3/zip > "$T/z1"; ghm api repos/o/r/actions/artifacts/3/zip > "$T/z2"; ghm api repos/o/r/actions/runs/7/logs > "$T/z3"

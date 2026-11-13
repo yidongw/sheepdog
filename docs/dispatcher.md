@@ -40,9 +40,11 @@ dispatcher) splits the reads in two:
   `gh run rerun/cancel/delete`, `gh workflow run`, `gh api -X …`, any other `gh` command, `git push` (wrappers exported
   to child scripts) — wipes it. Stale by seconds at worst, which can delay an action by one dispatcher run, never
   approve one. `ghm` is not exported: a child script cannot reach the memo.
-- **Completed jobs' logs** are kept across runs by job id (`$STATE/ghcache/logs/<job id>`; a re-run creates new job
+- **Completed jobs' logs** are kept across runs by job id (`$STATE/ghcache/logs/final.<job id>`; a re-run creates new job
   ids, so a completed job's log never changes), read through `ghm`: stored once a jobs answer of the same run showed
-  the job completed more than two minutes ago, byte for byte. Nothing else outlives the dispatcher run.
+  the job completed more than two minutes ago, byte for byte. Unconfirmed logs are never memoised; confirmation
+  triggers a new fetch before persistence. Old unversioned log files are ignored because they may contain prefixes.
+  Nothing else outlives the dispatcher run.
 
 Binary downloads (artifact zips, run log zips) and other endpoints pass through untouched. To make identical reads,
 the dispatcher's listings use one request per filter set (`review_list`: 100 runs with every field its callers read;

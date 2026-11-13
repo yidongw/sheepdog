@@ -2,4 +2,3 @@
 #   <suite file name> <the 40-char pin sha> <the protection that is not in the pinned snapshot yet>
 # Allowed only for that exact pin: a pin bump runs every suite against the new pin again. Keep this list empty whenever
 # the newest reviewed main carries the protection — bump the pin instead (docs/self-review.md).
-dev-review-machinery-kind.sh 8546e989d44e085d157047509b9139e9b08e78ea the pinned dev-review-base.sh still classifies a machinery repair as tests-only (review of dev c6dfe26bb #3); bump the pin once this reaches main
