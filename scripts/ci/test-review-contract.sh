@@ -9,6 +9,7 @@
 #   (e) provenance: only workflow_run runs of main count as evidence, in every reader; every page of runs is read
 #   (g) a tests-only fix lands only as a main head review.yml re-checks; its approval holds after main advanced onto it
 #   (h) a review without a usable attestation is no range base; an unprovable run does not hide an older provable one
+#   (i) hotfix chains back to prod (ported from vpn-sub): every hotfix over its own link; unreviewed / beside / ahead refused
 set -uo pipefail
 CI=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$CI/../.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
@@ -211,6 +212,31 @@ bash "$CI/test-commit-gates.sh" || fail "commit verification regressions"
 fi
 
 # (a)(b)(d) review.yml wiring (needs PyYAML; a minimal test VM may have none — checked where it exists)
+# (i) hotfix chains on main (ported from yidongw/vpn-sub scripts/ci/test-review-flow.sh part 1, which tested vpn-sub's
+# copy of review-passed.sh before it adopted sheepdog): main A → H1 → H2 → X → H3 → N → H4, each H re-checked over its
+# own link; X came onto main with no review; S is beside main.
+cd "$T" && rm -rf "$T/src" && git init -q -b main "$T/src" && cd "$T/src"
+A=$(c a); H1=$(c h1); H2=$(c h2); X=$(c x); H3=$(c h3); N=$(c n); H4=$(c h4)
+g checkout -q -b side "$A"; S=$(c side); g checkout -q main
+reset
+run 1 "recheck $H1" success success "$A"
+run 2 "recheck $H2" success success "$H1"
+run 3 "recheck $H3" success success "$X"
+run 4 "recheck $N" failure success "$H3"
+run 5 "recheck $H4" success success "$N"
+RP "$H2" o/r || fail "(i) H2 does not pass without a deployed sha: $(cat "$T/err")"
+RP "$H2" o/r "$H1" || fail "(i) prod = H1: H2's own link H1..H2 does not cover it: $(cat "$T/err")"
+RP "$H2" o/r "$A" || fail "(i) prod = A (two hotfixes behind): H2's link + H1's link do not cover it: $(cat "$T/err")"
+RP "$H3" o/r "$A" && fail "(i) prod = A: H3's link starts at X, which has no review — covered anyway"
+RP "$H3" o/r "$X" || fail "(i) prod = X: H3's own link does not cover it: $(cat "$T/err")"
+RP "$H2" o/r "$S" && fail "(i) prod beside main (a side branch) was covered"
+RP "$H1" o/r "$H2" && fail "(i) prod ahead of the sha (moving prod backward) was accepted"
+# vpn-sub's copy also refused a link whose own trusted tests failed (N). sheepdog's contract checks the tests of the sha
+# that ships (H4: its tree contains N) and review COVERAGE of every commit since prod; N's completed review is a link.
+RP "$H4" o/r "$H3" || fail "(i) prod = H3: H4's link from N (N reviewed; H4's tests passed) does not cover it: $(cat "$T/err")"
+RP "$N" o/r "$H3" && fail "(i) N itself (its trusted tests failed) was approved"
+echo "ok (i) - hotfix chains: links of completed re-checks back to prod; a link from an unreviewed commit, prod beside or ahead: refused"
+
 done_() { [ "$FAILS" = 0 ] || { echo "$FAILS check(s) failed" >&2; exit 1; }; echo "all passed"; exit 0; }
 if ! python3 -c 'import yaml' 2>/dev/null; then echo "skip (a)(b)(d) review.yml wiring: no PyYAML here"; done_; fi
 python3 - "$ROOT/.github/workflows/review.yml" <<'PY' || fail "review.yml wiring"
