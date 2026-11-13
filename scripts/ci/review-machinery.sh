@@ -8,6 +8,7 @@
 # merge-branch.sh.
 REVIEW_MACHINERY_RE='^(\.github/|reviewer/|scripts/ci/)'
 review_machinery_files() { # review_machinery_files <git dir> <rev-list args…> → machinery files those commits change
-  # merges count only with their own resolutions (--cc): what a merge brings from its parents is in their commits
-  git -C "$1" log --format= --name-only --cc "${@:2}" -- 2>/dev/null | grep -E "$REVIEW_MACHINERY_RE" | sort -u || true
+  # Compare merges against every parent: matching one parent can still roll back machinery
+  # from another parent, which combined diffs omit.
+  git -C "$1" log --format= --name-only -m "${@:2}" -- 2>/dev/null | grep -E "$REVIEW_MACHINERY_RE" | sort -u || true
 }
