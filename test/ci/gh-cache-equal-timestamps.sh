@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
+# Dispatcher suite: review-dispatch.sh sources gh-cache.sh from the host's trusted
+# main checkout, so this cache is tested here rather than against the self-review pin.
 # A rerun may share updated_at with the previous completion. Conflicting fresh
 # observations must invalidate both cached job tiers, regardless of their source.
 set -euo pipefail
+source "$(dirname "$0")/lib/no-real-t3.sh"
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 source "$ROOT/scripts/ci/gh-cache.sh"
 source "$ROOT/scripts/ci/review-coverage.sh"
