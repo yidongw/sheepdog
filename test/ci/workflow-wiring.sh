@@ -61,9 +61,27 @@ else:
     if list(on) != ["workflow_run"] or on["workflow_run"].get("workflows") != ["CI"]: bad.append("self-review.yml: must be workflow_run of CI only")
     if sr.get("name") != "Review": bad.append("self-review.yml: the workflow is named Review (the runner guard admits only it)")
     js = sr["jobs"]
-    if [j.get("uses") for j in js.values()] != ["./.github/workflows/review.yml"]: bad.append("self-review.yml: one job calling ./.github/workflows/review.yml")
 for f, d in docs.items():
     if f.startswith(".github/") and not f.endswith(("self-review.yml", "/review.yml")) and "self-hosted" in yaml.safe_dump(d): bad.append(f"{f}: a self-hosted runner outside self-review.yml")
+# review of 0f5d80c10 #4: sheepdog's trusted test list runs ci.yml's linters, the same pinned commands
+ts = open(".github/sheepdog/tests.sh").read()
+lint = next(j for j in docs[".github/workflows/ci.yml"]["jobs"].values() if "actionlint" in yaml.safe_dump(j))
+for st in lint["steps"]:
+    for line in (st.get("run") or "").splitlines():
+        if line.strip() and line.strip() not in ts: bad.append(f".github/sheepdog/tests.sh: ci.yml lint line missing: {line.strip()[:80]}")
+sr_uses = [j.get("uses") for j in (sr or {}).get("jobs", {}).values()]
+if not (len(sr_uses) == 1 and re.fullmatch(r"yidongw/sheepdog/\.github/workflows/review\.yml@[0-9a-f]{40}", sr_uses[0] or "")):
+    bad.append("self-review.yml: sheepdog reviews itself with a pinned, already reviewed sha (never ./ = the candidate's or main's latest)")
+else:
+    # review of ad09c0b50 #1/#2: the pin is more than "a full sha" — the documented pin is the one that runs, and the
+    # pinned snapshot is tested against this tree's review-flow suites (test/ci/self-review-pin.sh)
+    full = sr_uses[0].rsplit("@", 1)[1]
+    srtext = open(".github/workflows/self-review.yml").read()
+    for f, pat in ((".github/workflows/self-review.yml", r"Pin: ([0-9a-f]{7,40})\b"), ("docs/self-review.md", r"Pinned: `([0-9a-f]{7,40})`")):
+        m = re.findall(pat, srtext if f.endswith(".yml") else open(f).read())
+        if len(m) != 1 or not full.startswith(m[0]): bad.append(f"{f}: names the pin as {m} — the pin that runs is {full[:12]}")
+    import os
+    if not os.path.isfile("test/ci/self-review-pin.sh"): bad.append("test/ci/self-review-pin.sh missing: the pinned snapshot must pass the review-flow suites")
 for b in bad: print("FAIL:", b)
 sys.exit(1 if bad else 0)
 PY

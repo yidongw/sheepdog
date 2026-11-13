@@ -188,20 +188,13 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       # The pinned sheepdog sha, from GitHub's record of this run (referenced_workflows), not from any input: a caller
       # that references this workflow by a tag or branch is refused (fail closed) — callers pin a full commit sha.
-      #   sheepdog reviewing ITSELF (the caller is sheepdog's self-review.yml, which calls ./.github/workflows/review.yml):
-      #   the sheepdog sha is the default-branch commit that started this run (GITHUB_WORKFLOW_SHA) — main's reviewer
-      #   reviews the pushed change, as in every adopter. The caller's workflow file names the trusted runs.
+      #   sheepdog reviewing ITSELF pins itself the same way (self-review.yml): the reviewer is a sheepdog sha that already
+      #   passed review, never the candidate's or main's latest code. The caller's workflow file names the trusted runs.
       - name: Pinned sheepdog sha
         run: |
           wf=${CALLER_WORKFLOW_REF%%@*}; wf=${wf##*/}
           [[ "$wf" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]] || { echo "::error::cannot read the caller workflow file from '$CALLER_WORKFLOW_REF'"; exit 1; }
           echo "SHEEPDOG_REVIEW_WORKFLOW=$wf" >> "$GITHUB_ENV"
-          if [ "$GITHUB_REPOSITORY" = "$SHEEPDOG_REPO" ]; then
-            [[ "$GITHUB_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no workflow sha"; exit 1; }
-            echo "sheepdog: reviewing itself with its default branch at $GITHUB_WORKFLOW_SHA"
-            echo "SHEEPDOG_SHA=$GITHUB_WORKFLOW_SHA" >> "$GITHUB_ENV"
-            exit 0
-          fi
           refs=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" | jq -c '.referenced_workflows // []')
           entry=$(jq -c --arg p "$SHEEPDOG_REPO/.github/workflows/review.yml@" '[.[] | select(.path | startswith($p))][0] // empty' <<<"$refs")
@@ -292,13 +285,33 @@ jobs:
       # this repository from then on (docs/pin-bumps.md): the new pin must be on sheepdog's main (main moves only through
       # sheepdog's own reviewed train or a re-checked Hotfix:), and the sheepdog diff is reviewed with the range.
       - name: sheepdog pin bump (the new pin is on sheepdog's main; its diff joins the review)
-        if: steps.range.outputs.kind == 'review'
         working-directory: candidate
         run: |
-          re=${SHEEPDOG_REPO//./\\.}
-          pin_at() { git show "$1:.github/workflows/$SHEEPDOG_REVIEW_WORKFLOW" 2>/dev/null | sed -nE "s#^ *uses: $re/\\.github/workflows/review\\.yml@([0-9a-f]{40})( .*)?\$#\\1#p" | head -1; }
-          old=$(pin_at "$REVIEW_BASE"); new=$(pin_at HEAD)
-          if [ -z "$old" ] || [ -z "$new" ] || [ "$old" = "$new" ]; then echo "no sheepdog pin bump in this range (${old:0:12} → ${new:0:12})"; exit 0; fi
+          # The pins of the caller file at <rev>: every jobs.<id>.uses value (YAML-decoded: quoting, escapes and block
+          # scalars are read as GitHub reads them) naming <sheepdog>/.github/workflows/review.yml; "none" when the file
+          # is absent at <rev>, "error" when it does not parse.
+          pins_at() {
+            git show "$1:.github/workflows/$SHEEPDOG_REVIEW_WORKFLOW" > "$RUNNER_TEMP/caller.yml" 2>/dev/null || { echo none; return; }
+            python3 -c 'import sys, yaml
+          try: d = yaml.safe_load(open(sys.argv[1]))
+          except Exception: print("error"); sys.exit()
+          jobs = (d or {}).get("jobs") if isinstance(d, dict) else None
+          if not isinstance(jobs, dict): print("error"); sys.exit()
+          p = sys.argv[2] + "/.github/workflows/review.yml@"
+          print(" ".join(sorted({j["uses"][len(p):] for j in jobs.values() if isinstance(j, dict) and isinstance(j.get("uses"), str) and j["uses"].startswith(p)})))' \
+              "$RUNNER_TEMP/caller.yml" "$SHEEPDOG_REPO" || echo error
+          }
+          old=$(pins_at "$REVIEW_BASE"); new=$(pins_at HEAD)
+          if [ "$old" = error ] || [ "$new" = error ]; then echo "::error::the caller workflow does not parse at ${REVIEW_BASE:0:12} or HEAD"; exit 1; fi
+          if [ "$old" = "$new" ]; then echo "no sheepdog pin change in this range (${old:0:12})"; exit 0; fi
+          if [ "$old" = none ] || [ -z "$old" ]; then echo "the range adopts sheepdog (no pin at its base): pinned ${new:0:12}"; exit 0; fi
+          # Fail closed: an existing pin replaced by anything but exactly one full sha (a second pin, a tag or branch, its
+          # removal) is no pin bump this step can vouch for.
+          if ! [[ "$old" =~ ^[0-9a-f]{40}$ ]] || ! [[ "$new" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::sheepdog pin changed from '$old' to '$new': expected one full sha replaced by one full sha"; exit 1
+          fi
+          # A pin bump needs a full review: a tests-only fix round never carries one.
+          [ "$KIND" = review ] || { echo "::error::a pin bump (${old:0:12} → ${new:0:12}) in a tests-only fix round: it needs a full review"; exit 1; }
           S=$GITHUB_WORKSPACE/.sheepdog
           git -C "$S" fetch -q origin "+refs/heads/main:refs/remotes/origin/main"
           git -C "$S" cat-file -e "$old^{commit}" 2>/dev/null || git -C "$S" fetch -q origin "$old"
@@ -313,6 +326,7 @@ jobs:
           { echo "PIN_FROM=$old"; echo "PIN_TO=$new"; } >> "$GITHUB_ENV"
         env:
           SHEEPDOG_REPO: ${{ inputs.sheepdog-repository }}
+          KIND: ${{ steps.range.outputs.kind }}
       # The isolated reviewer runs `docker run --pull=never alpine:3.20`; never `docker image prune -a` on review hosts.
       - name: Reviewer image present
         run: docker image inspect alpine:3.20 >/dev/null 2>&1 || docker pull -q alpine:3.20

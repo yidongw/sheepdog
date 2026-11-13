@@ -20,7 +20,7 @@ for key, prefix in (("pin", "sheepdog pin bump"), ("review", "Review (blocking")
     open(f"{sys.argv[2]}/{key}.sh", "w").write(s["run"])
     open(f"{sys.argv[2]}/{key}.if", "w").write(str(s.get("if", "")))
 PY
-[ "$(cat "$W/pin.if")" = "steps.range.outputs.kind == 'review'" ] || fail "pin step condition: $(cat "$W/pin.if")"
+[ -z "$(cat "$W/pin.if")" ] || fail "the pin step must run on every range (also a tests-only fix round): if '$(cat "$W/pin.if")'"
 g() { git -c user.name=t -c user.email=t@t "$@"; }
 # sheepdog: origin (bare) with main A → B, and a side branch X (not on main)
 git init -q --bare -b main "$T/sd.git"; git init -q -b main "$T/sd"; cd "$T/sd"
@@ -37,7 +37,7 @@ caller() { mkdir -p .github/workflows; printf 'name: Review\njobs:\n  sheepdog:\
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "$RUNNER_TEMP/args"\n' > "$T/bin/node"; chmod +x "$T/bin/node"
 step() { # step <key> <base>
   (cd "$WS/candidate" && PATH="$T/bin:$PATH" GITHUB_WORKSPACE=$WS GITHUB_ENV=$T/env RUNNER_TEMP=$T/rt REVIEW_BASE=$2 \
-    SHEEPDOG_REPO=yidongw/sheepdog SHEEPDOG_REVIEW_WORKFLOW=review.yml REVIEWER_ENV_FILE= bash -e -c "$(cat "$W/$1.sh")" 2>&1)
+    KIND=${KIND:-review} SHEEPDOG_REPO=yidongw/sheepdog SHEEPDOG_REVIEW_WORKFLOW=review.yml REVIEWER_ENV_FILE= bash -e -c "$(cat "$W/$1.sh")" 2>&1)
 }
 run_both() { # run_both <base> → pin step rc in $prc; then the review step with the env the pin step wrote
   : > "$T/env"; rm -f "$T/rt/args"; prc=0; out=$(step pin "$1") || prc=$?
@@ -64,3 +64,17 @@ git rm -q .github/workflows/review.yml; g commit -qm "no caller yet"; NOPIN=$(gi
 printf '# was yidongw/sheepdog/.github/workflows/review.yml@%s\n' "$SA" >> .github/workflows/review.yml; g commit -qam comment; run_both "$(git rev-parse HEAD~1)"
 [ "$prc" = 0 ] && ! grep -q -- "--pin" "$T/rt/args" || fail "a pin in a comment counted as a bump"
 echo "ok - no bump / adoption / a comment: no pin arguments"
+# review of 0f5d80c10 #1/#2: a valid QUOTED pin (or any other YAML spelling) is a pin; a pin replaced by something that is
+# not one full sha fails closed; a caller that does not parse fails; a bump in a tests-only fix round fails
+qcaller() { mkdir -p .github/workflows; printf 'name: Review\njobs:\n  sheepdog:\n    uses: "%s"\n' "$1" > .github/workflows/review.yml; g add -A; g commit -qm "quoted pin"; git rev-parse HEAD; }
+QB=$(qcaller "yidongw/sheepdog/.github/workflows/review.yml@$SA"); qcaller "yidongw/sheepdog/.github/workflows/review.yml@$SB" >/dev/null; run_both "$QB"
+[ "$prc" = 0 ] && grep -qx -- "--pin-to" "$T/rt/args" && grep -qx "$SB" "$T/rt/args" || fail "a quoted pin bump was not reviewed: $out"
+git reset -q --hard "$QB"; qcaller "yidongw/sheepdog/.github/workflows/review.yml@$SX" >/dev/null; run_both "$QB"
+[ "$prc" != 0 ] || fail "a quoted pin bump off sheepdog's main was accepted"
+git reset -q --hard "$QB"; qcaller "yidongw/sheepdog/.github/workflows/review.yml@main" >/dev/null; run_both "$QB"
+[ "$prc" != 0 ] && grep -q "expected one full sha" <<<"$out" || fail "a pin replaced by a branch name was accepted: $out"
+git reset -q --hard "$QB"; printf 'jobs: [unclosed\n' > .github/workflows/review.yml; g commit -qam broken; run_both "$QB"
+[ "$prc" != 0 ] || fail "a caller that does not parse was accepted"
+git reset -q --hard "$QB"; qcaller "yidongw/sheepdog/.github/workflows/review.yml@$SB" >/dev/null; KIND=tests-only-fix run_both "$QB"
+[ "$prc" != 0 ] && grep -q "tests-only fix round" <<<"$out" || fail "a pin bump in a tests-only fix round was accepted: $out"
+echo "ok - quoted pins are pins; a non-sha replacement, an unparsable caller, a bump in a tests-only fix round: fail closed"

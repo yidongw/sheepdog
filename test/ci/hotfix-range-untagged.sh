@@ -65,7 +65,7 @@ review() { # review <attested base> <head>: a completed, trusted "recheck <head>
 range() { bash "$CI/hotfix-review-base.sh" HEAD 2>/dev/null; }
 fails=0
 check() { local what=$1; shift; if "$@"; then echo "ok - $what"; else echo "FAIL - $what" >&2; fails=$((fails + 1)); fi; }
-covers() { git rev-list "$base..HEAD" | grep -qx "$1"; }
+covers() { local l; l=$(git rev-list "$base..HEAD"); grep -qx "$1" <<<"$l"; }   # whole list first: no SIGPIPE under pipefail
 
 ROOT_SHA=$(c root); A=$(c a 'Hotfix: a'); review "$ROOT_SHA" "$A"; g tag deployed "$A"
 U=$(c untagged-prerequisite); H=$(c hotfix 'Hotfix: hotfix')
