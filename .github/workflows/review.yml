@@ -302,12 +302,14 @@ jobs:
               "$RUNNER_TEMP/caller.yml" "$SHEEPDOG_REPO" || echo error
           }
           old=$(pins_at "$REVIEW_BASE"); new=$(pins_at HEAD)
-          [ "$old" != error ] && [ "$new" != error ] || { echo "::error::the caller workflow does not parse at ${REVIEW_BASE:0:12} or HEAD"; exit 1; }
+          if [ "$old" = error ] || [ "$new" = error ]; then echo "::error::the caller workflow does not parse at ${REVIEW_BASE:0:12} or HEAD"; exit 1; fi
           if [ "$old" = "$new" ]; then echo "no sheepdog pin change in this range (${old:0:12})"; exit 0; fi
           if [ "$old" = none ] || [ -z "$old" ]; then echo "the range adopts sheepdog (no pin at its base): pinned ${new:0:12}"; exit 0; fi
           # Fail closed: an existing pin replaced by anything but exactly one full sha (a second pin, a tag or branch, its
           # removal) is no pin bump this step can vouch for.
-          [[ "$old" =~ ^[0-9a-f]{40}$ ]] && [[ "$new" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sheepdog pin changed from '$old' to '$new': expected one full sha replaced by one full sha"; exit 1; }
+          if ! [[ "$old" =~ ^[0-9a-f]{40}$ ]] || ! [[ "$new" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::sheepdog pin changed from '$old' to '$new': expected one full sha replaced by one full sha"; exit 1
+          fi
           # A pin bump needs a full review: a tests-only fix round never carries one.
           [ "$KIND" = review ] || { echo "::error::a pin bump (${old:0:12} → ${new:0:12}) in a tests-only fix round: it needs a full review"; exit 1; }
           S=$GITHUB_WORKSPACE/.sheepdog
