@@ -14,8 +14,9 @@ it guards.
   host. So a change to the reviewer, the gates or the workflow governs sheepdog's own review only after a pin bump in
   `self-review.yml`, and that bump is reviewed together with the sheepdog diff it ships (section 2): a bump on `dev`
   by the pinned (old) reviewer — dev runs use main's `self-review.yml` —, a `Hotfix:` bump on `main` by the new pin.
-  Pinned: `463c89351` (includes the machinery repair classifier: ranges that would land review machinery
-  receive a full review, agreeing with the approval consumer and landing guard).
+  Pinned: `5f7c3ce04` (the machinery repair classifier: ranges that would land review machinery receive a full
+  review; a `Review-Fix-Of:` naming no ancestor is a warning, never a range abort, and grants no repair privilege; a
+  dev block superseded by a later completed review that contains it and its whole range needs no repair of its own).
 - **The pin carries the current protections** (review of ad09c0b50 #1/#2: the pin e099da79f shipped the old range
   walker, so the reviewer that actually ran lacked the fix the candidate's tests demanded). `test/ci/self-review-pin.sh`
   runs every review-flow suite of the tree (all of `test/ci/` except the dispatcher's, which runs from the trusted main
