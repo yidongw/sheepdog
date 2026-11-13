@@ -7,7 +7,8 @@
 #   · run 1 (cold) and run 2 (a minute later, same state) stay within their call budgets;
 #   · run 2 fetches no completed run's jobs / log a second time and lists each filter set once;
 #   · the answers are the same as without the cache: the blocked re-check's findings reach the same notices;
-#   · a re-run (a new attempt in the listing) is read again, never answered from the stored attempt.
+#   · a re-run (listed again as queued, a new updatedAt) is read again, never answered from the stored attempt;
+#   · the listing asks only for fields the host's gh (2.45) knows (11-13: `attempt` made every listing fail).
 set -euo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -44,6 +45,9 @@ if a[:2] == ["run", "list"]:
     if br: runs = [r for r in runs if r["headBranch"] == br]
     runs = runs[: int(opt(["-L"]) or 20)]
     fields = (opt(["--json"]) or "").split(",")
+    known = "conclusion createdAt databaseId displayTitle event headBranch headSha name number startedAt status updatedAt url workflowDatabaseId workflowName".split()
+    bad = [f for f in fields if f and f not in known]   # gh 2.45 (the host's): e.g. no "attempt"
+    if bad: sys.stderr.write(f"Unknown JSON field: {bad[0]!r}\n"); sys.exit(1)
     emit([{k: r.get(k) for k in fields if k} for r in runs], opt(["-q", "--jq"]))
     sys.exit(0)
 if a[:2] in (["run", "cancel"], ["run", "rerun"]): sys.exit(0)
@@ -55,7 +59,7 @@ if a[0] == "api":
     if m:
         r = next((r for r in load("runs.json") if r["databaseId"] == int(m.group(1))), None)
         if r is None: sys.exit(1)
-        emit({"id": r["databaseId"], "status": r["status"], "conclusion": r["conclusion"], "run_attempt": r.get("attempt", 1)}, q); sys.exit(0)
+        emit({"id": r["databaseId"], "status": r["status"], "conclusion": r["conclusion"], "updated_at": r.get("updatedAt")}, q); sys.exit(0)
     m = re.fullmatch(r"actions/runs/(\d+)/(jobs|artifacts)", path)
     if m: emit(load(f"{m.group(2)}-{m.group(1)}.json", {"jobs": [], "artifacts": []}), q); sys.exit(0)
     m = re.fullmatch(r"actions/artifacts/(\d+)/zip", path)
@@ -114,7 +118,7 @@ run() { # run <title> <path> <event> <branch> <head sha> <status> <conclusion> �
   local wn=Review; [ "$2" = .github/workflows/ci.yml ] && wn=CI
   RUNS+=("$(jq -nc --argjson id "$id" --arg t "$1" --arg p "$2" --arg wn "$wn" --arg ev "$3" --arg br "$4" --arg hs "$5" --arg st "$6" --arg c "$7" \
     '{databaseId: $id, displayTitle: $t, path: $p, workflowName: $wn, event: $ev, headBranch: $br, headSha: $hs, status: $st,
-      conclusion: (if $c == "null" then null else $c end), attempt: 1, createdAt: "2026-11-13T00:00:00Z", number: $id, name: "x"}')")
+      conclusion: (if $c == "null" then null else $c end), createdAt: "2026-11-13T00:00:00Z", updatedAt: "2026-11-13T00:10:00Z", number: $id, name: "x"}')")
   local rc=$7; [ "$6" = completed ] || rc=null
   [ "$rc" = null ] && js=in_progress || js=completed
   local q='"'; [ "$rc" = null ] && q=""
@@ -153,19 +157,73 @@ if grep -E "^api repos/o/r/actions/(runs/($RH1|$RH2)/jobs|jobs/(${RH1}2|${RH2}2)
 [ "$(count 2)" -le "${API_BUDGET_WARM:-8}" ] || fail "run 2: $(count 2) gh calls (budget ${API_BUDGET_WARM:-8})"
 grep -q "MAIN ${H2:0:9}: finding(s) 1 → owner" "$STATE/dispatch.log" || fail "the blocked re-check's finding was not read: $(cat "$STATE/dispatch.log")"
 # the cache rules directly (gh-cache.sh, the stored answers of runs 1-2): a stored completed run is answered without a call;
-# a re-run is a new attempt — once the listing shows it queued again (attempt 2) its jobs are read again, never the
-# stored attempt-1 answer; an unfinished answer is never stored
+# a re-run is a new attempt — once the listing shows it queued again (a new updatedAt) its jobs are read again, never
+# the stored answer of the previous attempt; an unfinished answer is never stored
 (
   source "$ROOT/scripts/ci/gh-cache.sh"; ghc_init "$STATE/ghcache"
   gh run list -R o/r -w review.yml -e workflow_run -b main -L 5 --json databaseId >/dev/null
   : > "$FX/calls"; gh api "repos/o/r/actions/runs/$RH2/jobs" -q '.jobs | length' >/dev/null
   [ ! -s "$FX/calls" ] || fail "a stored completed run's jobs were fetched again: $(cat "$FX/calls")"
-  jq --argjson id "$RH2" 'map(if .databaseId == $id then .status = "queued" | .conclusion = null | .attempt = 2 else . end)' "$FX/runs.json" > "$T/r" && mv "$T/r" "$FX/runs.json"
+  jq --argjson id "$RH2" 'map(if .databaseId == $id then .status = "queued" | .conclusion = null | .updatedAt = "2026-11-13T01:00:00Z" else . end)' "$FX/runs.json" > "$T/r" && mv "$T/r" "$FX/runs.json"
   ghc_done; ghc_init "$STATE/ghcache"   # the next dispatcher run
   gh run list -R o/r -w review.yml -e workflow_run -b main -L 5 --json databaseId >/dev/null
   : > "$FX/calls"; gh api "repos/o/r/actions/runs/$RH2/jobs" >/dev/null
-  grep -q "^api repos/o/r/actions/runs/$RH2/jobs" "$FX/calls" || fail "a re-run (attempt 2) was answered from the attempt-1 cache"
+  grep -q "^api repos/o/r/actions/runs/$RH2/jobs" "$FX/calls" || fail "a re-run (new updatedAt, queued) was answered from the cache of the previous attempt"
+  # a run no listing of this run shows: one record call decides (same updatedAt → the stored answer; re-run → fetched)
+  ghc_done; ghc_init "$STATE/ghcache"
+  : > "$FX/calls"; gh api "repos/o/r/actions/runs/$RH1/jobs" >/dev/null; gh api "repos/o/r/actions/runs/$RH1/jobs" >/dev/null
+  [ "$(cat "$FX/calls")" = "api repos/o/r/actions/runs/$RH1" ] || fail "an unlisted stored run: expected one record call, got: $(cat "$FX/calls")"
+  jq --argjson id "$RH1" 'map(if .databaseId == $id then .updatedAt = "2026-11-13T02:00:00Z" else . end)' "$FX/runs.json" > "$T/r" && mv "$T/r" "$FX/runs.json"
+  ghc_done; ghc_init "$STATE/ghcache"
+  : > "$FX/calls"; gh api "repos/o/r/actions/runs/$RH1/jobs" >/dev/null
+  grep -q "^api repos/o/r/actions/runs/$RH1/jobs" "$FX/calls" || fail "an unlisted run whose record changed was answered from the cache"
   ghc_done
 ) || exit 1
-echo "ok - stored completed runs are answered without a call; a re-run is read again"
+echo "ok - stored completed runs are answered without a call; a re-run is read again; an unlisted run is checked by its record"
+
+# review of baf73755e #3-#5 (and dev 730b3e2ca #3)
+(
+  source "$ROOT/scripts/ci/gh-cache.sh"; ghc_init "$STATE/ghcache"
+  setrun() { jq --argjson id "$1" --arg u "$2" --arg c "$3" 'map(if .databaseId == $id then .status = "completed" | .conclusion = $c | .updatedAt = $u else . end)' "$FX/runs.json" > "$T/r" && mv "$T/r" "$FX/runs.json"; }
+  old() { touch -d '-5 min' "$@"; }
+  jobs_c() { gh api "repos/o/r/actions/runs/$RH1/jobs" -q '.jobs[1].conclusion'; }
+  # #3: an answer kept for this run is not used once a newer listing shows the run re-run (completed again, failing)
+  setrun "$RH1" 2026-11-13T03:00:00Z success
+  gh run list -R o/r -w review.yml -e workflow_run -b main -L 5 --json databaseId >/dev/null
+  [ "$(jobs_c)" = success ] || fail "setup: attempt 1 jobs"
+  setrun "$RH1" 2026-11-13T04:00:00Z failure; jq '.jobs[1].conclusion = "failure"' "$FX/jobs-$RH1.json" > "$T/j" && mv "$T/j" "$FX/jobs-$RH1.json"
+  old "$GHC_RUN"/list.*                     # the review listing is due again; the jobs answer is still within its 60 s
+  gh run list -R o/r -w review.yml -e workflow_run -b main -L 5 --json databaseId >/dev/null
+  [ "$(jobs_c)" = failure ] || fail "a kept jobs answer of the previous attempt was used after a newer listing showed the re-run"
+  # #3: an OLDER listing (another filter set) that still shows the previous attempt does not decide over the newer one
+  setrun "$RH1" 2026-11-13T05:00:00Z success; jq '.jobs[1].conclusion = "success"' "$FX/jobs-$RH1.json" > "$T/j" && mv "$T/j" "$FX/jobs-$RH1.json"
+  gh run list -R o/r -L 50 --json databaseId >/dev/null; old "$GHC_RUN"/list.*                   # the all-runs listing: 05:00
+  rm -f "$GHC_RUN"/api.*; jobs_c >/dev/null                                                     # stored for 05:00
+  setrun "$RH1" 2026-11-13T06:00:00Z failure; jq '.jobs[1].conclusion = "failure"' "$FX/jobs-$RH1.json" > "$T/j" && mv "$T/j" "$FX/jobs-$RH1.json"
+  rm -f "$GHC_RUN/list.$(ghc_key "o/r|review.yml|workflow_run|main")"*
+  gh run list -R o/r -w review.yml -e workflow_run -b main -L 5 --json databaseId >/dev/null       # newer: 06:00
+  [ "$(ghc_run_state "$RH1")" = "completed 2026-11-13T06:00:00Z" ] || fail "the run state came from the older listing: $(ghc_run_state "$RH1")"
+  rm -f "$GHC_RUN"/api.*
+  [ "$(jobs_c)" = failure ] || fail "a stored answer of the previous attempt was used (older listing decided)"
+  # #4: an artifact that expired after it was listed: the next dispatcher run sees it expired (no kept presence)
+  review_api() { gh api "repos/o/r/$1"; }
+  source "$ROOT/scripts/ci/review-runs.sh"
+  review_attested "$RH1" || fail "setup: the attestation is listed"
+  gh api "repos/o/r/actions/artifacts/$RH1/zip" > "$T/z1"; [ -s "$T/z1" ] || fail "setup: zip"
+  jq '.artifacts[0].expired = true' "$FX/artifacts-$RH1.json" > "$T/a" && mv "$T/a" "$FX/artifacts-$RH1.json"
+  ghc_done; ghc_init "$STATE/ghcache"
+  if review_attested "$RH1"; then fail "an expired attestation still counted (artifact listing kept across runs)"; fi
+  : > "$FX/calls"; gh api "repos/o/r/actions/artifacts/$RH1/zip" > /dev/null
+  grep -q "artifacts/$RH1/zip" "$FX/calls" || fail "a stored zip was answered for an artifact this run did not see unexpired"
+  # #5: a request path longer than a file name: answered (bounded cache names), and answered even when nothing can be written
+  long=$(printf 'b%.0s' $(seq 1 300))
+  out=$(gh api "repos/o/r/actions/workflows/review.yml/runs?event=workflow_run&branch=$long&per_page=100&page=1") || fail "a long request path failed"
+  jq -e '.workflow_runs' >/dev/null <<<"$out" || fail "a long request path: no answer"
+  chmod 500 "$GHC_RUN" "$GHC_DIR/disk"
+  out=$(gh api "repos/o/r/actions/runs/$RH2/jobs" -q '.jobs | length'); rc=$?
+  chmod 700 "$GHC_RUN" "$GHC_DIR/disk"
+  [ "$rc" = 0 ] && [ "$out" = 2 ] || fail "an answer that could not be written was not returned (rc $rc, '$out')"
+  ghc_done
+) || exit 1
+echo "ok - a re-run seen by a newer listing beats a kept answer and an older listing; artifacts read fresh; long paths and unwritable caches still answer"
 echo "dispatcher API budget: run 1 $(count 1) calls, run 2 $(count 2) calls (budgets ${API_BUDGET_COLD:-20} / ${API_BUDGET_WARM:-8})"
