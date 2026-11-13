@@ -1352,7 +1352,7 @@ recheck_run() { # recheck_run <sha> → the newest completed "recheck <sha>" run
 }
 review_jobs() { gh api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null; }   # the real gh: these jobs decide completion
 review_job_state() { # review_job_state <run id> [<its jobs answer>] → the conclusion of that run's review job ("" when none)
-  local j=${2:-}; [ -n "$j" ] || j=$(review_jobs "$1" || true)
+  local j=${2:-}; [ "$#" -ge 2 ] || j=$(review_jobs "$1" || true)
   jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].conclusion // ""' <<<"$j" 2>/dev/null || true
 }
 recheck_prereview_failed() { # recheck_prereview_failed <run id> [<its jobs answer>] → prints the review job's first failed step and
@@ -1362,7 +1362,7 @@ recheck_prereview_failed() { # recheck_prereview_failed <run id> [<its jobs answ
   # every main re-check was routed as finding #0 to the strongest fixer, whose dispute-only commit started the next failing
   # re-check — an endless loop).
   local j=${2:-} st
-  [ -n "$j" ] || j=$(review_jobs "$1" || true)
+  [ "$#" -ge 2 ] || j=$(review_jobs "$1" || true)
   case "$(review_job_state "$1" "$j")" in failure|timed_out) ;; *) return 1 ;; esac
   st=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review") | .steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] // ""' <<<"$j" 2>/dev/null || true)
   case "$st" in success|failure|cancelled) return 1 ;; esac
@@ -1370,8 +1370,11 @@ recheck_prereview_failed() { # recheck_prereview_failed <run id> [<its jobs answ
 }
 # a re-check REVIEWED its range when its review job ran to an outcome — not when it failed before the code review ran
 recheck_reviewed() {
-  case "$(review_job_state "$1" "${2:-}")" in success|failure|timed_out) ;; *) return 1 ;; esac
-  ! recheck_prereview_failed "$1" "${2:-}" >/dev/null
+  # One snapshot decides completion. An explicitly empty answer is unknown, never a reason to fetch again.
+  local j=${2:-}
+  if [ "$#" -lt 2 ]; then j=$(review_jobs "$1") || return 1; fi
+  case "$(review_job_state "$1" "$j")" in success|failure|timed_out) ;; *) return 1 ;; esac
+  ! recheck_prereview_failed "$1" "$j" >/dev/null
 }
 main_infra() { # main_infra <H> <run id> <its jobs answer> <failed step> → the supervisor hears ONCE per episode of the same failing step on
   # the same main line (an episode ends when its first head's own re-check, or a later main review covering it, completes);
@@ -1393,6 +1396,8 @@ main_infra() { # main_infra <H> <run id> <its jobs answer> <failed step> → the
       fi
       # the episode's alert is retried until delivered (its receipt, below)
       [ -e "$f.delivered" ] && return 0
+      # Restore the jobs together with the run identity; unavailable original jobs must not use another run's logs.
+      [ "$run" = "${r0:-$run}" ] || j=$(review_jobs "$r0" || true)
       h=$h0; run=${r0:-$run}; url="https://github.com/$REPO/actions/runs/$run"
     fi
   fi
