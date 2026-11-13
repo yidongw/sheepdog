@@ -1,0 +1,7 @@
+# .github/sheepdog.yml of an adopting repository. Its presence on the default branch tells the dispatcher this
+# repository uses sheepdog's contract scripts (review-passed.sh, merge-branch.sh) instead of its own copies.
+# The workflow settings live in the caller workflow's `with:` (examples/.github/workflows/review.yml); this file holds what the
+# host-side tools read. A repository may only tighten sheepdog's defaults here, never loosen them.
+version: 1
+main-branch: main
+dev-branch: dev

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Stand-in for the real T3 (the `t3` CLI on PATH, scripts/ci/t3-mcp.sh as $T3_MCP) in the dispatcher's shell tests: a test
+# that reaches it would launch / message REAL threads (11-13 03:48Z: a test called the real wake_fixer and started a real
+# fixer thread). It fails loudly and kills the test (GUARD_PID), so the slip is a red test, never a real thread.
+msg="FAIL: test reached the real T3 ($(basename "$0") ${1:-} ${2:-}) — install a stub in that section"
+echo "$msg" >&2
+# the caller may capture our stderr (wake_fixer does): also write to the test's own stderr
+[ -n "${GUARD_PID:-}" ] && [ -w "/proc/$GUARD_PID/fd/2" ] && echo "$msg" >> "/proc/$GUARD_PID/fd/2" 2>/dev/null
+[ -n "${GUARD_PID:-}" ] && kill -TERM "$GUARD_PID" 2>/dev/null
+exit 99

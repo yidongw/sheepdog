@@ -1,0 +1,33 @@
+name: Review
+
+# .github/workflows/review.yml of an adopting repository (keep this path and the name "Review": the verdict readers
+# identify trusted runs as workflow_run runs of the default branch's .github/workflows/review.yml).
+# workflow_run always runs this file as it is on the DEFAULT branch, so a branch cannot change what tests or reviews it.
+run-name: ${{ github.event.workflow_run.head_branch == 'main' && 'recheck' || 'review' }} ${{ github.event.workflow_run.head_sha }}
+
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers] the reusable workflow treats the pushed commit as data only
+    workflows: [CI]
+    types: [requested]
+
+permissions:
+  contents: read
+  statuses: write
+  actions: read
+
+concurrency:
+  # dev: a running review is not cancelled by a newer dev push (merge train); main: one group per sha.
+  group: review-${{ github.event.workflow_run.head_branch }}-${{ github.event.workflow_run.event }}-${{ github.event.workflow_run.run_attempt }}${{ github.event.workflow_run.head_branch != 'dev' && format('-{0}', github.event.workflow_run.head_sha) || '' }}
+  cancel-in-progress: ${{ github.event.workflow_run.head_branch != 'dev' }}
+
+jobs:
+  sheepdog:
+    # Pin a full commit sha of yidongw/sheepdog (a tag or branch is refused at run time).
+    uses: yidongw/sheepdog/.github/workflows/review.yml@0000000000000000000000000000000000000000 # replace with a sheepdog commit sha
+    with:
+      main-branch: main
+      tests-runs-on: '["self-hosted","my-repo-tests"]'
+      review-runs-on: '["self-hosted","my-repo-review"]'
+      tests-script: .github/sheepdog/tests.sh
+      node-version: "24"
+      open-findings-file: /var/lib/sheepdog/my-repo/open-findings.log

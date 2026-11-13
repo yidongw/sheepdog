@@ -1,0 +1,3 @@
+self-hosted-runner:
+  # the example caller workflows (examples/.github/workflows) use placeholder self-hosted labels
+  labels: [my-repo-review, my-repo-tests]

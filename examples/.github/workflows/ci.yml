@@ -1,0 +1,17 @@
+name: CI
+
+# .github/workflows/ci.yml of an adopting repository: a TRIGGER only. The review workflow starts on this workflow's
+# `requested` event and runs the default branch's trusted checks; this file runs nothing of the branch's code (a
+# branch may edit it, so its result is never trusted anyway).
+on:
+  push:
+    branches: [dev, main, 'devfix/**']
+
+permissions: {}
+
+jobs:
+  trigger:
+    runs-on: [self-hosted, my-repo-review] # any cheap runner; nothing here checks out code
+    timeout-minutes: 2
+    steps:
+      - run: echo "checks run in review.yml (the default branch's trusted copy) for ${GITHUB_SHA}"

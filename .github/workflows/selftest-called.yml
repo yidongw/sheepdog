@@ -1,0 +1,15 @@
+name: selftest (called)
+
+# A trivial reusable workflow, called by ci.yml: its job shows up in the run as "called / probe".
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - run: echo "called workflow job of run $GITHUB_RUN_ID"

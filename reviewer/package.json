@@ -1,0 +1,17 @@
+{
+  "name": "sheepdog-reviewer",
+  "private": true,
+  "description": "The isolated blocking code reviewer of sheepdog. Runs with no dependencies (node's TypeScript type stripping); the devDependencies are for sheepdog's own CI only.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.0",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}
