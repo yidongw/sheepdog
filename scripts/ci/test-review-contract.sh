@@ -250,6 +250,7 @@ checks = {
   "Train-Merge heads are reviewed": "Train-Merge: " in r["if"],
   "Review-Fix-Of heads are reviewed on main": "Review-Fix-Of: " in r["if"] and "Review-Fix-Of: " in j["tests"]["if"] and "Review-Fix-Of: " in j["status"]["if"],
   "one main reviewer": "review-main-reviewer" in r["concurrency"]["group"] and r["concurrency"]["cancel-in-progress"] is False,
+  "a reviewer cancelled while waiting posts no status": "needs.review.result != 'cancelled'" in j["status"]["if"],
   "attest/ cleaned first": "find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +" in steps[0].get("run", ""),
   "blocking step skipped (not passed) on tests-only fix": blocking.get("if") == "steps.range.outputs.kind == 'review'",
   "upload only after this run's attestation": attest.get("id") == "attest" and "steps.attest.outcome == 'success'" in str(upload.get("if")),
