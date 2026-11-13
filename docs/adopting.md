@@ -15,6 +15,11 @@ existing review history keeps counting: sheepdog's readers accept runs made befo
 Keep the caller at `.github/workflows/review.yml`, named `Review`, with the `run-name` of the example: the trusted-run
 rule (`scripts/ci/review-runs.sh`) and every reader look for runs of that file titled `review <sha>` / `recheck <sha>`.
 
+Changing the sheepdog pin (or anything else under `.github/`, `reviewer/` or `scripts/ci/`) needs a FULL review: push it
+to `dev` as a regular commit or as one `Hotfix:` commit on the default branch. A review fix on `devfix/<sha>` or a
+tests-only fix round that would change these files on the default branch is never landed automatically (contract rule
+(h)) — the next default-branch run would already execute the new pin before anything checked it.
+
 ### Inputs of the reusable workflow
 
 | Input | Default | Meaning |
