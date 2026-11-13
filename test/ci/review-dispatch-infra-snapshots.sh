@@ -5,7 +5,7 @@ source "$(dirname "$0")/lib/no-real-t3.sh"
 cd "$(dirname "$0")/../.."
 D=scripts/ci/review-dispatch.sh
 fail() { echo "FAIL: $*" >&2; exit 1; }
-for fn in review_job_state recheck_prereview_failed recheck_reviewed main_infra infra_episode_open; do
+for fn in review_job_state recheck_prereview_failed recheck_reviewed main_infra infra_alert infra_episode_open; do
   eval "$(sed -n "/^$fn() {/,/^}/p" "$D")"
 done
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT

@@ -1394,8 +1394,8 @@ main_infra() { # main_infra <H> <run id> <its jobs answer> <failed step> → the
         log "MAIN ${h:0:9}: re-check run $run failed before the code review (step '$step') — same episode as ${h0:0:9} (run ${r0:-?}); no fixer"
         touch "$STATE/sent/$h.infra-logged"
       fi
-      # the episode's alert is retried until delivered (its receipt, below)
-      [ -e "$f.delivered" ] && return 0
+      # the episode's alert is retried until delivered (its receipt, named by the episode's head and run, below)
+      [ -e "$f.delivered.$h0.${r0:-}" ] && return 0
       # Restore the jobs together with the run identity; unavailable original jobs must not use another run's logs.
       [ "$run" = "${r0:-$run}" ] || j=$(review_jobs "$r0" || true)
       h=$h0; run=${r0:-$run}; url="https://github.com/$REPO/actions/runs/$run"
@@ -1411,16 +1411,37 @@ main_infra() { # main_infra <H> <run id> <its jobs answer> <failed step> → the
   fi
   if [ -n "${DRY:-}" ]; then echo "DRY MAIN ${h:0:9}: re-check failed before the code review (step '$step') — supervisor told once, no fixer"; return 0; fi
   if [ "$(cat "$f" 2>/dev/null)" != "$h $run" ]; then
-    echo "$h $run" > "$f"; rm -f "$f.delivered"
+    # a new episode: its own receipt name ($f.delivered.<head>.<run>), so the previous episode's receipt never acknowledges it
+    echo "$h $run" > "$f"
     log "MAIN ${h:0:9}: re-check run $run failed before the code review (step '$step') — infrastructure, not a finding: supervisor told, no owner / fixer woken"
   fi
-  notify_outcome=""
-  notify "$h" "infra.$slug" "$SUPERVISOR_THREAD" "[review-dispatch] the main re-check of ${h:0:9} failed BEFORE the code review ran (review job step: $step). This is a CI / review-machinery failure, not a code finding: no owner or fixer is woken for it, and the main heads after ${h:0:9} that fail the same step are only logged until a main review completes again. Their commits stay in the next main review's range.
+  local msg
+  msg="[review-dispatch] the main re-check of ${h:0:9} failed BEFORE the code review ran (review job step: $step). This is a CI / review-machinery failure, not a code finding: no owner or fixer is woken for it, and the main heads after ${h:0:9} that fail the same step are only logged until a main review completes again. Their commits stay in the next main review's range.
 run: $url
 log excerpt:
-${ex:-(log unavailable)}" || :
-  # delivered (or the thread is gone): the episode is told; otherwise the next run retries (notify's receipt dedupes)
-  case "$notify_outcome" in sent|dup|skipped) touch "$f.delivered" ;; esac
+${ex:-(log unavailable)}"
+  infra_alert "$h" "$run" "$slug" "$f" "$msg"
+}
+INFRA_UNREACHABLE_RETRY_SEC=${INFRA_UNREACHABLE_RETRY_SEC:-3600}
+infra_alert() { # infra_alert <h> <run> <slug> <episode file> <message> → the supervisor; a gone supervisor thread → the CI owner
+  # (DISPATCH_THREAD); the receipt $f.delivered.<h>.<run> only after a delivery (sent, or a delivered duplicate). Nobody
+  # reachable: no receipt — logged, and retried every INFRA_UNREACHABLE_RETRY_SEC (the skipped receipts are cleared then).
+  local h=$1 run=$2 slug=$3 f=$4 msg=$5 u="$STATE/sent/$1.infra-unreachable.$3" t
+  if [ -e "$u" ] && [ $(( $(date +%s) - $(stat -c %Y "$u" 2>/dev/null || echo 0) )) -ge "${INFRA_UNREACHABLE_RETRY_SEC:-3600}" ]; then
+    rm -f "$u" "$STATE/sent/$h.infra.$slug" "$STATE/sent/$h.infra.$slug.owner"
+  fi
+  notify_outcome=""
+  notify "$h" "infra.$slug" "$SUPERVISOR_THREAD" "$msg" || :
+  if [ "$notify_outcome" = skipped ] && [ -n "${DISPATCH_THREAD:-}" ] && [ "$DISPATCH_THREAD" != "$SUPERVISOR_THREAD" ]; then
+    notify_outcome=""
+    notify "$h" "infra.$slug.owner" "$DISPATCH_THREAD" "$msg
+(the supervisor thread $SUPERVISOR_THREAD is unreachable; this alert goes to the CI owner instead)" || :
+  fi
+  case "$notify_outcome" in
+    sent|dup) touch "$f.delivered.$h.$run" ;;
+    skipped) if [ ! -e "$u" ]; then log "MAIN ${h:0:9}: the infrastructure alert (run $run) reaches nobody (supervisor and CI owner threads unreachable) — retried in $((${INFRA_UNREACHABLE_RETRY_SEC:-3600} / 60)) min"; touch "$u"; fi ;;
+  esac
+  return 0
 }
 infra_episode_open() { # infra_episode_open <h0> → 0 while no completed review ended the episode begun at h0
   local r
@@ -2016,9 +2037,9 @@ $gaps}"
     if [ -n "$mfiles" ]; then
       if [ ! -e "$STATE/sent/$fh.machinery" ]; then
         log "devfix $fref ${fh:0:9}: changes review machinery ($(tr '\n' ' ' <<<"$mfiles")) — not landed on its tests; it needs a full review"
-        touch "$STATE/sent/$fh.machinery"
-        notify_threads "$fs" "machinery-${fh:0:9}" "$(or_supervisor "$(range_threads "$fh")")" "[review-dispatch] the review fix ${fh:0:9} on $fref (fix of ${fs:0:9}) changes review machinery: $(tr '\n' ' ' <<<"$mfiles"). A devfix lands on its trusted tests alone, and the next $MAIN run would already execute that change, so it is NOT landed. Push the repair to $DEV as a regular commit (fully reviewed) or as one Hotfix: commit on $MAIN (re-checked), with the same Review-Fix-Of: ${fs} trailer; then delete $fref."
+        touch "$STATE/sent/$fh.machinery"   # the LOG marker only; the notice below is retried every run until notify's receipts say delivered
       fi
+      notify_threads "$fs" "machinery-${fh:0:9}" "$(or_supervisor "$(range_threads "$fh")")" "[review-dispatch] the review fix ${fh:0:9} on $fref (fix of ${fs:0:9}) changes review machinery: $(tr '\n' ' ' <<<"$mfiles"). A devfix lands on its trusted tests alone, and the next $MAIN run would already execute that change, so it is NOT landed. Push the repair to $DEV as a regular commit (fully reviewed) or as one Hotfix: commit on $MAIN (re-checked), with the same Review-Fix-Of: ${fs} trailer; then delete $fref."
       continue
     fi
     msha=$(git -C "$SRC" rev-parse origin/$MAIN); landed=""

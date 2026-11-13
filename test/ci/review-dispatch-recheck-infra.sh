@@ -40,7 +40,7 @@ eval "$helpers"
 for f in recheck_prereview_failed main_infra dispute_only; do declare -F "$f" >/dev/null || fail "missing $f"; done
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 SRC=$T/src STATE=$T/state MAIN=main DEV=dev REPO=test/repo AUTHOR_FIX_WINDOW_SEC=3600 FIXER_GATE=$T/state/fixer-gate
-SUPERVISOR_THREAD=import:claudeAgent:sup key_prefix=""
+SUPERVISOR_THREAD=import:claudeAgent:sup DISPATCH_THREAD=mcp:77777777-7777-7777-7777-777777777777 key_prefix=""
 mkdir -p "$STATE/sent" "$FIXER_GATE/queue"
 LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 A=mcp:11111111-1111-1111-1111-111111111111 FX=mcp:99999999-9999-9999-9999-999999999999
@@ -93,7 +93,9 @@ gh_raw() {
 }
 wake_fixer() { [ -e "$STATE/sent/$1.fixer-$2" ] && return 0; echo "$1 $2" >> "$T/woken"; echo "$FX" > "$STATE/sent/$1.fixer-$2"; }
 UNDELIVERED=""   # set: the next notice is not delivered (transport failure), nothing recorded, retryable
-notify() { [ -e "$STATE/sent/$1.$2" ] && { notify_outcome=dup; return 0; }
+SKIP=" "   # threads that are gone (archived): notify records "skipped", as the real notify
+notify() { if [ -e "$STATE/sent/$1.$2" ]; then notify_outcome=dup; [ "$(head -1 "$STATE/sent/$1.$2")" = skipped ] && notify_outcome=skipped; return 0; fi
+  if [[ "$SKIP" == *" $3 "* ]]; then echo skipped > "$STATE/sent/$1.$2"; echo "$1 $2 $3" >> "$T/skipped"; notify_outcome=skipped; return 0; fi
   if [ -n "$UNDELIVERED" ]; then UNDELIVERED=""; echo "$1 $2" >> "$T/attempts"; notify_outcome=undelivered; return 1; fi
   echo "$1 $2 $3" >> "$T/sent"; printf '%s\n' "$4" > "$T/msg-$2"; notify_outcome=sent; touch "$STATE/sent/$1.$2"; }
 notify_best_effort() { notify "$@" || :; }
@@ -218,4 +220,42 @@ Review-Fix-Of: $SD
 Thread: $A"); push
 test "$(repair_effective "$SD" "" origin/main)" = "$RS" || fail "repair_effective: a real repair (S its ancestor) not found"
 echo 'repair_effective: only a commit containing S repairs it'
+fresh() { rm -rf "$STATE" "$T/sent" "$T/attempts" "$T/skipped"; mkdir -p "$STATE/sent" "$FIXER_GATE/queue"
+  for h in $(git -C "$SRC" rev-list origin/main); do touch "$STATE/sent/$h.hotfix-complete"; done; }
+# 13. (tralyx review of 71b7f7a77 #2) an archived supervisor thread: the alert goes to the CI owner; nobody reachable → no
+#     receipt, logged once, retried after INFRA_UNREACHABLE_RETRY_SEC
+g checkout -q main
+fresh; SKIP=" $SUPERVISOR_THREAD "
+H14=$(commit src/l.ts "Hotfix: l
+Thread: $A"); push; addrun 14 "$H14" range
+eval "$loop"
+test "$(sent_n)" = 1 && grep -q "^$H14 infra\.[A-Za-z_]*\.owner $DISPATCH_THREAD$" "$T/sent" || fail "a gone supervisor: the CI owner did not get the alert: $(cat "$T/sent" 2>/dev/null)"
+ls "$STATE"/infra-*.delivered."$H14".14 >/dev/null 2>&1 || fail "the delivered alert has no receipt"
+fresh; SKIP=" $SUPERVISOR_THREAD $DISPATCH_THREAD "
+H15=$(commit src/l2.ts "Hotfix: l2
+Thread: $A"); push; addrun 15 "$H15" range
+eval "$loop"; eval "$loop"
+test "$(sent_n)" = 0 || fail "nobody reachable, yet sent: $(cat "$T/sent")"
+if ls "$STATE"/infra-*.delivered.* >/dev/null 2>&1; then fail "an alert nobody received was recorded as delivered"; fi
+test "$(grep -c "the infrastructure alert (run 15) reaches nobody" "$LOG")" = 1 || fail "unreachable not logged once: $(grep reaches "$LOG")"
+SKIP=" "
+touch -d '-2 hours' "$STATE/sent/$H15.infra-unreachable."*
+eval "$loop"
+test "$(sent_n)" = 1 && grep -q "^$H15 infra\." "$T/sent" || fail "the unreachable alert was not retried after the interval: $(cat "$T/sent" 2>/dev/null)"
+echo 'gone supervisor → CI owner; nobody reachable → no receipt, retried later'
+
+# 14. (#3) a receipt names its episode: the previous episode's receipt never acknowledges a new one, even when the
+#     episode file was switched without its receipt being cleared (an interruption between the two writes)
+fresh; SKIP=" "
+H16=$(commit src/m.ts "Hotfix: m
+Thread: $A"); push; addrun 16 "$H16" range
+eval "$loop"; test "$(sent_n)" = 1 || fail "setup: first alert"
+ef=$(ls "$STATE"/infra-* | grep -v '\.delivered' | head -1)
+touch "$ef.delivered"   # a receipt of the old (unnamed) form, as an interruption would have left it
+H17=$(dispute "$H16"); push; addrun 17 "$H17" range
+touch "$STATE/sent/$H16.hotfix-complete"
+echo "$H17 17" > "$ef"   # interrupted right after switching the episode file
+eval "$loop"
+test "$(sent_n)" = 2 && sed -n 2p "$T/sent" | grep -q "^$H17 infra\." || fail "the new episode was acknowledged by the old receipt: $(cat "$T/sent")"
+echo 'receipts are bound to their episode head and run'
 echo 'pre-review re-check failures checks passed'
