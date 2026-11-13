@@ -145,7 +145,7 @@ git update-ref refs/remotes/origin/main "$P"
 echo "ok (b)(e)(g) - tests-only fix: green tests + every commit repairs a completed blocked review of a trusted run; stable after landing"
 
 # (g) #2: merge-branch.sh lands a tests-only approval only as a head that main's review.yml re-checks
-MB=$T/mb; mkdir -p "$MB"; cp "$CI/merge-branch.sh" "$MB/"
+MB=$T/mb; mkdir -p "$MB"; cp "$CI/merge-branch.sh" "$CI/review-machinery.sh" "$MB/"
 printf '%s\n' '#!/usr/bin/env bash' '[ -z "${REVIEW_KIND_OUT:-}" ] || echo "$STUB_KIND" > "$REVIEW_KIND_OUT"' 'echo "stub approval of $1"' > "$MB/review-passed.sh"
 git init -q --bare "$T/remote.git"; g remote add origin "$T/remote.git"
 land() { # land <kind> <sha> → merge-branch.sh with that approval kind, main at P before

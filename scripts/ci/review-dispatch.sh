@@ -89,6 +89,7 @@ git -C "$TRUSTED" checkout -q --detach origin/$MAIN
 if [ -f "$TRUSTED/.github/sheepdog.yml" ]; then CI_SCRIPTS=$SHEEPDOG_CI; else CI_SCRIPTS=$TRUSTED/scripts/ci; fi
 
 source "$(dirname "${BASH_SOURCE[0]}")/review-notify.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # review_machinery_files: what a tests-only approval never lands
 
 # Delivery failures stay retryable, but must never stop dispatch or fixer launch. With notify_outbox=<episode sha> set, a notice
 # goes to the outbox instead (terminal revert notices: delivered by revert_notices_flush, retried until delivered).
@@ -1781,7 +1782,16 @@ Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). You
   fi
   for tsha in $(git -C "$SRC" rev-list origin/$MAIN.."origin/$DEV" | head -60); do
     grep -qx "review $tsha" <<<"$done_titles" || continue
-    (cd "$TRUSTED" && bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" >/dev/null 2>&1) || continue
+    : > "$STATE/train.kind"
+    (cd "$TRUSTED" && REVIEW_KIND_OUT="$STATE/train.kind" bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" >/dev/null 2>&1) || continue
+    # a tests-only approval never lands review machinery, by fast-forward or Train-Merge (review of dev a171d3396 #1/#2)
+    if [ "$(cat "$STATE/train.kind" 2>/dev/null)" != review ]; then
+      tmfiles=$(review_machinery_files "$SRC" "$tsha" --not "origin/$MAIN")
+      if [ -n "$tmfiles" ]; then
+        [ -e "$STATE/sent/$tsha.train-machinery" ] || { log "train: $DEV@${tsha:0:9} has a tests-only approval and changes review machinery ($(tr '\n' ' ' <<<"$tmfiles")) — not landed; the next full dev review lands it"; touch "$STATE/sent/$tsha.train-machinery"; }
+        continue
+      fi
+    fi
     dev_threads=$(range_threads "$tsha")
     if ! git -C "$SRC" merge-base --is-ancestor origin/$MAIN "$tsha"; then
       # Nothing to land: merging this sha would leave main's tree unchanged (typically a "merge main into dev"
@@ -1890,6 +1900,18 @@ $gaps}" "$fref" "$(range_threads "$fh")" && touch "$STATE/sent/$fh.devfix-failed
         notify_threads "$fs" fixfailed "$(or_supervisor "$(culprit_threads "$fs" "$(git -C "$SRC" diff --name-only "$fs" "$fh" 2>/dev/null || true)")")" "[review-dispatch] $DEV (${fs:0:9}) was blocked by the review and the fix did not succeed: ${fwhy} (run: https://github.com/$REPO/actions/runs/$frun). Please handle it: push a fix commit on $DEV (it is reviewed again), or repair $fref. Not fixed within $((DEV_REVERT_AFTER_SEC / 60)) min, the commits involved are reverted automatically.${gaps:+
 The fix is not proven:
 $gaps}"
+      fi
+      continue
+    fi
+    # Review machinery never lands on a tests-only approval (review of dev a171d3396 #1/#2): a devfix is not reviewed,
+    # and the next main run would already execute a changed workflow / pin / trusted test list / contract script
+    # before any check inside it. Such a repair goes through a full review instead: a commit on dev, or a Hotfix: on main.
+    mfiles=$(review_machinery_files "$SRC" "$fh" --not "$fs" "origin/$MAIN")
+    if [ -n "$mfiles" ]; then
+      if [ ! -e "$STATE/sent/$fh.machinery" ]; then
+        log "devfix $fref ${fh:0:9}: changes review machinery ($(tr '\n' ' ' <<<"$mfiles")) — not landed on its tests; it needs a full review"
+        touch "$STATE/sent/$fh.machinery"
+        notify_threads "$fs" "machinery-${fh:0:9}" "$(or_supervisor "$(range_threads "$fh")")" "[review-dispatch] the review fix ${fh:0:9} on $fref (fix of ${fs:0:9}) changes review machinery: $(tr '\n' ' ' <<<"$mfiles"). A devfix lands on its trusted tests alone, and the next $MAIN run would already execute that change, so it is NOT landed. Push the repair to $DEV as a regular commit (fully reviewed) or as one Hotfix: commit on $MAIN (re-checked), with the same Review-Fix-Of: ${fs} trailer; then delete $fref."
       fi
       continue
     fi

@@ -27,7 +27,7 @@ git init -q --bare "$T/remote.git"
 git remote add origin "$T/remote.git"
 git push -q origin "$S:refs/heads/main"
 mkdir -p "$T/merge" "$T/.sheepdog/scripts/ci"
-cp "$CI/merge-branch.sh" "$T/merge/"
+cp "$CI/merge-branch.sh" "$CI/review-machinery.sh" "$T/merge/"
 # Approval itself is exercised by test-review-contract.sh; isolate the merge trailer guard here.
 cat > "$T/merge/review-passed.sh" <<'SH'
 echo tests-only-fix > "$REVIEW_KIND_OUT"

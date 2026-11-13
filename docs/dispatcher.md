@@ -13,7 +13,8 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   the `fixer` findings and pushes `devfix/<sha>`; findings routed to the author wake the author's `Thread:`. One fixer
   per repository at a time; a bounded number of fix rounds per chain (more for risky findings); then the supervisor
   thread.
-- **Fix landing**: a `devfix/<sha>` whose trusted tests pass lands on dev / the default branch.
+- **Fix landing**: a `devfix/<sha>` whose trusted tests pass lands on dev / the default branch — unless it changes
+  review machinery (contract rule (h)): then it is not landed and its authors are told to push it through a full review.
 - **Overdue blocks**: dev blocked longer than `DEV_REVERT_AFTER_SEC` → the commits that touched the files named in the
   findings are reverted on dev (a new commit), their authors told first.
 - **Main re-checks**: blocked main reviews go to the chain's owner, then (after `MAIN_OWNER_CLAIM_SEC`) to the strongest

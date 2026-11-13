@@ -51,6 +51,11 @@ what gets deployed. The workflow is [.github/workflows/review.yml](../.github/wo
 - **(g) A tests-only fix lands only as a main head that main re-checks** (`merge-branch.sh` refuses any other
   landing of a tests-only approval), and its approval still holds after main advanced onto it (the attestation records
   the main boundary it was judged against).
+- **(h) A tests-only approval never lands review machinery** (`scripts/ci/review-machinery.sh`: anything under
+  `.github/` — the caller workflow and its sheepdog pin, `.github/sheepdog/tests.sh`, `.github/sheepdog.yml` —,
+  `reviewer/`, `scripts/ci/`). The next default-branch run would already execute such a change (a new pin selects the
+  workflow that is supposed to check it), so a devfix, a tests-only train candidate or a tests-only `merge-branch.sh`
+  landing that touches it is refused; it goes through a full review (a dev commit, or a `Hotfix:` on main).
 
 ## Findings
 
