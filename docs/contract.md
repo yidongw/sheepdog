@@ -57,7 +57,9 @@ what gets deployed. The workflow is [.github/workflows/review.yml](../.github/wo
   workflow that is supposed to check it), so a devfix, a tests-only train candidate or a tests-only `merge-branch.sh`
   landing is refused when its LANDING TREE differs from main's in any machinery file (`landing_machinery_files`: the
   blocked base's own changes and a merge that rolls main's machinery back count too); it goes through a full review
-  (a dev commit, or a `Hotfix:` on main).
+  (a dev commit, or a `Hotfix:` on main). The classification uses the same definition: a dev range of only repairs whose landing would change
+  machinery is never a tests-only round (`dev-review-base.sh --only-fixes`), so such a repair on dev gets the full
+  review the guard asks for (review of dev c6dfe26bb #3: otherwise neither a review nor a landing could happen).
 
 ## Findings
 

@@ -33,6 +33,10 @@
 #       exactly the automatic merge of its two parents: no code of its own), and no dev commit in OR BELOW the range
 #       (down to main; merges included) is a blocked, unrepaired review (that one is reviewed again). review.yml does not review such a range
 #       again (REVIEW_SKIP); review-passed.sh counts the run as passed when its tests pass.
+#       Never when landing <head> would change review machinery on main (review-machinery.sh landing_machinery_files —
+#       the same definition the dispatcher's and merge-branch.sh's landing guard use: a tests-only approval never lands
+#       machinery, so such a range gets the full review instead of a tests-only round nothing could land; review of dev
+#       c6dfe26bb #3).
 #
 # "main" is DEV_REVIEW_MAIN_REF (default origin/main). review.yml pins it to the sha origin/main had at review time and
 # records it in the attestation ("main"); review-passed.sh re-checks a tests-only round against that same boundary, so
@@ -73,6 +77,7 @@ verdict() { # verdict <sha> → "pass <run id>" | "blocked <base its review used
   done
 }
 . "$(dirname "${BASH_SOURCE[0]}")/review-repair.sh"   # reverted / repaired: the one repair rule
+. "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machinery_files: what a tests-only approval never lands
 clean_merge() { # clean_merge <m> → 0 when m has two parents and its tree is exactly their automatic merge
   local t
   [ "$(git rev-list --parents -n1 "$1" | wc -w)" = 3 ] || return 1
@@ -85,6 +90,8 @@ only_fixes() { # only_fixes <base> <head>
   # a tests-only round ends at a fix commit: its Review-Fix-Of: trailer is what starts the main re-check when it
   # lands (review.yml), so a range whose head is a merge is reviewed normally
   [ "$(git rev-list --parents -n1 "$2" | wc -w)" = 2 ] || return 1
+  # review machinery that would land: a full review (the landing guard refuses it on a tests-only approval)
+  [ -z "$(landing_machinery_files . "$MAINREF" "$2")" ] || return 1
   [ -n "$runs" ] || load_runs
   # no blocked, unrepaired review in or below the range (down to main), merges included: that one is reviewed again
   for c in $(git rev-list "$2" "^$MAINREF"); do
