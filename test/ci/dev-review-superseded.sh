@@ -50,7 +50,17 @@ if of "$E" "$F3"; then fail "a passed review of C..D superseded C"; fi
 g checkout -q dev
 echo 'superseded by a passed review that covered its range; not by one that started above it'
 
-# 5. a crash (no verdict) of D never supersedes
+# 5. (review of eff82b08e #1) a review on a side branch merged in later never saw C: it supersedes nothing, even with a
+#    range base at or below C's and a repair
+g checkout -q -b side "$P"; DS=$(c "side work, reviewed P..DS" '' sidefile); FDS=$(c "fix of DS" "Review-Fix-Of: $DS" sidefile)
+g checkout -q -b withside "$C"; g merge -q --no-ff -m "merge side" side; MS=$(git rev-parse HEAD)
+FS=$(c "fix of DS on dev" "Review-Fix-Of: $DS" sidefile)
+reset; run 1 "review $C" success failure "$P" '' blocked; run 2 "review $DS" success failure "$P" '' blocked
+if of "$MS" "$FS"; then fail "a side-branch review that never contained C superseded C"; fi
+g checkout -q dev
+echo 'not superseded: a review of a side branch that does not contain C'
+
+# 6. a crash (no verdict) of D never supersedes
 reset; run 1 "review $C" success failure "$P" '' blocked; run 2 "review $D" success failure "$P"   # no BLOCKED line: crash
 if of "$D" "$F"; then fail "a crashed review of D superseded C"; fi
 echo 'dev superseded-block checks passed'

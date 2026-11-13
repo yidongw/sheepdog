@@ -92,7 +92,9 @@ gh_raw() {
   esac
 }
 wake_fixer() { [ -e "$STATE/sent/$1.fixer-$2" ] && return 0; echo "$1 $2" >> "$T/woken"; echo "$FX" > "$STATE/sent/$1.fixer-$2"; }
+UNDELIVERED=""   # set: the next notice is not delivered (transport failure), nothing recorded, retryable
 notify() { [ -e "$STATE/sent/$1.$2" ] && { notify_outcome=dup; return 0; }
+  if [ -n "$UNDELIVERED" ]; then UNDELIVERED=""; echo "$1 $2" >> "$T/attempts"; notify_outcome=undelivered; return 1; fi
   echo "$1 $2 $3" >> "$T/sent"; printf '%s\n' "$4" > "$T/msg-$2"; notify_outcome=sent; touch "$STATE/sent/$1.$2"; }
 notify_best_effort() { notify "$@" || :; }
 fixer_ended() { return 1; }
@@ -124,6 +126,13 @@ eval "$loop"; eval "$loop"
 test "$(sent_n)" = 1 && test ! -e "$T/woken" || fail "a later head of the same episode was escalated again: $(cat "$T/sent" 2>/dev/null; cat "$T/woken" 2>/dev/null)"
 test "$(grep -c "MAIN ${H3:0:9}: .*same episode as ${H2:0:9}" "$LOG")" = 1 || fail "the later head is not logged exactly once: $(grep "${H3:0:9}" "$LOG")"
 echo 'same episode: later heads only logged, once; no repeat on later runs'
+# 3b. a dispatcher that first meets several failed heads at once (newest first, e.g. after a pause) tells the supervisor once
+mv "$STATE" "$T/state.keep"; mv "$T/sent" "$T/sent.keep"; mkdir -p "$STATE/sent" "$FIXER_GATE/queue"
+cp "$T/state.keep/sent/$H1.hotfix-complete" "$STATE/sent/"
+eval "$loop"
+test "$(sent_n)" = 1 && test ! -e "$T/woken" || fail "several failed heads met at once: $(cat "$T/sent")"
+rm -rf "$STATE" "$T/sent"; mv "$T/state.keep" "$STATE"; mv "$T/sent.keep" "$T/sent"
+echo 'several failed heads met at once: one notice'
 
 # 4. a different failing step on the same line is a new notice (commit gates; failed tests are part of it, not a finding)
 H4=$(commit src/d.ts "Hotfix: d
@@ -172,4 +181,41 @@ plan=$(main_plan "$DP" "trusted tests job: failure" "$H7")
 read -r pn pd pc proot powner _ <<<"$plan"
 [ "$pn $pd $pc $proot $powner" = "0 0 $H7 $H7 $A" ] || fail "a finding on a dispute-only head is not pinned on the disputed commit's owner: $plan"
 echo 'dispute-only commits: no repair hop; their findings go to the disputed commit'
+
+# 8. (review of eff82b08e #2) an alert that was not delivered is retried on the next run — the episode is not "told" yet
+rm -rf "$STATE" "$T/sent" "$T/attempts"; mkdir -p "$STATE/sent" "$FIXER_GATE/queue"
+for h in $(git -C "$SRC" rev-list origin/main); do touch "$STATE/sent/$h.hotfix-complete"; done
+H8=$(commit src/h.ts "Hotfix: h
+Thread: $A"); push
+addrun 8 "$H8" range
+UNDELIVERED=1; eval "$loop"
+test "$(wc -l < "$T/attempts")" = 1 && test "$(sent_n)" = 0 || fail "the undelivered alert: $(cat "$T/attempts" 2>/dev/null)"
+H8b=$(dispute "$H8"); push; addrun 81 "$H8b" range
+eval "$loop"
+test "$(sent_n)" = 1 && grep -q "^$H8 infra\." "$T/sent" || fail "an undelivered alert was not retried: $(cat "$T/sent" 2>/dev/null)"
+eval "$loop"; test "$(sent_n)" = 1 || fail "the delivered alert repeated"
+echo 'undelivered alert: retried next run, then once'
+
+# 9. (#3) the episode's own head re-run and REVIEWED ends the episode: the next failure is alerted again
+addrun 8 "$H8" pass "$X"   # the rerun of H8's run (same id) passed
+H9=$(commit src/i.ts "Hotfix: i
+Thread: $A"); push; addrun 9 "$H9" range
+eval "$loop"
+test "$(sent_n)" = 2 && sed -n 2p "$T/sent" | grep -qE "^($H8b|$H9) infra\." || fail "a failure after the first head's successful rerun was not alerted: $(cat "$T/sent")"
+echo 'a reviewed rerun of the first head ends the episode'
+
+# 10. (NIT of eff82b08e, now a rule) repair_effective: a commit naming S that does not contain S repairs nothing
+g checkout -q -b side "$X"; SD=$(commit src/s.ts "side work
+Thread: $A")
+g checkout -q main; NR=$(commit src/t.ts "Hotfix: claims to fix the side commit
+Review-Fix-Of: $SD
+Thread: $A"); push
+if repair_effective "$SD" "" origin/main >/dev/null; then fail "repair_effective: a non-ancestor Review-Fix-Of: repaired S"; fi
+g merge -q --no-ff -m "merge side" side; push
+if repair_effective "$SD" "" origin/main >/dev/null; then fail "repair_effective: a non-ancestor repair counted once S is merged in"; fi
+RS=$(commit src/s.ts "Hotfix: real fix
+Review-Fix-Of: $SD
+Thread: $A"); push
+test "$(repair_effective "$SD" "" origin/main)" = "$RS" || fail "repair_effective: a real repair (S its ancestor) not found"
+echo 'repair_effective: only a commit containing S repairs it'
 echo 'pre-review re-check failures checks passed'

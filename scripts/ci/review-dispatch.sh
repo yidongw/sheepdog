@@ -748,6 +748,9 @@ repair_effective() { # repair_effective <S> <thread|""> <ref>... → THE definit
       if [[ "$s" == "$v"* ]]; then hit=1; fi
     done
     [ "$hit" = 1 ] || continue
+    # the repair contains S (one containment rule with review-repair.sh repaired(): a trailer naming a non-ancestor —
+    # tralyx fd935e7c5 → dev 1de3ade46 — repairs nothing)
+    git -C "$SRC" merge-base --is-ancestor "$s" "$c" 2>/dev/null || continue
     if [ -n "$want" ] && [ "$(norm_tid "$(thread_of "$c")")" != "$(norm_tid "$want")" ]; then continue; fi
     # effective when it stands on ANY candidate ref that contains it, each ref judged on its own (review of 1dd12b37b #7:
     # all refs at once made a repair already on main look absent because dev had reverted it)
@@ -1371,19 +1374,26 @@ recheck_reviewed() {
   ! recheck_prereview_failed "$1" "${2:-}" >/dev/null
 }
 main_infra() { # main_infra <H> <run id> <its jobs answer> <failed step> → the supervisor hears ONCE per episode of the same failing step on
-  # the same main line (an episode ends when a completed main review covers its first head); nobody else is woken, nothing is
-  # assigned. The episode file $STATE/infra-<step> holds "<first head> <run>"; later heads of the episode are logged once each.
+  # the same main line (an episode ends when its first head's own re-check, or a later main review covering it, completes);
+  # nobody else is woken, nothing is assigned. The episode file $STATE/infra-<step> holds "<first head> <run>", and
+  # <file>.delivered once the alert is out (an undelivered alert is retried every run); later heads are logged once each.
   local h=$1 run=$2 j=$3 step=$4 slug f h0 r0 jid ex url
   slug=$(printf '%s' "$step" | tr -c 'A-Za-z0-9' _ | cut -c1-40); f="$STATE/infra-$slug"
   url="https://github.com/$REPO/actions/runs/$run"
   if [ -s "$f" ]; then
     read -r h0 r0 < "$f" || true
-    if [ -n "${h0:-}" ] && git -C "$SRC" merge-base --is-ancestor "$h0" "$h" 2>/dev/null && ! recheck_covering "$h0" >/dev/null; then
+    # same episode: H and the episode's head are on one line, in either order (the loop walks newest first), and the
+    # episode is still open: h0's own newest re-check has not reviewed (a rerun that completed ends it) and no completed
+    # main review covers h0
+    if [ -n "${h0:-}" ] && { git -C "$SRC" merge-base --is-ancestor "$h" "$h0" 2>/dev/null || git -C "$SRC" merge-base --is-ancestor "$h0" "$h" 2>/dev/null; } \
+       && infra_episode_open "$h0"; then
       if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$h.infra-logged" ]; then
-        log "MAIN ${h:0:9}: re-check run $run failed before the code review (step '$step') — same episode as ${h0:0:9} (run ${r0:-?}), supervisor already told; no fixer"
+        log "MAIN ${h:0:9}: re-check run $run failed before the code review (step '$step') — same episode as ${h0:0:9} (run ${r0:-?}); no fixer"
         touch "$STATE/sent/$h.infra-logged"
       fi
-      return 0
+      # the episode's alert is retried until delivered (its receipt, below)
+      [ -e "$f.delivered" ] && return 0
+      h=$h0; run=${r0:-$run}; url="https://github.com/$REPO/actions/runs/$run"
     fi
   fi
   jid=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].id // empty' <<<"$j" 2>/dev/null || true)
@@ -1395,12 +1405,23 @@ main_infra() { # main_infra <H> <run id> <its jobs answer> <failed step> → the
       | cut -c1-240 || true)
   fi
   if [ -n "${DRY:-}" ]; then echo "DRY MAIN ${h:0:9}: re-check failed before the code review (step '$step') — supervisor told once, no fixer"; return 0; fi
-  echo "$h $run" > "$f"
-  log "MAIN ${h:0:9}: re-check run $run failed before the code review (step '$step') — infrastructure, not a finding: supervisor told, no owner / fixer woken"
-  notify_best_effort "$h" "infra.$slug" "$SUPERVISOR_THREAD" "[review-dispatch] the main re-check of ${h:0:9} failed BEFORE the code review ran (review job step: $step). This is a CI / review-machinery failure, not a code finding: no owner or fixer is woken for it, and the main heads after ${h:0:9} that fail the same step are only logged until a main review completes again. Their commits stay in the next main review's range.
+  if [ "$(cat "$f" 2>/dev/null)" != "$h $run" ]; then
+    echo "$h $run" > "$f"; rm -f "$f.delivered"
+    log "MAIN ${h:0:9}: re-check run $run failed before the code review (step '$step') — infrastructure, not a finding: supervisor told, no owner / fixer woken"
+  fi
+  notify_outcome=""
+  notify "$h" "infra.$slug" "$SUPERVISOR_THREAD" "[review-dispatch] the main re-check of ${h:0:9} failed BEFORE the code review ran (review job step: $step). This is a CI / review-machinery failure, not a code finding: no owner or fixer is woken for it, and the main heads after ${h:0:9} that fail the same step are only logged until a main review completes again. Their commits stay in the next main review's range.
 run: $url
 log excerpt:
-${ex:-(log unavailable)}"
+${ex:-(log unavailable)}" || :
+  # delivered (or the thread is gone): the episode is told; otherwise the next run retries (notify's receipt dedupes)
+  case "$notify_outcome" in sent|dup|skipped) touch "$f.delivered" ;; esac
+}
+infra_episode_open() { # infra_episode_open <h0> → 0 while no completed review ended the episode begun at h0
+  local r
+  r=$(recheck_run "$1")
+  if [ -n "$r" ] && recheck_reviewed "$r"; then return 1; fi
+  ! recheck_covering "$1" >/dev/null
 }
 recheck_base() { # recheck_base <run id> <head> [<its jobs answer>] → the base of the range that run reviewed; <head>^1 for a run without the line
   local j jid b=""

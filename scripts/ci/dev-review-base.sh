@@ -87,12 +87,13 @@ run_base() { # run_base <run id> → the base of the range that run reviewed (it
   rb=$(sed -nE 's/^review-range: ([0-9a-f]{40}) [0-9a-f]{40}$/\1/p' <<<"$log"); printf '%s\n' "${rb%%$'\n'*}"
 }
 declare -A _verdicts=()
-verdict_m() { # verdict_m <sha> → verdict, asked once per script run
+vm=""
+verdict_m() { # verdict_m <sha> → sets vm to its verdict, asked once per script run (no subshell: the memo must survive)
   [ -n "${_verdicts[$1]+x}" ] || _verdicts[$1]=$(verdict "$1")
-  printf '%s\n' "${_verdicts[$1]}"
+  vm=${_verdicts[$1]}
 }
 superseded() { # superseded <C> <the base C's blocked review used, or -> <head> → 0 when a LATER completed dev review re-reviewed
-  # all of C's range and stands: a review of a descendant D of C (D in C..head, not on main) whose own range started at or
+  # all of C's range and stands: a review of a descendant D of C (C is an ancestor of D; D in C..head, not on main) whose own range started at or
   # below C's (its review-range base is an ancestor of C's base, so every commit C's review saw was in D's) and that passed,
   # or blocked and is repaired in D..head. C's own block then needs no repair of its own: its code had its one review again
   # in D's round, and D's findings — C's still-open ones among them — are what the repairs answer (owner 11-13: dev gets one
@@ -101,7 +102,9 @@ superseded() { # superseded <C> <the base C's blocked review used, or -> <head> 
   local c=$1 rc=$2 h=$3 d v rb
   [[ "$rc" =~ ^[0-9a-f]{40}$ ]] || return 1
   for d in $(git rev-list "$c..$h" "^$MAINREF" 2>/dev/null); do
-    v=$(verdict_m "$d")
+    # one containment rule (as repaired()): D's head contains C — a review on a side branch merged in later never saw C
+    git merge-base --is-ancestor "$c" "$d" 2>/dev/null || continue
+    verdict_m "$d"; v=$vm
     case "${v%% *}" in
       blocked) rb=${v#blocked }; rb=${rb%% *}; repaired "$d" "$h" || continue ;;
       pass) rb=$(run_base "${v##* }") ;;
@@ -134,7 +137,7 @@ only_fixes() { # only_fixes <base> <head>
   # no blocked, unrepaired review in or below the range (down to main), merges included: that one is reviewed again —
   # unless a later completed review that stands re-reviewed its whole range (superseded)
   for c in $(git rev-list "$2" "^$MAINREF"); do
-    v=$(verdict_m "$c")
+    verdict_m "$c"; v=$vm
     if [ "${v%% *}" = blocked ] && ! repaired "$c" "$2"; then
       local rcb=${v#blocked }; rcb=${rcb%% *}
       superseded "$c" "$rcb" "$2" || return 1
@@ -146,7 +149,7 @@ only_fixes() { # only_fixes <base> <head>
     for t in $(git show -s --format=%B "$c" | sed -nE 's/^Review-Fix-Of: ([0-9a-f]{40})[[:space:]]*$/\1/p'); do
       git rev-parse -q --verify "$t^{commit}" >/dev/null 2>&1 || continue
       [ "$t" != "$c" ] && git merge-base --is-ancestor "$t" "$c" 2>/dev/null || continue
-      v=$(verdict_m "$t")
+      verdict_m "$t"; v=$vm
       if [ "${v%% *}" = blocked ]; then hit=1; break; fi
     done
     [ "$hit" = 1 ] || return 1
