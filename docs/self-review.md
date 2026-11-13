@@ -12,9 +12,16 @@ it guards.
   sheepdog sha that already passed review. Never `./`: that resolves at main's latest commit, where a tests-only repair
   or a `Hotfix:` lands BEFORE its re-check, and it would run its own replacement of the review machinery on the review
   host. So a change to the reviewer, the gates or the workflow governs sheepdog's own review only after a pin bump in
-  `self-review.yml`, and that bump is reviewed by the pinned (old) reviewer together with the sheepdog diff it ships
-  (section 2). Pinned: `e099da79f`, whose own main re-check passed (it reads self-review.yml runs and reviews pin
-  bumps; the first bootstrap pin a320ba106 could do neither).
+  `self-review.yml`, and that bump is reviewed together with the sheepdog diff it ships (section 2): a bump on `dev`
+  by the pinned (old) reviewer — dev runs use main's `self-review.yml` —, a `Hotfix:` bump on `main` by the new pin.
+  Pinned: `ad09c0b50` (the corrected main-range walker, the self-review.yml run reader, the pin-bump step).
+- **The pin carries the current protections** (review of ad09c0b50 #1/#2: the pin e099da79f shipped the old range
+  walker, so the reviewer that actually ran lacked the fix the candidate's tests demanded). `test/ci/self-review-pin.sh`
+  runs every review-flow suite of the tree (all of `test/ci/` except the dispatcher's, which runs from the trusted main
+  checkout) against the pinned snapshot; one it fails fails the tests. A new protection lands first (its suite named
+  in `test/ci/self-review-pin.pending` for exactly the current pin, with the reason — a reviewed admission that the
+  pin lags), then the pin bump, which drops the line: a pending line for another sha, or one the pin passes, fails.
+  Bump the pin to the newest reviewed `main` whenever the review machinery changed there.
 - The trusted test list is `.github/sheepdog/tests.sh` (every shell suite, the reviewer's typecheck and tests, the
   no-dependency check, and ci.yml's pinned actionlint and zizmor — merge authority needs them green too) on a GitHub-hosted runner. The review runs on a self-hosted runner (`sheepdog-review`) whose
   job-started hook admits only `workflow_run` jobs of main's `self-review.yml` of this repository; this repository is

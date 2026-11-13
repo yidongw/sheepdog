@@ -73,7 +73,9 @@ run() {
 range() { base=$(bash "$CI/hotfix-review-base.sh" HEAD 2>"$T/err") || { cat "$T/err" >&2; base=ERR; }; }
 fails=0
 check() { local what=$1; shift; if "$@"; then echo "ok - $what"; else echo "FAIL - $what (base ${base:0:12})" >&2; fails=$((fails + 1)); fi; }
-covers() { local x; for x in "$@"; do git rev-list "$base..HEAD" | grep -qx "$x" || return 1; done; }
+# the range is read whole before matching: grep -q in a pipe exits at the first match and git rev-list (it flushes per
+# commit) can die of SIGPIPE under pipefail — a random "not covered" on a loaded runner
+covers() { local x l; l=$(git rev-list "$base..HEAD"); for x in "$@"; do grep -qx "$x" <<<"$l" || return 1; done; }
 
 # 1. A deployed and reviewed; H1 and H2 pushed together (only H2 gets a run)
 INIT=$(c init); A=$(c a "Hotfix: a"); run "$A" "$INIT"; g tag deployed "$A"

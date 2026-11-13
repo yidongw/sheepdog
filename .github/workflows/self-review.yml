@@ -9,8 +9,11 @@ name: Review
 # workflow by a full sha like every adopter — a sheepdog sha that already passed review, never ./ (main's latest commit:
 # a tests-only repair or a Hotfix: lands there before its re-check and would run its own replacement of the review
 # machinery on the review host). A change to the reviewer takes effect for sheepdog's own review only through a pin bump,
-# which is itself reviewed by the pinned (old) reviewer with the sheepdog diff (docs/self-review.md). Pin: e099da79f
-# (its main re-check passed, run 43440698040; it reads self-review.yml runs and reviews pin bumps).
+# reviewed with the sheepdog diff it ships (docs/self-review.md): on dev by the pinned (old) reviewer, as a Hotfix: on
+# main by the new pin (main's file). The pinned snapshot must pass this tree's review-flow suites
+# (test/ci/self-review-pin.sh — review of ad09c0b50 #1/#2: a pin that lacks the current protections is the reviewer that
+# actually runs). Pin: ad09c0b50 (the corrected main-range walker, the self-review.yml run reader, the pin-bump step;
+# its content was reviewed in run 43444266348, whose only findings were the stale pin).
 # Runners: `tests` on GitHub-hosted ubuntu (this repository is public: free minutes, read-only token, no secrets);
 # `review` + `status` on the self-hosted cx43 runner cx43-sheepdog-review (labels cx43, sheepdog-review), whose
 # job-started hook admits only workflow_run jobs of main's self-review.yml — a fork's pull request runs its own workflow
@@ -33,7 +36,7 @@ concurrency:
 
 jobs:
   sheepdog:
-    uses: yidongw/sheepdog/.github/workflows/review.yml@e099da79f08431efc91238f72f576f722bb22ac1
+    uses: yidongw/sheepdog/.github/workflows/review.yml@ad09c0b502039a9467f235660cf3d39c01cee3f9
     with:
       tests-runs-on: '["ubuntu-24.04"]'
       review-runs-on: '["self-hosted","cx43","sheepdog-review"]'
