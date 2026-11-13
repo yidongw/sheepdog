@@ -42,7 +42,7 @@ pin = names.index("Pinned sheepdog sha") if "Pinned sheepdog sha" in names else 
 co = next((i for i, s in enumerate(steps) if (s.get("with") or {}).get("path") == ".sheepdog"), -1)
 if pin < 0 or co < 0 or pin > co: bad.append("review.yml review: the pinned sha must be resolved before the sheepdog checkout")
 elif steps[co]["with"].get("ref") != "${{ env.SHEEPDOG_SHA }}": bad.append("review.yml review: sheepdog is checked out at the resolved sha")
-elif "referenced_workflows" not in steps[pin]["run"] or '[ "$ref" = "$sha" ]' not in steps[pin]["run"]: bad.append("review.yml review: the pin must come from referenced_workflows and be a full sha")
+elif "referenced_workflows" not in steps[pin]["run"] or '[ "$ref" != "$sha" ]' not in steps[pin]["run"]: bad.append("review.yml review: the pin must come from referenced_workflows and be a full sha")
 for s in steps:
     run = s.get("run", "")
     if "${{" in run: bad.append(f"review.yml step {s.get('name')}: expression inside run (use env)")

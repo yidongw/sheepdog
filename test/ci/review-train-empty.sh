@@ -8,7 +8,7 @@ cd "$(dirname "$0")/../.."
 script=$PWD/scripts/ci/review-dispatch.sh
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
-git init -q "$fixture"
+git init -q -b dev "$fixture"   # any branch but main (the test creates main itself)
 cd "$fixture"
 git config user.email test@example.com
 git config user.name test

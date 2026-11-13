@@ -179,7 +179,7 @@ jobs:
           entry=$(jq -c --arg p "$SHEEPDOG_REPO/.github/workflows/review.yml@" '[.[] | select(.path | startswith($p))][0] // empty' <<<"$refs")
           [ -n "$entry" ] || { echo "::error::this run does not reference $SHEEPDOG_REPO/.github/workflows/review.yml"; exit 1; }
           sha=$(jq -r .sha <<<"$entry"); ref=$(jq -r '.path | sub("^.*@"; "")' <<<"$entry")
-          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] && [ "$ref" = "$sha" ] || { echo "::error::pin $SHEEPDOG_REPO by a full commit sha (got @$ref)"; exit 1; }
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || [ "$ref" != "$sha" ]; then echo "::error::pin $SHEEPDOG_REPO by a full commit sha (got @$ref)"; exit 1; fi
           echo "sheepdog: $SHEEPDOG_REPO@$sha"
           echo "SHEEPDOG_SHA=$sha" >> "$GITHUB_ENV"
         env:

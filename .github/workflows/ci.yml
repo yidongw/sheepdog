@@ -28,7 +28,6 @@ jobs:
         run: |
           jq --version && python3 -c 'import yaml' && git --version
           git config --global user.name ci && git config --global user.email ci@example.invalid
-          git config --global init.defaultBranch main
       - run: bash test/run.sh
 
   reviewer:
