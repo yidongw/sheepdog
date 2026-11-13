@@ -15,6 +15,7 @@ fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$
 eval "$(fns findings findings_cap thread_of fixer_receipt_thread norm_tid finding_blocks finding_meta finding_route review_round_route route_reason \
   attribute_finding attribution findings_subset att_of culprit_lines named_files repair_effective fix_reverted hotfix_fix_pushed \
   author_turn author_fixed fyi_author or_supervisor fix_of)"
+eval "$(fns review_list)"   # the trusted-run filter (review-runs.sh rule) over the fake run list
 digest_add() { :; }
 helpers=$(python3 - "$D" <<'PY'
 import sys
@@ -48,8 +49,8 @@ H1=$(commit src/a.ts "$A"); H2=$(commit src/b.ts "$B"); H3=$(commit src/c.ts "$C
 g push -q origin HEAD:refs/heads/main; g fetch -q origin
 # runs: H1 reviewed alone (passed), H2's reviewer cancelled while waiting, H3's reviewer reviewed H1..H3 and blocked
 cat > "$T/runs.json" <<J
-[{"databaseId":3,"displayTitle":"recheck $H3","status":"completed"},{"databaseId":2,"displayTitle":"recheck $H2","status":"completed"},
- {"databaseId":1,"displayTitle":"recheck $H1","status":"completed"}]
+[{"event":"workflow_run","headBranch":"main","databaseId":3,"displayTitle":"recheck $H3","status":"completed"},{"event":"workflow_run","headBranch":"main","databaseId":2,"displayTitle":"recheck $H2","status":"completed"},
+ {"event":"workflow_run","headBranch":"main","databaseId":1,"displayTitle":"recheck $H1","status":"completed"}]
 J
 cat > "$T/log3" <<L
 2026-11-12T00:00:00Z review-range: $H1 $H3
@@ -108,7 +109,7 @@ UNREACHABLE=""
 
 # 3. a cancelled reviewer whose covering run has not completed yet waits (not completed, not handled)
 rm -rf "$STATE/sent"; mkdir -p "$STATE/sent"; rm -f "$woken" "$T/sent"; FIXER_DONE=""
-printf '[{"databaseId":2,"displayTitle":"recheck %s","status":"completed"},{"databaseId":3,"displayTitle":"recheck %s","status":"in_progress"}]\n' "$H2" "$H3" > "$T/runs.json"
+printf '[{"event":"workflow_run","headBranch":"main","databaseId":2,"displayTitle":"recheck %s","status":"completed"},{"event":"workflow_run","headBranch":"main","databaseId":3,"displayTitle":"recheck %s","status":"in_progress"}]\n' "$H2" "$H3" > "$T/runs.json"
 hotfix_runs=""
 eval "$loop"
 test ! -e "$STATE/sent/$H2.hotfix-complete"; test ! -e "$woken"

@@ -17,6 +17,7 @@ LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 source scripts/ci/review-notify.sh   # digest_add / digest_file
 eval "$(fns findings findings_cap thread_of fixer_receipt_thread norm_tid finding_blocks finding_meta finding_route attribute_finding attribution findings_subset \
   att_of named_files repair_effective fix_reverted fix_of launch_failed)"
+eval "$(fns review_list)"   # the trusted-run filter (review-runs.sh rule) over the fake run list
 sect() { python3 - "$D" "$1" "$2" <<'PY'
 import sys
 s = open(sys.argv[1]).read()
@@ -46,7 +47,7 @@ Thread: $FX" >/dev/null; done
 SIDE1=$(g rev-list --reverse "$H..side" | sed -n 1p)
 g checkout -q main; g merge -q --no-ff -m "train: land side" -m "Loop: review-dispatch" side; g push -q origin HEAD:refs/heads/main; g fetch -q origin
 cat > "$T/runs.json" <<J
-[{"databaseId":5,"displayTitle":"recheck $H","status":"completed"}]
+[{"event":"workflow_run","headBranch":"main","databaseId":5,"displayTitle":"recheck $H","status":"completed"}]
 J
 gh() { local q="" a; for a in "$@"; do if [ "$q" = next ]; then q=$a; break; fi; if [ "$a" = -q ]; then q=next; fi; done
   if [ -n "$q" ] && [ "$q" != next ]; then gh_raw "$@" | jq -r "$q"; else gh_raw "$@"; fi; }
@@ -73,7 +74,7 @@ echo 'cap counts only commits with a run: H not starved'
 # 2. a completed main review that covered the run-less side commits takes them out of the set
 M2=$(commit src/m2.ts "Hotfix: m2
 Thread: $A"); g push -q origin HEAD:refs/heads/main; g fetch -q origin
-printf '[{"databaseId":6,"displayTitle":"recheck %s","status":"completed"},{"databaseId":5,"displayTitle":"recheck %s","status":"completed"}]\n' "$M2" "$H" > "$T/runs.json"
+printf '[{"event":"workflow_run","headBranch":"main","databaseId":6,"displayTitle":"recheck %s","status":"completed"},{"event":"workflow_run","headBranch":"main","databaseId":5,"displayTitle":"recheck %s","status":"completed"}]\n' "$M2" "$H" > "$T/runs.json"
 hotfix_runs=""
 eval "$loop"
 test -e "$STATE/sent/$SIDE1.hotfix-complete" || fail "a run-less side commit covered by a completed main review stays a candidate"
@@ -84,6 +85,7 @@ echo 'run-less commits covered by a completed review leave the set'
 # 3. an incomplete hotfix about to leave the 7-day window → the supervisor is told, once
 E=$(GIT_COMMITTER_DATE="$(date -d '-150 hours' -R)" commit src/e.ts "Hotfix: e
 Thread: $A"); g push -q origin HEAD:refs/heads/main; g fetch -q origin
+echo "$E $(date -d '-150 hours' +%s)" >> "$STATE/main-arrivals"   # the window and the age count from arrival on main
 eval "$loop"; eval "$loop"
 test "$(grep -c "^hotfix-expiring $SUPERVISOR_THREAD$" "$T/sent")" = 1 || fail "an expiring open hotfix was not escalated exactly once: $(grep expiring "$T/sent" || true)"
 grep -q "HOTFIX ${E:0:9}: still open after" "$LOG"

@@ -72,4 +72,3 @@ git init -q -b main "$T/src"; cd "$T/src"
 g() { git -c user.name=t -c user.email=t@t "$@"; }
 c() { echo "$RANDOM$RANDOM" >> "${3:-f}"; g add -A; g commit -q -m "$1" ${2:+-m "$2"}; git rev-parse HEAD; }
 RP() { bash "$CI/review-passed.sh" "$@" >/dev/null 2>"$T/err"; }
-

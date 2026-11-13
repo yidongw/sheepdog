@@ -58,4 +58,3 @@ fi
 for finding in 3 4; do
   bash "$CI/test-review-regressions.sh" --finding "$finding" || exit 1
 done
-

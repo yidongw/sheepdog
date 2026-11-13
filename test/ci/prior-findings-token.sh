@@ -2,6 +2,8 @@
 # The re-review of a fix gets the findings it claims to fix (11-13: the main reviews of 716197fce / 812474324 logged
 # "previous findings unavailable" — review.yml's "Previous findings" step ran prior-findings.sh WITHOUT GH_TOKEN, every API
 # call was a 404 on the private repo, and the script said nothing). Runs the script with exactly the env that step gives it.
+# Review contract (scripts/ci/review-runs.sh): only trusted runs (workflow_run on main) are read — run 9, a branch's own
+# run with the same title, lists first and must be ignored.
 set -euo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 cd "$(dirname "$0")/../.."
@@ -28,7 +30,7 @@ cat > "$T/bin/curl" <<CURL
 #!/usr/bin/env bash
 case "\$*" in *"Authorization: Bearer tok-123"*) ;; *) exit 22 ;; esac   # private repo: no token → 404
 case "\$*" in
-  *repos/o/r/actions/workflows/review.yml/runs*page=1*) echo '{"workflow_runs":[{"id":7,"display_title":"recheck $S","conclusion":"failure","event":"workflow_run","head_branch":"main","path":".github/workflows/review.yml"}]}' ;;
+  *repos/o/r/actions/workflows/review.yml/runs*page=1*) echo '{"workflow_runs":[{"id":9,"display_title":"recheck $S","status":"completed","conclusion":"failure","event":"push","head_branch":"x","path":".github/workflows/review.yml"},{"id":7,"display_title":"recheck $S","status":"completed","conclusion":"failure","event":"workflow_run","head_branch":"main","path":".github/workflows/review.yml"}]}' ;;
   *repos/o/r/actions/workflows/review.yml/runs*) echo '{"workflow_runs":[]}' ;;
   *repos/o/r/actions/runs/7/jobs*) echo '{"jobs":[{"name":"sheepdog / tests","id":9},{"name":"sheepdog / review","id":8}]}' ;;   # a called workflow's job names
   *repos/o/r/actions/jobs/8/logs*) printf '2026-11-13T00:00:00Z review-gate: BLOCKED #1 regression [should]: the old bug\n2026-11-13T00:00:00Z evidence: a.ts:1 x\n' ;;

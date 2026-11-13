@@ -26,7 +26,7 @@ g checkout -q main; echo h > "$T/src/h"; g add h; g commit -qm hotfix; g push -q
 SRC=$T/src STATE=$T/state WORK=$T/work MAIN=main DEV=dev REPO=x/y DISPATCH_THREAD=00000000-0000-4000-8000-0000000000c1
 mkdir -p "$STATE/sent"; LOG=$T/log; log() { echo "$*" >> "$LOG"; }
 DSHA=$(g rev-parse origin/dev)
-RUNS=""; gh() { printf '%s' "$RUNS"; }
+RUNS=""; dev_round_running() { [ -n "$RUNS" ]; }   # its provenance: test/ci/review-dispatch-defer-provenance.sh
 # 1. the dev head's review is running → no merge, logged once
 RUNS="in_progress"$'\n'
 eval "$block"; eval "$block"

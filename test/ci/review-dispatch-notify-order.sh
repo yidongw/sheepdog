@@ -51,6 +51,7 @@ dev_fixer_claim() { :; }
 fixer_phrase() { echo phrase; }
 fixer_thread_state() { echo "$THREAD_STATE"; }
 gh() { printf '%s\n' "${PENDING:-}"; }
+review_list() { gh run list -R "$REPO" -w review.yml -L "$1" --json "$2" -q "$3"; }   # this fake gh answers lists pre-filtered
 THREAD_ID=mcp:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa THREAD_STATE=running
 cul=$(culprit_threads "$S" "$F")
 test "$cul" = "$A"

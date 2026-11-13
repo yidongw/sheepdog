@@ -17,6 +17,7 @@ mkdir -p "$STATE/sent" "$TRUSTED/scripts/ci" "$OUTBOX"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$TRUSTED/scripts/ci/review-passed.sh"   # no round here passed
 LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 eval "$(sed -n '/^dev_round_noop() {/,/^}/p; /^dev_merge_only() {/,/^}/p; /^run_verdict() {/,/^}/p; /^dev_verdict_run() {/,/^}/p; /^named_files() {/p' "$D")"
+review_list() { gh run list -R "$REPO" -w review.yml -L "$1" --json "$2" -q "$3"; }   # this fake gh answers lists pre-filtered
 loop=$(python3 - "$D" <<'PY'
 import sys
 s = open(sys.argv[1]).read()

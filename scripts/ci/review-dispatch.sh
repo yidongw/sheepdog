@@ -57,6 +57,26 @@ LOG=$STATE/dispatch.log
 mkdir -p "$STATE/sent"
 exec 9>"$STATE/.lock"; flock -n 9 || exit 0
 log() { echo "[$(date -u +%FT%TZ)] $*" >> "$LOG"; }
+# Every Review run the dispatcher reads as EVIDENCE (titles, conclusions, job states: what was reviewed, what blocked, what is
+# done) goes through review_list — the provenance rule of scripts/ci/review-runs.sh (review of 53616dd2e #1): only runs GitHub
+# started from the default branch's .github/workflows/review.yml by a workflow_run event. A branch can push its own
+# review.yml (or a workflow named "Review") with any run title — e.g. "recheck <sha>" with a skipped review job — but only as
+# a push / pull_request run of its own branch, which this never lists.
+review_list() { # review_list <limit> <json fields> <jq filter over the trusted runs' array>
+  gh run list -R "$REPO" -w review.yml -e workflow_run -b "$MAIN" -L "$1" --json "$2,event,headBranch" 2>/dev/null \
+    | jq -r --arg br "$MAIN" "[.[]? | select(.event == \"workflow_run\" and .headBranch == \$br)] | $3" 2>/dev/null
+}
+# The dev head's round is still going: its CI run (a push to dev of that sha) or its TRUSTED Review run (review_list's
+# provenance rule) is unfinished. Never a run found by display title alone: any branch can add a workflow whose run is
+# titled "review <dev sha>" and would hold the main→dev merge back (up to MAINMERGE_DEFER_MAX_SEC).
+dev_round_running() { # dev_round_running <dev sha>
+  local n
+  n=$(review_list 60 status,displayTitle "map(select(.status != \"completed\" and .displayTitle == \"review $1\")) | length")
+  [ "${n:-0}" -gt 0 ] && return 0
+  n=$(gh run list -R "$REPO" -w CI -e push -b "$DEV" -L 20 --json status,headSha,headBranch,event 2>/dev/null \
+    | jq --arg s "$1" --arg b "$DEV" '[.[]? | select(.status != "completed" and .event == "push" and .headBranch == $b and .headSha == $s)] | length' 2>/dev/null)
+  [ "${n:-0}" -gt 0 ]
+}
 [ -e "$STATE/PAUSED" ] && exit 0
 
 git -C "$SRC" fetch -q --prune origin
@@ -655,8 +675,8 @@ launch_failed() { # launch_failed <sha> <key> → 0 after two failed fixer launc
 }
 dev_round_pending() { # dev_round_pending <commit> → 0 while a Review run of a dev sha containing <commit> has not completed
   local t
-  [ -n "${pending_titles+x}" ] || pending_titles=$(gh run list -R "$REPO" -w Review -L 40 --json displayTitle,status \
-      -q '.[] | select(.status != "completed") | .displayTitle' 2>/dev/null || true)
+  [ -n "${pending_titles+x}" ] || pending_titles=$(review_list 40 displayTitle,status \
+      '.[] | select(.status != "completed") | .displayTitle' || true)
   for t in $(sed -nE 's/^review ([0-9a-f]{40})$/\1/p' <<<"$pending_titles"); do
     git -C "$SRC" merge-base --is-ancestor "$1" "$t" 2>/dev/null && return 0
   done
@@ -1113,8 +1133,8 @@ dev_verdict_run() { # dev_verdict_run <sha> <run id> <conclusion> → "<run id> 
   while read -r id st c; do
     [ "$st" = completed ] && [ "$id" != "$2" ] || continue
     if [ "$c" != cancelled ] || run_verdict "$id"; then echo "$id $c"; return 0; fi
-  done < <(gh run list -R "$REPO" -w Review -L 60 --json databaseId,displayTitle,status,conclusion \
-             -q ".[] | select(.displayTitle==\"review $1\") | \"\(.databaseId) \(.status) \(.conclusion)\"" 2>/dev/null)
+  done < <(review_list 60 databaseId,displayTitle,status,conclusion \
+             ".[] | select(.displayTitle==\"review $1\") | \"\(.databaseId) \(.status) \(.conclusion)\"")
   echo "$2 $3"
 }
 dev_round_noop() { # dev_round_noop <sha> <run id> <run conclusion> [clear] → 0 when this round decides no block
@@ -1219,8 +1239,7 @@ if git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/null && ! git -C "$SR
     # main first-parent commit dev does not have yet, it also survives newer hotfixes; removed once the merge is pushed.
     mm_first=$(git -C "$SRC" rev-list --first-parent --reverse "origin/$DEV..origin/$MAIN" 2>/dev/null | head -1 || true)
     mm_defer=0 mm_wait="$STATE/sent/mainmerge-wait.${mm_first:-$msha}"
-    if [ -n "$(gh run list -R "$REPO" -L 60 --json status,displayTitle,headSha \
-          -q ".[] | select(.status != \"completed\" and (.headSha == \"$dsha\" or .displayTitle == \"review $dsha\")) | .status" 2>/dev/null | head -1 || true)" ]; then
+    if dev_round_running "$dsha"; then
       if [ ! -e "$mm_wait" ]; then
         if [ -z "${DRY:-}" ]; then date +%s > "$mm_wait"; log "MAIN→$DEV merge of ${msha:0:9} deferred: the review of $DEV ${dsha:0:9} is still running"; fi
         mm_defer=1
@@ -1312,7 +1331,7 @@ fi
 # attributed per culprit commit over the whole range (attribution with att_base), so each author hears only their own.
 hotfix_runs=""
 recheck_run() { # recheck_run <sha> → the newest completed "recheck <sha>" run ("" when none)
-  [ -n "$hotfix_runs" ] || hotfix_runs=$(gh run list -R "$REPO" -w Review -L 100 --json databaseId,displayTitle,status 2>/dev/null || echo '[]')
+  [ -n "$hotfix_runs" ] || hotfix_runs=$(review_list 100 databaseId,displayTitle,status . || true); [ -n "$hotfix_runs" ] || hotfix_runs='[]'
   jq -r --arg t "recheck $1" '[.[]? | select(.displayTitle == $t and .status == "completed")][0].databaseId // empty' <<<"$hotfix_runs" 2>/dev/null || true
 }
 review_job_state() { # review_job_state <run id> → the conclusion of that run's review job ("" when none)
@@ -1333,7 +1352,7 @@ declare -A cov_base=()   # D → the base its completed review used ("-" = no co
 recheck_covering() { # recheck_covering <H> → "<D> <run>": the first later main head whose completed review covered H; 1 when none (yet)
   local d rid b
   if [ -z "$rc_heads_built" ]; then   # the shas that have a completed "recheck <sha>" run, built once per call (callers use $(…)): no process per commit below
-    [ -n "$hotfix_runs" ] || hotfix_runs=$(gh run list -R "$REPO" -w Review -L 100 --json databaseId,displayTitle,status 2>/dev/null || echo '[]')
+    [ -n "$hotfix_runs" ] || hotfix_runs=$(review_list 100 databaseId,displayTitle,status . || true); [ -n "$hotfix_runs" ] || hotfix_runs='[]'
     local l; while read -r l; do [ -n "$l" ] && rc_heads[${l%% *}]=${l#* }; done < <(jq -r '[.[]? | select(.status == "completed") | select(.displayTitle | test("^recheck [0-9a-f]{40}$"))] | group_by(.displayTitle) | .[] | "\(.[0].displayTitle[8:]) \(.[0].databaseId)"' <<<"$hotfix_runs" 2>/dev/null)
     rc_heads_built=1
   fi
@@ -1604,20 +1623,36 @@ main_walk_base() { # → the base sha (state file, set once; DRY: computed, not 
 # (a tests-only dev fix, a merge resolution). Such a head is handled here exactly like a hotfix — but only once its OWN
 # "recheck <sha>" run completed with a review job that was not skipped: its other commits (a fix inside a dev range, a
 # train merge from before the contract, whose review job was skipped) are reviewed by the head that carries them, and a
-# skipped one is marked done once (nothing to handle; it never reaches the 6-day escalation). No backlog: only heads
-# committed after $STATE/main-heads-since (set once, on the first run that has this rule) — older blocked re-checks of
-# merges were never routed and are not dug up now.
-main_heads_since() { # → epoch (state file, set once; DRY: now, not stored)
-  local f="$STATE/main-heads-since"
-  if [ -s "$f" ] && [[ "$(cat "$f")" =~ ^[0-9]+$ ]]; then cat "$f"; return 0; fi
-  [ -n "${DRY:-}" ] || { date +%s > "$f"; log "main loop: Train-Merge: / Review-Fix-Of: heads re-checked on main are handled from now on"; }
-  date +%s
+# skipped one is marked done once (nothing to handle; it never reaches the 6-day escalation). No backlog: only heads that
+# REACHED $MAIN after the rule's first run — i.e. not ancestors of $STATE/main-heads-base, the $MAIN sha recorded once on
+# that run (review of 53616dd2e #2: a commit's own timestamp cannot tell an old backlog from a fix created earlier that
+# lands now). A legacy activation time only excludes proven pre-activation history; missing or ambiguous evidence
+# keeps heads eligible within the existing walk window rather than permanently dropping a newly arrived fix.
+main_heads_base() { # → the $MAIN sha the rule started from (state file, set once; DRY: not stored)
+  local f="$STATE/main-heads-base" b="" t
+  if [ -s "$f" ]; then b=$(cat "$f"); git -C "$SRC" cat-file -e "$b^{commit}" 2>/dev/null && { echo "$b"; return 0; }; b=""; fi
+  if [ -e "$STATE/main-heads-since" ]; then
+    # Reflogs have only second precision: an update in the activation second may have arrived AFTER activation.
+    # Only a strictly earlier entry is safe. With no such entry (disabled/expired reflogs or invalid legacy state),
+    # leave the base unset and retain the legacy marker so later runs cannot mistake migration for first activation.
+    t=$(cat "$STATE/main-heads-since")
+    if [[ "$t" =~ ^[0-9]+$ ]]; then
+      b=$(git -C "$SRC" reflog show --date=unix --format='%H %gd' "refs/remotes/origin/$MAIN" 2>/dev/null \
+          | sed -nE 's/^([0-9a-f]{40}) .*@\{([0-9]+)\}$/\1 \2/p' | awk -v t="$t" '$2 < t { print $1; exit }' || true)
+    fi
+  else
+    b=$(git -C "$SRC" rev-parse -q --verify "origin/$MAIN" 2>/dev/null || true)
+  fi
+  [ -n "$b" ] || return 0
+  [ -n "${DRY:-}" ] || { echo "$b" > "$f"; log "main loop: Train-Merge: / Review-Fix-Of: heads re-checked on main are handled when they reach $MAIN after ${b:0:9}"; }
+  echo "$b"
 }
 main_head_candidate() { # main_head_candidate <commit> <message> → 0 when the loop handles it this run
   local r st
   grep -qE '^Hotfix: [^[:space:]]' <<<"$2" && return 0
   grep -qE '^(Train-Merge|Review-Fix-Of): [0-9a-f]{40}$' <<<"$2" || return 1
-  [ "$(git -C "$SRC" show -s --format=%ct "$1")" -ge "${main_heads_t:=$(main_heads_since)}" ] || return 1
+  [ -n "${main_heads_b+x}" ] || main_heads_b=$(main_heads_base)
+  [ -z "$main_heads_b" ] || ! git -C "$SRC" merge-base --is-ancestor "$1" "$main_heads_b" 2>/dev/null || return 1
   r=$(recheck_run "$1"); [ -n "$r" ] || return 1
   st=$(review_job_state "$r")
   case "$st" in
@@ -1628,10 +1663,38 @@ main_head_candidate() { # main_head_candidate <commit> <message> → 0 when the 
   esac
   return 0
 }
+# The 7-day window counts from a commit's ARRIVAL on main, not its committer date (a repair committed 10 days ago that
+# lands today is handled like any new head). $STATE/main-arrivals holds "<sha> <epoch first seen on main>"; the first
+# run seeds it with the commits of the last 7 days at their committer dates (the window as it was before).
+MAIN_WINDOW_SEC=${MAIN_WINDOW_SEC:-604800}
+main_arrivals() { # → "<sha> <epoch>" of the commits that arrived on main within the window (updates the file; DRY: a copy)
+  local f="$STATE/main-arrivals" head last now tmp
+  now=$(date +%s); head=$(git -C "$SRC" rev-parse -q --verify "origin/$MAIN^{commit}" 2>/dev/null) || return 0
+  tmp=$(mktemp); [ -f "$f" ] && cat "$f" > "$tmp"
+  if [ ! -s "$tmp" ]; then
+    git -C "$SRC" log --since=7.days --format='%H %ct' "origin/$MAIN" 2>/dev/null > "$tmp" || true
+  else
+    last=$(cat "$f.head" 2>/dev/null || true)
+    if [ "$last" != "$head" ]; then
+      { if [ -n "$last" ] && git -C "$SRC" merge-base --is-ancestor "$last" "$head" 2>/dev/null; then
+          git -C "$SRC" rev-list "$head" "^$last"
+        else git -C "$SRC" rev-list --since=14.days "$head"; fi; } 2>/dev/null \
+        | awk -v now="$now" 'NR == FNR { seen[$1] = 1; next } !($1 in seen) { print $1, now }' "$tmp" - >> "$tmp.new" || true
+      cat "$tmp.new" >> "$tmp" 2>/dev/null || true; rm -f "$tmp.new"
+    fi
+  fi
+  awk -v t=$((now - 2 * MAIN_WINDOW_SEC)) '$2 >= t' "$tmp" > "$tmp.keep" && mv "$tmp.keep" "$tmp"
+  if [ -z "${DRY:-}" ]; then cp "$tmp" "$f"; echo "$head" > "$f.head"; fi
+  awk -v t=$((now - MAIN_WINDOW_SEC)) '$2 >= t' "$tmp"; rm -f "$tmp"
+}
+main_arrival() { # main_arrival <sha> → its arrival epoch (committer date when unknown)
+  awk -v s="$1" '$1 == s { print $2; f = 1; exit } END { exit !f }' "$STATE/main-arrivals" 2>/dev/null || git -C "$SRC" show -s --format=%ct "$1" 2>/dev/null
+}
 hotfix_candidates() { # → the Hotfix: commits (and re-checked Train-Merge: / Review-Fix-Of: heads) the loop handles this run
-  local b c m n=0
+  local b c m n=0 arrived
   b=$(main_walk_base)
-  for c in $(git -C "$SRC" rev-list --since=7.days "origin/$MAIN" ${b:+"^$b"} 2>/dev/null); do
+  arrived=$(main_arrivals)
+  for c in $( (if [ -n "$b" ]; then git -C "$SRC" rev-list "origin/$MAIN" "^$b"; else cut -d' ' -f1 <<<"$arrived"; fi) 2>/dev/null | awk 'NR == FNR { a[$1] = 1; next } $1 in a' <(cut -d' ' -f1 <<<"$arrived") -); do
     [ -e "$STATE/sent/$c.hotfix-complete" ] && continue
     # buffered first: grep -q on a pipe can SIGPIPE git under pipefail
     m=$(git -C "$SRC" show -s --format=%B "$c") || continue
@@ -1642,7 +1705,7 @@ hotfix_candidates() { # → the Hotfix: commits (and re-checked Train-Merge: / R
 }
 HOTFIX_EXPIRE_WARN_SEC=${HOTFIX_EXPIRE_WARN_SEC:-518400}   # 6 days: a day before a commit leaves the 7-day window
 hotfix_expiring() { # hotfix_expiring <H> → an incomplete hotfix about to leave the 7-day window is escalated (supervisor, once), never just dropped
-  local age; age=$(( $(date +%s) - $(git -C "$SRC" show -s --format=%ct "$1" 2>/dev/null || date +%s) ))
+  local age; age=$(( $(date +%s) - $(main_arrival "$1" || date +%s) ))
   [ "$age" -ge "$HOTFIX_EXPIRE_WARN_SEC" ] || return 0
   if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$1.hotfix-expiring-logged" ]; then log "HOTFIX ${1:0:9}: still open after $((age / 3600)) h — leaves the 7-day window soon; supervisor told"; touch "$STATE/sent/$1.hotfix-expiring-logged"; fi
   notify_best_effort "$1" hotfix-expiring "$SUPERVISOR_THREAD" "[review-dispatch] ${1:0:9} on main ($(git -C "$SRC" log -1 --format=%s "$1" | head -c 120)) has been unfinished for $((age / 3600)) h ($(if [ -n "$(recheck_run "$1")" ]; then echo 'it has its own main review, not all findings are fixed'; else echo 'it has no main review run of its own and no completed review covers it'; fi)); in less than a day it leaves the dispatcher's 7-day window and is no longer handled. Please take a look."
@@ -1692,12 +1755,12 @@ done
 merged_one=0
 if [ -z "${DRY:-}" ] && git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/null \
    && ! git -C "$SRC" merge-base --is-ancestor "origin/$DEV" origin/$MAIN; then
-  done_titles=$(gh run list -R "$REPO" -w Review -L 100 --json displayTitle,status,conclusion \
-    -q '.[] | select(.status == "completed" and .conclusion == "success") | .displayTitle' 2>/dev/null || true)
+  done_titles=$(review_list 100 displayTitle,status,conclusion \
+    '.[] | select(.status == "completed" and .conclusion == "success") | .displayTitle' || true)
   # The newest completed dev review that blocked (any dev sha, not only the head — the train
   # reviews older shas): tell the authors and wake a fixer once.
-  bl=$(gh run list -R "$REPO" -w Review -L 100 --json databaseId,displayTitle,status,conclusion \
-       -q '.[] | select(.status == "completed" and .conclusion == "failure") | "\(.databaseId) \(.displayTitle)"' 2>/dev/null | grep ' review ' | head -1 || true)
+  bl=$(review_list 100 databaseId,displayTitle,status,conclusion \
+       '.[] | select(.status == "completed" and .conclusion == "failure") | "\(.databaseId) \(.displayTitle)"' | grep ' review ' | head -1 || true)
   if [ -n "$bl" ]; then
     read -r brid _ bsha <<<"$bl"
     if [[ "$bsha" =~ ^[0-9a-f]{40}$ ]] && git -C "$SRC" merge-base --is-ancestor "$bsha" "origin/$DEV" 2>/dev/null \
@@ -1801,8 +1864,8 @@ if [ "$merged_one" = 0 ] && [ -z "${DRY:-}" ]; then
       if [ ! -e "$STATE/sent/$fh.dupfix" ]; then log "devfix $fref ${fh:0:9}: dev already carries a fix for ${fs:0:9} ($dupfix_why) — not landing"; touch "$STATE/sent/$fh.dupfix"; fi
       continue
     fi
-    frun=$(gh run list -R "$REPO" -w Review -L 80 --json databaseId,displayTitle,status \
-           -q ".[] | select(.displayTitle==\"review $fh\" and .status==\"completed\") | .databaseId" | head -1)
+    frun=$(review_list 80 databaseId,displayTitle,status \
+           ".[] | select(.displayTitle==\"review $fh\" and .status==\"completed\") | .databaseId" | head -1)
     [ -n "$frun" ] || continue
     if [ "$(gh api "repos/$REPO/actions/runs/$frun/jobs" -q '[.jobs[] | select((.name | sub("^.* / "; "")) == "tests" and .conclusion=="success")] | length' 2>/dev/null)" != 1 ]; then
       [ -e "$STATE/sent/$fh.devfix-failed" ] || { log "devfix $fref ${fh:0:9}: trusted tests failed (run $frun)"
@@ -1892,8 +1955,8 @@ Move the commits to dev: git fetch origin && git rebase origin/dev && git push o
 Then you can delete this branch. The rules: the Shipping section of CLAUDE.md on main."
     continue
   fi
-  run=$(gh run list -R "$REPO" -w Review -L 60 --json databaseId,displayTitle,status,conclusion \
-        -q ".[] | select(.displayTitle==\"review $sha\") | \"\(.databaseId) \(.status) \(.conclusion)\"" | head -1)
+  run=$(review_list 60 databaseId,displayTitle,status,conclusion \
+        ".[] | select(.displayTitle==\"review $sha\") | \"\(.databaseId) \(.status) \(.conclusion)\"" | head -1)
   [ -n "$run" ] || continue
   read -r rid st concl <<<"$run"
   if [ "$st" != completed ]; then

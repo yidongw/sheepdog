@@ -18,6 +18,7 @@ LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 source scripts/ci/review-notify.sh   # digest_add / digest_file
 eval "$(fns findings findings_cap thread_of fixer_receipt_thread norm_tid finding_blocks finding_meta finding_route attribute_finding attribution findings_subset \
   att_of named_files repair_effective fix_reverted fix_of launch_failed)"
+eval "$(fns review_list)"   # the trusted-run filter (review-runs.sh rule) over the fake run list
 sect() { python3 - "$D" "$1" "$2" <<'PY'
 import sys
 s = open(sys.argv[1]).read()
@@ -39,7 +40,7 @@ g push -q origin HEAD:refs/heads/main HEAD:refs/heads/dev; g fetch -q origin
 H=$(commit src/h.ts "Hotfix: h
 Thread: $A"); g push -q origin HEAD:refs/heads/main; g fetch -q origin
 cat > "$T/runs.json" <<J
-[{"databaseId":5,"displayTitle":"recheck $H","status":"completed"},{"databaseId":4,"displayTitle":"recheck $OLD","status":"completed"}]
+[{"event":"workflow_run","headBranch":"main","databaseId":5,"displayTitle":"recheck $H","status":"completed"},{"event":"workflow_run","headBranch":"main","databaseId":4,"displayTitle":"recheck $OLD","status":"completed"}]
 J
 gh() { local q="" a; for a in "$@"; do if [ "$q" = next ]; then q=$a; break; fi; if [ "$a" = -q ]; then q=next; fi; done
   if [ -n "$q" ] && [ "$q" != next ]; then gh_raw "$@" | jq -r "$q"; else gh_raw "$@"; fi; }
