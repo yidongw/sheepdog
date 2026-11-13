@@ -113,7 +113,7 @@ ghc_run_state() { # ghc_run_state <run id> → "<status> <updatedAt>" from the N
 }
 
 ghc_api() {
-  local q="" path="" a m disk memo st key rec sub id tmp
+  local q="" path="" a m disk memo st key rec sub id
   while [ $# -gt 0 ]; do
     case "$1" in
       -q|--jq) q=$2; shift 2 ;;
