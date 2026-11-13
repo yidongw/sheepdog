@@ -13,7 +13,8 @@ it guards.
   or a `Hotfix:` lands BEFORE its re-check, and it would run its own replacement of the review machinery on the review
   host. So a change to the reviewer, the gates or the workflow governs sheepdog's own review only after a pin bump in
   `self-review.yml`, and that bump is reviewed by the pinned (old) reviewer together with the sheepdog diff it ships
-  (section 2). Bootstrap pin: `a320ba106`, the last sha before this machinery.
+  (section 2). Pinned: `e099da79f`, whose own main re-check passed (it reads self-review.yml runs and reviews pin
+  bumps; the first bootstrap pin a320ba106 could do neither).
 - The trusted test list is `.github/sheepdog/tests.sh` (every shell suite, the reviewer's typecheck and tests, the
   no-dependency check, and ci.yml's pinned actionlint and zizmor — merge authority needs them green too) on a GitHub-hosted runner. The review runs on a self-hosted runner (`sheepdog-review`) whose
   job-started hook admits only `workflow_run` jobs of main's `self-review.yml` of this repository; this repository is

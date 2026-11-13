@@ -43,7 +43,10 @@ if [ -n "$d" ] && [ "$d" != "$head" ] && git merge-base --is-ancestor "$d" "$hea
 runs=$(review_runs | jq -r 'select(.display_title | test("^recheck [0-9a-f]{40}$")) | "\(.display_title[8:]) \(.id)"')
 base=""
 if [ -n "$runs" ]; then
-  for c in $(git rev-list --date-order -n "$DEPTH" "$parent"); do
+  # Candidates: the newest DEPTH ancestors by commit date (either side of a merge), then DEPTH more down the first-parent
+  # chain — a long merged side branch can fill the date-ordered window, and the first-parent walk still reaches the
+  # last re-check below it (review of 63212e313 #3). Any base found must link to the anchor, so either is safe.
+  for c in $( { git rev-list --date-order -n "$DEPTH" "$parent"; git rev-list --first-parent -n "$DEPTH" "$parent"; } | awk '!seen[$0]++'); do
     for id in $(awk -v c="$c" '$1 == c { print $2 }' <<<"$runs"); do
       review_link "$id" "$c" "$anchor" "$head" 0 && { base=$c; break 2; }
       echo "hotfix-review-base: the review of ${c:0:12} (run $id) has no usable coverage chain — not a base, its commits are reviewed again" >&2

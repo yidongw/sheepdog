@@ -9,8 +9,8 @@ name: Review
 # workflow by a full sha like every adopter — a sheepdog sha that already passed review, never ./ (main's latest commit:
 # a tests-only repair or a Hotfix: lands there before its re-check and would run its own replacement of the review
 # machinery on the review host). A change to the reviewer takes effect for sheepdog's own review only through a pin bump,
-# which is itself reviewed by the pinned (old) reviewer with the sheepdog diff (docs/self-review.md). Bootstrap pin:
-# a320ba106, the last sha before the self-review machinery.
+# which is itself reviewed by the pinned (old) reviewer with the sheepdog diff (docs/self-review.md). Pin: e099da79f
+# (its main re-check passed, run 43440698040; it reads self-review.yml runs and reviews pin bumps).
 # Runners: `tests` on GitHub-hosted ubuntu (this repository is public: free minutes, read-only token, no secrets);
 # `review` + `status` on the self-hosted cx43 runner cx43-sheepdog-review (labels cx43, sheepdog-review), whose
 # job-started hook admits only workflow_run jobs of main's self-review.yml — a fork's pull request runs its own workflow
@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   sheepdog:
-    uses: yidongw/sheepdog/.github/workflows/review.yml@a320ba106ff93065658f24d18e6d71a234acdd47
+    uses: yidongw/sheepdog/.github/workflows/review.yml@e099da79f08431efc91238f72f576f722bb22ac1
     with:
       tests-runs-on: '["ubuntu-24.04"]'
       review-runs-on: '["self-hosted","cx43","sheepdog-review"]'
