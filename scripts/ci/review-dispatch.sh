@@ -78,6 +78,10 @@ dev_round_running() { # dev_round_running <dev sha>
   [ "${n:-0}" -gt 0 ]
 }
 [ -e "$STATE/PAUSED" ] && exit 0
+# GitHub API budget (11-13: the host's dispatchers spent ~6000 calls/h of the token's 5000): one run listing per filter set
+# per run, completed runs' jobs / logs / artifacts kept on disk (gh-cache.sh; also used by the contract scripts run below)
+source "$(dirname "${BASH_SOURCE[0]}")/gh-cache.sh"
+if ghc_init "$STATE/ghcache"; then trap ghc_done EXIT; else log "gh cache unavailable: uncached API calls this run"; fi
 
 git -C "$SRC" fetch -q --prune origin
 [ -d "$TRUSTED" ] || git -C "$SRC" worktree add -q --detach "$TRUSTED" origin/$MAIN
