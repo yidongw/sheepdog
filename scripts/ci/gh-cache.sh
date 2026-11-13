@@ -80,6 +80,10 @@ ghc_run_list() {
       *) command gh run list ${repo:+-R "$repo"} ${wf:+-w "$wf"} ${ev:+-e "$ev"} ${br:+-b "$br"} -L "$lim" ${fields:+--json "$fields"} ${q:+-q "$q"} "$@"; return ;;
     esac
   done
+  # A fresh listing may observe another attempt even when compatibility fallback or
+  # storage failure prevents persisting it. Invalidate both answer tiers first.
+  # Failure to invalidate must fail closed rather than return stale approval data.
+  rm -f "$GHC_RUN"/api.* "$GHC_DIR"/disk/* "$GHC_RUN"/list.* || return 1
   # only what the union covers is answered here
   [ -n "$fields" ] && [[ "$lim" =~ ^[0-9]+$ ]] && [ "$lim" -le 200 ] || { command gh run list ${repo:+-R "$repo"} ${wf:+-w "$wf"} ${ev:+-e "$ev"} ${br:+-b "$br"} -L "$lim" ${fields:+--json "$fields"} ${q:+-q "$q"}; return; }
   for f in ${fields//,/ }; do
