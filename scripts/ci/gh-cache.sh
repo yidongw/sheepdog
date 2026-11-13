@@ -33,8 +33,16 @@ ghc_init() { # ghc_init <state dir>
 }
 ghc_done() { [ -n "${GHC_RUN_DIR:-}" ] && rm -rf "$GHC_RUN_DIR"; return 0; }
 
-ghc_on() { [ -n "${GHC_RUN_DIR:-}" ] && [ -d "$GHC_RUN_DIR" ]; }
-ghc_wipe() { [ -n "${GHC_RUN_DIR:-}" ] && rm -f "$GHC_RUN_DIR"/m.* 2>/dev/null; return 0; }
+ghc_on() { [ -n "${GHC_RUN_DIR:-}" ] && [ -d "$GHC_RUN_DIR" ] && [ ! -e "$GHC_RUN_DIR.disabled" ]; }
+ghc_wipe() {
+  [ -n "${GHC_RUN_DIR:-}" ] || return 0
+  if ! rm -f "$GHC_RUN_DIR"/m.*; then
+    # A sibling marker survives command substitutions and exported child shells.
+    # Stop the mutation if even disabling this memo cannot be recorded.
+    printf 'gh-cache: invalidation failed; disabling memo reuse\n' >&2
+    : > "$GHC_RUN_DIR.disabled" || return 1
+  fi
+}
 ghc_key() { printf '%s' "$1" | md5sum | cut -c1-32; }
 ghc_out() { # ghc_out <file> <jq filter or ""> → the answer as gh prints it (-q: raw strings, compact sorted JSON)
   if [ -n "$2" ]; then jq -rcS "$2" < "$1"; else cat "$1"; fi
@@ -51,7 +59,7 @@ ghc_fetch() { # ghc_fetch <memo file> <gh args…> → 0 with <memo file> holdin
 
 git() {
   case " $* " in
-    *" push "*) local rc=0; ghc_wipe; command git "$@" || rc=$?; ghc_wipe; return "$rc" ;;
+    *" push "*) local rc=0; ghc_wipe || return 1; command git "$@" || rc=$?; ghc_wipe || return 1; return "$rc" ;;
   esac
   command git "$@"
 }
@@ -74,7 +82,7 @@ gh() {
       ghc_out "$f" "$q" ;;
     "api "*) shift; ghc_api "$@" ;;
     "run view"|"run watch") command gh "$@" ;;   # reads; not memoised
-    *) local rc=0; ghc_wipe; command gh "$@" || rc=$?; ghc_wipe; return "$rc" ;;   # anything else may write
+    *) local rc=0; ghc_wipe || return 1; command gh "$@" || rc=$?; ghc_wipe || return 1; return "$rc" ;;   # anything else may write
   esac
 }
 
@@ -84,7 +92,7 @@ ghc_api() {
   while [ $# -gt 0 ]; do
     case "$1" in
       -q|--jq) q=$2; shift 2 ;;
-      -*) ghc_wipe; command gh api "${orig[@]}" || rc=$?; ghc_wipe; return "$rc" ;;   # -X, -f, -F, --input, …: may write
+      -*) ghc_wipe || return 1; command gh api "${orig[@]}" || rc=$?; ghc_wipe || return 1; return "$rc" ;;   # -X, -f, -F, --input, …: may write
       *) [ -z "$p" ] || { command gh api "${orig[@]}"; return; }; p=$1; shift ;;
     esac
   done
