@@ -18,7 +18,7 @@ name: Review
 run-name: ${{ github.event.workflow_run.head_branch == 'main' && 'recheck' || 'review' }} ${{ github.event.workflow_run.head_sha }}
 
 on:
-  workflow_run:
+  workflow_run: # zizmor: ignore[dangerous-triggers] the reusable workflow treats the pushed commit as data only
     workflows: [CI]
     types: [requested]
 
