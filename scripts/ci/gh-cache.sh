@@ -18,10 +18,8 @@
 #           answer kept for this run (GHC_LIST_TTL) is used only while that state is the one it was fetched under; a
 #           jobs answer goes on disk once the state is completed and every job in it is completed, and is used while
 #           the state is "completed <the same updatedAt>" (a re-run is listed as not completed / with a new updatedAt);
-#       repos/<r>/actions/runs/<id>/artifacts — kept for this run only (GHC_LIST_TTL): an artifact can expire or be
-#           deleted without a new attempt, so its presence is always read fresh (review of baf73755e #4);
-#       repos/<r>/actions/artifacts/<id>/zip — on disk (an artifact's content never changes), but answered from disk only
-#           when this dispatcher run's artifacts listing showed that artifact unexpired;
+#       NOT artifacts (listings or zips): the review attestation is approval evidence, it can expire or be deleted
+#           without a new attempt — every read goes to GitHub (reviews of baf73755e #4, afb14f77d #1);
 #       repos/<r>/actions/jobs/<id>/logs — on disk once a jobs answer showed that job completed (a job id belongs to one
 #           attempt; its log is final);
 #       repos/<r>/actions/workflows/<wf>/runs?… (review-runs.sh's pages) — kept for this run only (GHC_LIST_TTL);
@@ -144,21 +142,6 @@ ghc_api() {
       jq -r '.jobs[]? | select(.status == "completed") | .id' <<<"$a" 2>/dev/null | while read -r m; do : > "$GHC_RUN/jobdone.$m"; done 2>/dev/null || true
     fi
     ghc_jq "$q" <<<"$a"; return
-  fi
-  if [[ "$path" =~ ^repos/[^/]+/[^/]+/actions/runs/[0-9]+/artifacts$ ]]; then
-    if ghc_fresh "$memo" "$GHC_LIST_TTL"; then a=$(cat "$memo")
-    else a=$(command gh api "$path") || return 1; ghc_put "$memo" <<<"$a" 2>/dev/null || true; fi
-    # the artifacts this run saw unexpired: only their zips may be answered from disk
-    jq -r '.artifacts[]? | select(.expired != true) | .id' <<<"$a" 2>/dev/null | while read -r m; do : > "$GHC_RUN/artok.$m"; done 2>/dev/null || true
-    ghc_jq "$q" <<<"$a"; return
-  fi
-  if [[ "$path" =~ ^repos/[^/]+/[^/]+/actions/artifacts/([0-9]+)/zip$ ]]; then
-    id=${BASH_REMATCH[1]}
-    if [ -f "$disk" ] && [ -f "$GHC_RUN/artok.$id" ]; then cat "$disk"; return; fi
-    tmp=$(mktemp "$GHC_RUN/.zip.XXXXXX" 2>/dev/null) || { command gh api "$path"; return; }
-    if ! command gh api "$path" > "$tmp"; then rm -f "$tmp"; return 1; fi
-    cat "$tmp"; mv -f "$tmp" "$disk" 2>/dev/null || rm -f "$tmp"
-    return 0
   fi
   if [[ "$path" =~ ^repos/[^/]+/[^/]+/actions/jobs/([0-9]+)/logs$ ]]; then
     id=${BASH_REMATCH[1]}
