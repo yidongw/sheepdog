@@ -19,7 +19,7 @@
 #     list keyed by its arguments except -q; gh api on the JSON Actions runs/workflows endpoints keyed by the path, -q
 #     applied locally as gh prints it). Any write — gh run rerun/cancel/delete, gh workflow run, gh api with flags,
 #     any other gh command, git push — wipes it. The next dispatcher run asks again.
-#   · Across runs only the log of a completed job, by job id, read through ghm ($STATE/ghcache/logs/<id>; a re-run makes
+#   · Across runs only the log of a completed job, by job id, read through ghm ($STATE/ghcache/logs/final.<id>; a re-run makes
 #     new job ids, so a completed job's log never changes): stored when a ghm jobs answer of the same run showed the job
 #     completed more than two minutes ago; files and redirection only, byte for byte.
 # Binary downloads (artifact zips, run log zips) and other endpoints pass through ghm untouched. Without GHC_RUN_DIR
@@ -123,7 +123,13 @@ ghc_api() {
   p=${p#/}; p=${p#https://api.github.com/}
   if [[ "$p" =~ ^repos/[^/]+/[^/]+/actions/jobs/([0-9]+)/logs$ ]] && [ -z "$q" ]; then
     id=${BASH_REMATCH[1]}
-    if [ -f "$GHC_DIR/logs/$id" ]; then cat "$GHC_DIR/logs/$id"; return; fi
+    # Ignore the old unversioned entries: they could contain promoted prefixes.
+    if [ -f "$GHC_DIR/logs/final.$id" ]; then cat "$GHC_DIR/logs/final.$id"; return; fi
+    # An unconfirmed log may be a prefix. Never memoise it: completion learned
+    # later must cause a new fetch before these bytes can become a final log.
+    if [ ! -f "$GHC_RUN_DIR/done.$id" ]; then
+      command gh api "${orig[@]}"; return
+    fi
     f=$GHC_RUN_DIR/m.$(ghc_key "api $p")
     if [ ! -f "$f" ]; then
       ghc_fetch "$f" api "$p" || rc=$?
@@ -133,7 +139,7 @@ ghc_api() {
     # kept across runs only once a jobs answer of this run showed the job completed (a job id's final log)
     if [ -f "$GHC_RUN_DIR/done.$id" ]; then
       local t; t=$(mktemp "$GHC_DIR/logs/.t.XXXXXX" 2>/dev/null) \
-        && { { cp "$f" "$t" && mv -f "$t" "$GHC_DIR/logs/$id"; } 2>/dev/null || rm -f "$t"; }
+        && { { cp "$f" "$t" && mv -f "$t" "$GHC_DIR/logs/final.$id"; } 2>/dev/null || rm -f "$t"; }
     fi
     cat "$f"; return
   fi
