@@ -27,7 +27,7 @@ All of a host's dispatchers usually share one token (5000 REST calls/hour). `scr
 dispatcher, and inherited by the contract scripts it runs) answers repeated reads within a run and the final records of
 completed runs from `$STATE/ghcache`: one `gh run list` per filter set per run (the same server-side filters, the union
 of the fields, at least 100 runs, 60 s), the jobs / artifacts / record of a run once a listing shows it completed (kept
-while the listing shows the same attempt; a re-run is read again), a completed job's log, an artifact's zip. Writes
+while the listing shows it completed with the same updatedAt; a re-run is read again), a completed job's log, an artifact's zip. Writes
 (`gh run cancel`, …) are never cached and drop the listings. `test/ci/review-dispatch-api-budget.sh` runs the whole
 dispatcher against a counting fake `gh`: 13 calls cold, 3 on the next run of the same state (32 / 14 before).
 
