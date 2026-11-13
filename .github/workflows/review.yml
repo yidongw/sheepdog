@@ -71,6 +71,14 @@ on:
         description: Bun for the tests ('' = no bun).
         type: string
         default: ""
+      go-version:
+        description: Go for the tests ('' = no go; the module cache is not restored or saved — a candidate cannot poison a cache).
+        type: string
+        default: ""
+      large-files-allowed:
+        description: Paths (one per line, exact) where the commit gate admits a binary over 1 MB, e.g. a vendored binary the repository ships on purpose. Read from the caller's default branch like every input.
+        type: string
+        default: ""
       extra-gates:
         description: Path, on the caller's default branch, of an extra commit gate run as `bash <path> <base> <head>` in the candidate. Adds to the built-in gates, never replaces them.
         type: string
@@ -114,18 +122,21 @@ jobs:
     steps:
       - name: Clean workspace (a self-hosted workspace keeps files between runs)
         run: find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-      - name: Trusted tests script (the caller's default branch)
+      # The caller's default branch: the tests script, and the trusted files it may use (guards, a test harness, configs)
+      # as $SHEEPDOG_TRUSTED — moved out of the workspace before the candidate is checked out. The script decides
+      # what runs before candidate code can touch them (it runs as the same user on a hosted runner).
+      - name: Trusted tree (the caller's default branch)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.main-branch }}
           path: .sheepdog-trusted
-          sparse-checkout: ${{ inputs.tests-script }}
-          sparse-checkout-cone-mode: false
           persist-credentials: false
-      - name: Keep the tests script outside the candidate's reach
+      - name: Keep the trusted tree outside the candidate's workspace
         run: |
-          install -m 0755 ".sheepdog-trusted/$TESTS_SCRIPT" "$RUNNER_TEMP/sheepdog-tests.sh"
-          rm -rf .sheepdog-trusted
+          rm -rf "$RUNNER_TEMP/sheepdog-trusted"
+          mv .sheepdog-trusted "$RUNNER_TEMP/sheepdog-trusted"
+          install -m 0755 "$RUNNER_TEMP/sheepdog-trusted/$TESTS_SCRIPT" "$RUNNER_TEMP/sheepdog-tests.sh"
+          echo "SHEEPDOG_TRUSTED=$RUNNER_TEMP/sheepdog-trusted" >> "$GITHUB_ENV"
         env:
           TESTS_SCRIPT: ${{ inputs.tests-script }}
       - name: Candidate
@@ -141,6 +152,11 @@ jobs:
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: ${{ inputs.bun-version }}
+      - if: inputs.go-version != ''
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache: false
       - name: Tests (the default branch's script, the candidate's tree)
         run: bash "$RUNNER_TEMP/sheepdog-tests.sh"
 
@@ -251,11 +267,13 @@ jobs:
       - name: Commit gates (sheepdog's gates + the repository's extra gate, the branch's commits)
         working-directory: candidate
         run: |
-          SHEEPDOG_VERIFICATION_DIR="$GITHUB_WORKSPACE/.trusted/$VERIFICATION_DIR" bash ../.sheepdog/scripts/ci/commit-gates.sh "$GATE_BASE" HEAD
+          SHEEPDOG_VERIFICATION_DIR="$GITHUB_WORKSPACE/.trusted/$VERIFICATION_DIR" SHEEPDOG_LARGE_FILES_ALLOWED="$LARGE_FILES_ALLOWED" \
+            bash ../.sheepdog/scripts/ci/commit-gates.sh "$GATE_BASE" HEAD
           if [ -n "$EXTRA_GATES" ]; then bash "../.trusted/$EXTRA_GATES" "$GATE_BASE" HEAD; fi
         env:
           EXTRA_GATES: ${{ inputs.extra-gates }}
           VERIFICATION_DIR: ${{ inputs.verification-dir }}
+          LARGE_FILES_ALLOWED: ${{ inputs.large-files-allowed }}
       # The isolated reviewer runs `docker run --pull=never alpine:3.20`; never `docker image prune -a` on review hosts.
       - name: Reviewer image present
         run: docker image inspect alpine:3.20 >/dev/null 2>&1 || docker pull -q alpine:3.20

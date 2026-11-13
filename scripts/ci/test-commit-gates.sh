@@ -16,7 +16,7 @@ base=$(commit "$trailers
 $checked")
 expect() {
   local want=$1 label=$2 got=0
-  bash "$T/trusted/commit-gates.sh" "$base" HEAD > "$T/out" 2>&1 || got=$?
+  SHEEPDOG_LARGE_FILES_ALLOWED=${SHEEPDOG_LARGE_FILES_ALLOWED:-} bash "$T/trusted/commit-gates.sh" "$base" HEAD > "$T/out" 2>&1 || got=$?
   if [ "$got" != "$want" ]; then cat "$T/out" >&2; fail "$label: expected $want, got $got"; fi
 }
 record() { printf 'Commit: %s\n%s\n' "$1" "$checked" > "$T/trusted/commit-verification/$1.txt"; }
@@ -70,4 +70,12 @@ g add large.bin
 binary=$(commit "$trailers
 Verify:")
 record "$binary"; expect 6 'supplement cannot bypass large binary gate'
-echo 'ok - trusted SHA-bound verification; candidate/implicit/wrong/malformed records rejected; other gates enforced'
+# The trusted allow-list (input large-files-allowed) admits exactly the listed paths, nothing else.
+SHEEPDOG_LARGE_FILES_ALLOWED=$'app/vendored.bin\nlarge.bin' expect 0 'large binary at an allowed path'
+SHEEPDOG_LARGE_FILES_ALLOWED=$'large.bin.other\nlarge' expect 6 'allow-list matches whole paths only'
+SHEEPDOG_LARGE_FILES_ALLOWED='' expect 6 'empty allow-list'
+mkdir -p sub; g mv large.bin sub/large.bin
+commit "$trailers
+$checked" >/dev/null
+SHEEPDOG_LARGE_FILES_ALLOWED=large.bin expect 6 'a listed name in another directory is not allowed'
+echo 'ok - trusted SHA-bound verification; candidate/implicit/wrong/malformed records rejected; other gates enforced; large-file allow-list exact'

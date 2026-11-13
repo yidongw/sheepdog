@@ -4,7 +4,9 @@
 #   · every commit carries Loop:, Thread: and a Verify: checklist ('Verify:' alone on its line,
 #     then '- [x] <evidence>' items); Thread: must be someone who can be woken (a Discord thread id,
 #     a T3 thread uuid, mcp:<uuid> or import:<provider>:<uuid>) — review findings go there
-#   · no commit adds a binary file over 1 MB
+#   · no commit adds a binary file over 1 MB — except the exact paths listed (one per line) in
+#     SHEEPDOG_LARGE_FILES_ALLOWED (review.yml's input `large-files-allowed`, i.e. the caller's default branch: a
+#     vendored binary the repository ships on purpose; a branch cannot add a path to it)
 # A published commit's missing Verify: checklist may be supplied by a SHA-bound record <sha>.txt in the TRUSTED
 # verification directory (SHEEPDOG_VERIFICATION_DIR: the caller's default branch, never the candidate's tree).
 # Usage: scripts/ci/commit-gates.sh <base> <head>   (HEAD must be <head>)
@@ -60,6 +62,7 @@ for sha in $commits; do
       added=${rec%%$'\t'*}; rest=${rec#*$'\t'}; deleted=${rest%%$'\t'*}; f=${rest#*$'\t'}
       [ "$added" = - ] && [ "$deleted" = - ] || continue
       [ -n "$(git ls-tree -z "$sha" -- ":(literal)$f" | tr -d '\0')" ] || continue   # deleted in this commit
+      if [ -n "${SHEEPDOG_LARGE_FILES_ALLOWED:-}" ] && grep -qxF -- "$f" <<<"$SHEEPDOG_LARGE_FILES_ALLOWED"; then continue; fi
       sz=$(git cat-file -s "$sha:$f") || { log "ERROR: cannot read $f in $(git rev-parse --short "$sha")"; exit 6; }
       [ "$sz" -le 1048576 ] || big="$big$(git rev-parse --short "$sha") $f ($sz bytes)"$'\n'
     done < <(git diff --numstat -z --no-renames "$p" "$sha")

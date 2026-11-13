@@ -25,11 +25,17 @@ rule (`scripts/ci/review-runs.sh`) and every reader look for runs of that file t
 | `main-branch` / `dev-branch` | `main` / `dev` | Branch names |
 | `tests-script` | `.github/sheepdog/tests.sh` | The trusted test list (read from the default branch) |
 | `tests-timeout-minutes` / `review-timeout-minutes` | 60 / 90 | Job timeouts |
-| `node-version` / `bun-version` | `24` / `""` | Toolchains set up before the tests (`""` = none) |
+| `node-version` / `bun-version` / `go-version` | `24` / `""` / `""` | Toolchains set up before the tests (`""` = none; go without a module cache) |
 | `extra-gates` | `""` | A gate script on the default branch, run as `bash <path> <base> <head>` after sheepdog's gates (it can only add refusals) |
+| `large-files-allowed` | `""` | Exact paths (one per line) where the commit gate admits a binary over 1 MB (a vendored binary shipped on purpose) |
 | `verification-dir` | `scripts/ci/commit-verification` | SHA-bound `Verify:` records for published commits, read from the default branch |
 | `open-findings-file` | `""` | Path on the review runner of the dispatcher's open-findings log |
 | `reviewer-env-file` | `""` | Path on the review runner of the reviewer's `CODEREVIEW_*` settings |
+
+The tests script runs in a checkout of the pushed commit (the current directory). `$SHEEPDOG_TRUSTED` is a checkout of
+the default branch outside that workspace: guards, a test harness or lint configs the script copies over the candidate's
+before any candidate code runs (pikeway's guards, pawx-twitter-poller's tests). Service containers (a database for the
+tests) are the script's job too: start them with `docker run` as the runner and remove them in an `EXIT` trap.
 
 A repository may only tighten what sheepdog checks: extra gates add refusals, the test list is the repository's own,
 and nothing an input can say turns a gate or the review off.
