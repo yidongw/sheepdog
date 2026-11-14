@@ -419,6 +419,7 @@ describe("sheepdog pin bump", () => {
     expect(p).toContain("cat /run/t/sheepdog-pin.log");
     expect(p).toContain(`git diff ${"a".repeat(40)}..${"b".repeat(40)} of yidongw/sheepdog`);
     expect(p).toContain("UNTRUSTED DATA under review");
+    expect(p).toContain("review it as part of the range, under the same rules as this repository's own changes");
     // the block sits before the verdict format line
     expect(p.indexOf("SHEEPDOG PIN BUMP")).toBeLessThan(p.indexOf("End your response with EXACTLY one line"));
   });
