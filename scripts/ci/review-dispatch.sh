@@ -1060,22 +1060,28 @@ blocked_author_reason() { # blocked_author_reason <S> → why the authors must a
   if launch_failed "$s" blocked; then echo "the fixer agent failed to start (t3 thread start failed repeatedly)"; fi
   return 0
 }
-culprits_repaired() { # culprits_repaired <S> <attribution> → 0 (sets dupfix_why) when every blocking finding has a culprit commit and
-  # every such commit has an effective repair on origin/$DEV that S does NOT already contain (repair_effective); 1 otherwise
-  # (re-check of b06fcbb80 #1: a repair already in the reviewed head that still fails review fixed nothing — fresh findings)
-  local s=$1 n route c t cs="" x r why=""; shift
+culprits_repaired() { # culprits_repaired <S> <attribution> → per finding (supervisor 11-14, tralyx 26b73ac1b / 33b2b479b: one
+  # unrepaired culprit re-routed the whole set, so authors got findings dev had already repaired again): sets
+  #   repaired_nums — the findings whose culprit commit has an effective repair on origin/$DEV that S does NOT already contain
+  #                   (repair_effective; re-check of b06fcbb80 #1: a repair already in the reviewed head that still fails
+  #                   review fixed nothing — fresh findings)
+  #   open_nums     — every other blocking finding (no culprit commit, or one with no such repair)
+  #   dupfix_why    — which repair answers which culprit
+  # → 0 when at least one finding is repaired, 1 when none is (or there is no attribution)
+  local s=$1 n route c t r why=""; shift
+  repaired_nums="" open_nums="" dupfix_why=""
   [ -n "$1" ] || return 1
+  declare -A rep=()
   while read -r n route c t; do
     [ -n "$n" ] || continue
-    [ -n "$c" ] && [ "$c" != "-" ] || return 1
-    cs="$cs $c"
+    if [ -z "$c" ] || [ "$c" = "-" ]; then open_nums="$open_nums $n"; continue; fi
+    if [ -z "${rep[$c]+x}" ]; then rep[$c]=$(repair_effective "$c" "" "origin/$DEV" "^$s" || true); fi
+    r=${rep[$c]}
+    if [ -n "$r" ]; then repaired_nums="$repaired_nums $n"; why="$why #$n: ${r:0:9} repairs ${c:0:9};"
+    else open_nums="$open_nums $n"; fi
   done <<<"$1"
-  [ -n "$cs" ] || return 1
-  for x in $(tr ' ' '\n' <<<"$cs" | sort -u); do
-    r=$(repair_effective "$x" "" "origin/$DEV" "^$s") || return 1
-    why="$why ${r:0:9} repairs ${x:0:9};"
-  done
-  dupfix_why=${why# }; return 0
+  repaired_nums=${repaired_nums# } open_nums=${open_nums# } dupfix_why=${why# }
+  [ -n "$repaired_nums" ]
 }
 dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> <run url> <fixer task> → the reviewer's route per
   # finding (author groups, see dev_blocked_split); otherwise fixer first, authors only when it failed
@@ -1085,10 +1091,20 @@ dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> 
   # Every blocking finding pinned on a culprit commit C that $DEV already repairs (an effective Review-Fix-Of: C beyond C):
   # this head is an older copy of an already-fixed bug — no fixer, no author, no budget (supervisor 11-12: fc8381277's
   # findings, fixed by ca1de4505, re-blocked every later head without it, each spending a full fix budget).
+  # Per finding: one whose culprit dev already repairs is dropped (logged with its repair); only the rest is routed.
   if culprits_repaired "$s" "$att"; then
-    if [ -n "${DRY:-}" ]; then echo "DRY blocked ${s:0:9}: $DEV already repairs its culprit commit(s) ($dupfix_why) — no fixer"
-    elif [ ! -e "$STATE/sent/$s.dupfix" ]; then log "blocked ${s:0:9}: $DEV already repairs its culprit commit(s) ($dupfix_why) — no fixer"; touch "$STATE/sent/$s.dupfix"; fi
-    return 0
+    if [ -z "$open_nums" ]; then
+      if [ -n "${DRY:-}" ]; then echo "DRY blocked ${s:0:9}: $DEV already repairs its culprit commit(s) ($dupfix_why) — no fixer"
+      elif [ ! -e "$STATE/sent/$s.dupfix" ]; then log "blocked ${s:0:9}: $DEV already repairs its culprit commit(s) ($dupfix_why) — no fixer"; touch "$STATE/sent/$s.dupfix"; fi
+      return 0
+    fi
+    if [ -n "${DRY:-}" ]; then echo "DRY blocked ${s:0:9}: dropped finding(s) $repaired_nums — $DEV already repairs their culprit commit(s) ($dupfix_why); routing $open_nums"
+    elif [ ! -e "$STATE/sent/$s.dupfix-partial" ]; then
+      log "blocked ${s:0:9}: dropped finding(s) $repaired_nums — $DEV already repairs their culprit commit(s) ($dupfix_why); routing only $open_nums"
+      touch "$STATE/sent/$s.dupfix-partial"
+    fi
+    # shellcheck disable=SC2086 # finding numbers, one word each
+    { f=$(findings_subset "$f" 1 $open_nums); att=$(att_of "$att" $open_nums); }
   fi
   if [ -n "$(awk '$2 == "author" && $4 != "-"' <<<"$att")" ] && fix_budget_ok "$s" blocked "$f"; then
     dev_blocked_split "$s" "$f" "$url" "$att"

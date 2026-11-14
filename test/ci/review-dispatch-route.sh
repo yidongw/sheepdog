@@ -98,18 +98,24 @@ g checkout -q -B devw origin/dev; commit src/a.ts "$A" "Review-Fix-Of: $CA" >/de
 g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
 dev_blocked "$S" "$F2" "" run-url task
 test ! -e "$woken"; test ! -e "$sent"; grep -q 'already repairs its culprit commit' "$LOG"
-# only one culprit repaired → handled as before (both authors hear of their own finding)
+# only one culprit repaired → per finding (supervisor 11-14, tralyx 26b73ac1b / 33b2b479b): A's #1 (repaired on dev) is dropped
+# and logged with its repair; only B hears, of #2 only
 reset
-g checkout -q -B devw "$S"; commit src/a.ts "$A" "Review-Fix-Of: $CA" >/dev/null
+g checkout -q -B devw "$S"; RA=$(commit src/a.ts "$A" "Review-Fix-Of: $CA")
 g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
 dev_blocked "$S" "$F2" "" run-url task
-! grep -q 'already repairs its culprit commit' "$LOG" || { echo "negative check failed: test/ci/review-dispatch-route.sh:103" >&2; exit 1; }; test -s "$sent"
+! grep -q 'already repairs its culprit commit(s) (' "$LOG" || { echo "negative check failed: the partial case is no full dupfix" >&2; exit 1; }
+grep -q "dropped finding(s) 1 — dev already repairs their culprit commit(s) (#1: ${RA:0:9} repairs ${CA:0:9};); routing only 2" "$LOG"
+test "$(cut -d' ' -f2 "$sent" | sort -u)" = "$B"; test ! -e "$T/msg-${A##*:}"
+grep -q 'patch hides b' "$T/msg-${B##*:}"; ! grep -q 'a.ts siblings' "$T/msg-${B##*:}" || { echo "negative check failed: B got A's repaired finding" >&2; exit 1; }
 g push -q -f origin "$S:refs/heads/dev"; g fetch -q origin
-echo 'blocked head whose culprit commits dev already repairs: no fixer, nobody told'
-grep -q 'other findings' "$T/msg-${A##*:}"
-# later runs inside the window: nobody new, no fixer
+echo 'blocked head whose culprit commits dev already repairs: no fixer, nobody told; partly repaired: only the open findings are routed'
+# dev without that repair again: A's #1 is open now and routed to A; B is not told twice; no fixer
 dev_blocked "$S" "$F2" "" run-url task
-test ! -e "$woken"; test "$(wc -l < "$sent")" -eq 2
+test ! -e "$woken"; test "$(wc -l < "$sent")" -eq 2; grep -q 'a.ts siblings' "$T/msg-${A##*:}"
+# later runs inside the window: nobody new
+dev_blocked "$S" "$F2" "" run-url task
+test "$(wc -l < "$sent")" -eq 2
 echo 'route=author: each author only their own findings, no fixer'
 
 # 3. author silent 60 min → the fixer gets that author's findings (authorto), on dev, with the culprit commit
@@ -380,3 +386,28 @@ test "$(repair_effective "$H" "" origin/main origin/dev)" = "$R"     # stands on
 if repair_effective "$H" "" origin/dev >/dev/null; then echo "unexpected: reverted on dev yet counted for dev alone" >&2; exit 1; fi
 g push -q -f origin "$S:refs/heads/dev"; g fetch -q origin
 echo 'repair judged per ref'
+
+# tralyx 26b73ac1b (11-14): #1-#3 route=author on de62c187b (repaired on dev by 124cfe5a3), #4 route=fixer on 26b73ac1b itself
+# (unrepaired) → #1-#3 dropped (the author is not told again), the fixer gets #4 only. 33b2b479b had the same shape (#1/#2 on
+# de62c187b, #3 on 180715225).
+F4="review-gate: FINDING #1 route=author commit=$CA — payment attribution
+review-gate: BLOCKED #1 ducktape [should]: singleton valuation one
+evidence: src/a.ts:1 one
+review-gate: FINDING #2 route=author commit=$CA — payment attribution two
+review-gate: BLOCKED #2 ducktape [should]: singleton valuation two
+evidence: src/a.ts:2 two
+review-gate: FINDING #3 route=author commit=$CA — batched swaps
+review-gate: BLOCKED #3 regression [should]: batched settlement three
+evidence: src/a.ts:3 three
+review-gate: FINDING #4 route=fixer commit=$CB — retired task keys
+review-gate: BLOCKED #4 regression [should]: retired keys stay in the failure set
+evidence: src/b.ts:4 four"
+reset
+g checkout -q -B devw "$S"; RA4=$(commit src/a.ts "$A" "Review-Fix-Of: $CA")
+g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
+dev_blocked "$S" "$F4" "" run-url task
+grep -q "dropped finding(s) 1 2 3 — dev already repairs their culprit commit(s) (#1: ${RA4:0:9} repairs ${CA:0:9}; #2: ${RA4:0:9} repairs ${CA:0:9}; #3: ${RA4:0:9} repairs ${CA:0:9};); routing only 4" "$LOG"
+test ! -e "$T/msg-${A##*:}"; test -s "$woken"
+grep -q "^#4 → commit ${CB:0:12}" "$T/task-blocked"; ! grep -qE '^#[123] →' "$T/task-blocked" || { echo "negative check failed: the fixer got repaired findings" >&2; exit 1; }
+g push -q -f origin "$S:refs/heads/dev"; g fetch -q origin
+echo 'tralyx 26b73ac1b shape: repaired findings dropped, the unrepaired one routed alone'
