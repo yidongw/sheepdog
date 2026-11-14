@@ -37,6 +37,84 @@ git update-ref refs/remotes/origin/main "$P"
 C=$(commit_file 'blocked: breaks old' broken-a old)
 D=$(commit_file 'passing repair of old' $'good-a\nrepaired' old)
 
+# Exact 216bed0b9 #1 history: D adopts X's repair through a heavily rewritten
+# sibling rename. An undone side merge contains X but not D. The former
+# ancestry filter missed the destination and accepted removal of the repair.
+# Current main requires a full review after that undo, with or without the
+# repair; a fresh complete review restores eligibility.
+adopted_rename_cases() {
+  local O X sibling retained other M mainline merge_order removed reviewed file=$'new\nname'
+  local old=$'broken' refined=$'better' i
+  for ((i=1; i<=60; i++)); do
+    old+=$'\n'"original context $i"
+    refined+=$'\n'"refined context $i"
+  done
+  g checkout -q --detach "$P"
+  O=$(commit_file 'old path before adopted sibling history' "$old" old)
+  X=$(commit_file 'independent repair later adopted by merge' "${old/broken/good}" old)
+  g checkout -q --detach "$O"
+  g mv old 'middle name'; g commit -q -m 'sibling renames original path'
+  # Each refinement/rename has a detectable edge, but the endpoints do not.
+  for ((i=1; i<=3; i++)); do
+    sed -i "$((2 + (i - 1) * 20)),$((1 + i * 20))s/original/refined/" 'middle name'
+    g add -A; g commit -q -m "sibling refinement $i"
+  done
+  g mv 'middle name' "$file"; g commit -q -m 'sibling chains rename before reviewed merge'
+  C=$(commit_file 'blocked sibling change before adopting repair' broken bug)
+  sibling=$C
+  if git merge-base --is-ancestor "$X" "$sibling"; then fail 'adopted sibling history must not descend from X'; fi
+  for merge_order in 1 2; do
+    g checkout -q --detach "$sibling"
+    other=$X
+    if [ "$merge_order" = 2 ]; then g checkout -q --detach "$X"; other=$sibling; fi
+    if ! g merge -q --no-ff --no-commit "$other" >"$T/merge.out" 2>&1; then
+      [ -n "$(git ls-files -u)" ] || fail 'unexpected adopted sibling merge failure'
+    fi
+    rm -f old 'middle name'
+    if [ "$merge_order" = 2 ]; then
+      # Reusing the source name as a directory does not retain the old file.
+      mkdir old; printf 'independent directory contents\n' > old/context
+    fi
+    printf '%s\n' "$refined" > "$file"
+    printf 'good\n' > bug
+    g add -A; g commit -q -m 'passing merge adopts and refines repair at sibling destination'
+    D=$(git rev-parse HEAD)
+    [ -z "$(git diff --name-only --find-renames=50% --diff-filter=R "$X" "$D")" ] || fail 'endpoint diff must not recover sibling rename'
+    approval 0 "adopted sibling merge $merge_order before any revert"
+    for mainline in 1 2; do
+      # The unreviewed side descends from X, not D. The former proof treated
+      # its undo as a preservation dependency on X without invalidating D.
+      g checkout -q --detach "$X"
+      other=$(commit_file 'unreviewed sibling descended from independent repair' side side)
+      g checkout -q --detach "$X"
+      g commit -q --allow-empty -m 'retain independent repair on unreviewed branch'
+      retained=$(git rev-parse HEAD)
+      if [ "$mainline" = 2 ]; then g checkout -q --detach "$other"; other=$retained; fi
+      g merge -q --no-ff -m 'unreviewed sibling merge sharing only X' "$other"
+      M=$(git rev-parse HEAD)
+      if git merge-base --is-ancestor "$D" "$M"; then fail 'unreviewed merge must not descend from D'; fi
+      g checkout -q --detach "$D"
+      g merge -q --no-ff -m 'merge unreviewed sibling beside adopted repair' "$M"
+      g revert --no-edit -m "$mainline" "$M" >/dev/null
+      git diff --exit-code "$D" HEAD || fail 'sibling undo must retain exactly the reviewed tree'
+      approval 1 "adopted sibling merge $merge_order mainline $mainline intact repair after undo"
+      removed=$(commit_file 'remove reviewed repair at adopted destination' "${refined/better/broken}" "$file")
+      approval 1 "adopted sibling merge $merge_order mainline $mainline removed repair"
+      g revert --no-edit "$removed" >/dev/null
+      approval 1 "adopted sibling merge $merge_order mainline $mainline restored repair after undo"
+      reviewed=$D; D=$(git rev-parse HEAD)
+      approval 0 "adopted sibling merge $merge_order mainline $mainline fresh full review"
+      D=$reviewed
+    done
+  done
+  echo 'exercised: adopted sibling rename history through both approval consumers'
+}
+if [ "${1:-}" = --adopted-sibling-renames ]; then
+  adopted_rename_cases
+  [ "$bad" = 0 ] || fail 'adopted sibling rename history bypassed full review'
+  exit 0
+fi
+
 transform() { # transform <kind> → one commit on HEAD that moves / copies / re-modes D's repaired file
   case $1 in
     rename100) g mv old new; g commit -q -m 'rename old to new (R100)' ;;
@@ -109,5 +187,6 @@ D=$(commit_file 'passing repair after an inner revert' $'good-a\nrepaired' old)
 approval 0 "a revert inside C..D (reviewed by D)"
 g commit -q --allow-empty -m 'docs: explain reverts' -m "Note: the dispatcher text says This reverts commit abcdef1 when it reverts."
 approval 0 "a message that only mentions a revert mid-line"
+adopted_rename_cases
 [ "$bad" = 0 ] || fail 'supersession after reverts'
 echo "dev supersession-after-reverts matrix passed"
