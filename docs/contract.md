@@ -42,7 +42,15 @@ what gets deployed. The workflow is [.github/workflows/review.yml](../.github/wo
   range (its range base is at or below the blocked one's) and passed or is repaired — and no revert at all (git revert's
   "This reverts commit …" line, merge reverts included, or a `Revert "` subject) lies between that review's head and the
   candidate: after any revert the blocked range is reviewed in full again (conservative; no content proofs of what a
-  revert, undo or restoration left standing — supervisor 11-14). Main then reviews the fix under (a).
+  revert, undo or restoration left standing — supervisor 11-14). Cover-base selection checks all dev ancestors for
+  blocks that are neither repaired nor superseded before choosing a newer review as its base. This widens the next
+  full review to include those blocked ranges; a passing or repaired full review then restores tests-only eligibility
+  while the main boundary stays unchanged. A quoted `Revert "` title in a commit body is not a revert subject.
+  Direct trailer repairs also lose eligibility after any later merge revert (Git's `This reverts commit …, reversing`
+  marker), which names the merge rather than its constituent repairs. This conservative rule applies to range bases,
+  coverage links and dispatcher completion, even after the merge revert is undone; a new repair or full review is
+  required. Direct non-merge revert chains still recognize a reverted revert as restoring the repair.
+  Main then reviews the fix under (a).
 - **(c) Coverage is a chain of completed reviews.** Each review uploads an attestation `{head, base, kind, main}`.
   `review-passed.sh <sha> [repo] [deployed sha]` approves a sha only when its trusted tests passed, its review step
   passed (or it is a valid tests-only round), and — given the deployed sha — the chain of attested ranges reaches from

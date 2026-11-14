@@ -4,9 +4,16 @@
 # when an effective repair of it is an ancestor of the head being judged: a commit in <S>..<head> carrying the exact
 # trailer "Review-Fix-Of: <S>" (full sha) that has S as an ancestor and is not reverted since. Otherwise S's code is not vouched for by any later,
 # unrelated review. (review-dispatch.sh's repair_effective is the dispatcher's richer form of the same rule.)
-reverted() { # reverted <c> <head> [depth] → 0 when a standing "This reverts commit <c>" sits in c..head (fail closed past 64)
-  local x k=${3:-0}
+reverted() { # <c> <head> [depth] → 0 when c is reverted or a later merge revert makes its survival unknown
+  local x undos k=${3:-0}
   [ "$k" -lt 64 ] || return 0
+  # A merge revert names the merge, not the repair it removes. As with
+  # supersession's review_stands, do not try to prove retained contributions
+  # or restorations: ANY merge revert after c requires a new repair/full review.
+  # Check before recursion, so an uncertain undo can never restore a repair
+  # by flipping the recursive answer. Git errors also withhold the privilege.
+  undos=$(git log --format=%H -i -E --grep='^This reverts commit [0-9a-f]{7,40}, reversing' "$1..$2" 2>/dev/null) || return 0
+  [ -z "$undos" ] || return 0
   for x in $(git log --format=%H -F --grep="This reverts commit $1" "$1..$2" 2>/dev/null || true); do
     reverted "$x" "$2" $((k + 1)) || return 0   # x stands → c is reverted
   done

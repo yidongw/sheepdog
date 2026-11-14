@@ -58,7 +58,7 @@ g checkout -q dev; g merge -q --no-ff -m "merge main into dev" -m "$valid" main;
 if repaired "$S" "$DM"; then fail "repaired(): a non-ancestor Review-Fix-Of: repaired the blocked dev review"; fi
 cover=$(DEV_REVIEW_MAIN_REF=$H2 bash "$CI/dev-review-base.sh" "$DM" 2>"$T/err")
 [ "$cover" != "$S" ] || fail "dev cover base: the blocked S became a base through a non-ancestor repair"
-grep -q "${S:0:12} was blocked and is not repaired" "$T/err" || fail "dev cover base: $(cat "$T/err")"
+grep -q "${S:0:12} was blocked and is neither repaired nor superseded" "$T/err" || fail "dev cover base: $(cat "$T/err")"
 # review-passed.sh's coverage link: the blocked review of S is no link while only H "repairs" it
 review_api() { curl -fsSL "https://api.github.com/repos/$REPO/$1"; }
 . "$CI/review-runs.sh"; . "$CI/review-coverage.sh"

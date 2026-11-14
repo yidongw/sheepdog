@@ -17,9 +17,10 @@
 #   dev-review-base.sh [<head>]
 #     → the cover base: the newest first-parent ancestor C of <head> (not <head> itself) whose dev review completed and
 #       either PASSED, or BLOCKED and C..<head> carries an effective repair of C (a commit with "Review-Fix-Of: C" that
-#       is not reverted). A blocked C without its repair is passed over, and from then on the base may be no newer
-#       than the base C's own review used (its "review-range:" line): C's whole range is reviewed again together with
-#       the new commits — a blocked commit never lands on an unrelated commit's review, whatever was repaired above it.
+#       is not reverted). Check all dev ancestors before selecting a base, including blocks below a newer completed
+#       review. If C is neither repaired nor superseded (the same rule as --only-fixes), the base may be no newer than
+#       C's own review base (its "review-range:" line): C's whole range is reviewed again with the new commits — a
+#       blocked commit never lands on an unrelated commit's review, whatever was repaired above it.
 #       The walk stops at main; nothing qualifies (or the API fails) → merge-base(origin/main, <head>), or the older
 #       limit a passed-over blocked review set.
 #   dev-review-base.sh --diff <cover base> <head>
@@ -105,8 +106,12 @@ review_stands() { # review_stands <superseding review's head D> <candidate> → 
   # anywhere in D..candidate — dev, a merged side branch or main. git failing → not standing (fail closed). Reverts inside
   # C..D were reviewed by D itself and do not count (review of sheepdog 87dce4aec #1).
   local out
-  out=$(git log --format=%H -i -E --grep='^This reverts commit [0-9a-f]{7,40}' --grep='^Revert "' "$1..$2" 2>/dev/null) || return 1
-  [ -z "$out" ]
+  out=$(git log --format=%H -i -E --grep='^This reverts commit [0-9a-f]{7,40}' "$1..$2" 2>/dev/null) || return 1
+  [ -z "$out" ] || return 1
+  # --grep searches the entire message: a quoted title in a body is not a
+  # revert subject. Buffer all subjects so grep cannot SIGPIPE git.
+  out=$(git log --format=%s "$1..$2" 2>/dev/null) || return 1
+  ! grep -qi '^Revert "' <<<"$out"
 }
 superseded() { # superseded <C> <the base C's blocked review used, or -> <head> → 0 when a LATER completed dev review re-reviewed
   # all of C's range and stands: a review of a descendant D of C (C is an ancestor of D; D in C..head, not on main) whose own range started at or
@@ -139,6 +144,15 @@ superseded() { # superseded <C> <the base C's blocked review used, or -> <head> 
 }
 . "$(dirname "${BASH_SOURCE[0]}")/review-repair.sh"   # reverted / repaired: the one repair rule
 . "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machinery_files: what a tests-only approval never lands
+block_base=""
+unresolved_block() { # <commit> <candidate> → 0 if it still needs review; sets block_base to its reviewed range base
+  local v
+  verdict_m "$1"; v=$vm
+  [ "${v%% *}" = blocked ] || return 1
+  repaired "$1" "$2" && return 1
+  block_base=${v#blocked }; block_base=${block_base%% *}
+  ! superseded "$1" "$block_base" "$2"
+}
 clean_merge() { # clean_merge <m> → 0 when m has two parents and its tree is exactly their automatic merge
   local t
   [ "$(git rev-list --parents -n1 "$1" | wc -w)" = 3 ] || return 1
@@ -157,11 +171,7 @@ only_fixes() { # only_fixes <base> <head>
   # no blocked, unrepaired review in or below the range (down to main), merges included: that one is reviewed again —
   # unless a later completed review that stands re-reviewed its whole range (superseded)
   for c in $(git rev-list "$2" "^$MAINREF"); do
-    verdict_m "$c"; v=$vm
-    if [ "${v%% *}" = blocked ] && ! repaired "$c" "$2"; then
-      local rcb=${v#blocked }; rcb=${rcb%% *}
-      superseded "$c" "$rcb" "$2" || return 1
-    fi
+    if unresolved_block "$c" "$2"; then return 1; fi
   done
   for c in $(git rev-list --merges "$1..$2" "^$MAINREF"); do clean_merge "$c" || return 1; done
   for c in $(git rev-list --no-merges "$1..$2" "^$MAINREF"); do
@@ -200,9 +210,21 @@ limit=""   # passing over a blocked, unrepaired R: the base may be no newer than
 if parent=$(git rev-parse -q --verify "$head^1^{commit}") && ! git merge-base --is-ancestor "$parent" "$mb"; then
   load_runs
   if [ -n "$runs" ]; then
+    # A newer passed/repaired review is a coverage link, but may no longer
+    # supersede an older block after a revert. Find those obligations FIRST,
+    # including merged-side blocks and ones below the base-candidate depth.
+    # Otherwise the fallback full review stays narrow forever and cannot
+    # restore tests-only eligibility while main remains unchanged.
+    for c in $(git rev-list "$head" "^$MAINREF"); do
+      unresolved_block "$c" "$head" || continue
+      s=$block_base
+      if [ "$s" = - ] || ! git merge-base --is-ancestor "$s" "$c" 2>/dev/null; then s=$mb; fi
+      if [ -z "$limit" ]; then limit=$s; else limit=$(git merge-base "$limit" "$s"); fi
+      echo "dev-review-base: ${c:0:12} was blocked and is neither repaired nor superseded at ${head:0:12} — its range (from ${s:0:12}) is reviewed again" >&2
+    done
     for c in $(git rev-list --first-parent -n "$DEPTH" "$parent"); do
       git merge-base --is-ancestor "$c" "$mb" && break   # reached main
-      v=$(verdict "$c")
+      verdict_m "$c"; v=$vm
       case "${v%% *}" in
         pass|blocked)
           if [ "${v%% *}" = pass ] || repaired "$c" "$head"; then
@@ -213,10 +235,7 @@ if parent=$(git rev-parse -q --verify "$head^1^{commit}") && ! git merge-base --
             if [ -z "$limit" ] || git merge-base --is-ancestor "$c" "$limit"; then base=$c; break; fi
             continue
           fi
-          s=${v#blocked }; s=${s%% *}
-          if [ "$s" = - ] || ! git merge-base --is-ancestor "$s" "$c" 2>/dev/null; then s=$mb; fi
-          if [ -z "$limit" ]; then limit=$s; else limit=$(git merge-base "$limit" "$s"); fi
-          echo "dev-review-base: ${c:0:12} was blocked and is not repaired in ${c:0:12}..${head:0:12} — its range (from ${s:0:12}) is reviewed again" >&2 ;;
+          ;;
       esac
     done
   fi
