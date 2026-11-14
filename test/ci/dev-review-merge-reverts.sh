@@ -48,6 +48,54 @@ PIN=source
   only_fixes "$E" "$F" || fail 'reverting the revert did not restore valid supersession'
   echo 'ok: reverting the revert restores the evidence'
 
+  # Unrelated same-file hunks after R do not stop U from undoing R's patch.
+  # Check both mainlines and unrelated hunks retained after U as well.
+  saved_C=$C; saved_D=$D
+  g checkout -q --detach "$C"
+  C=$(commit_file 'blocked bug with metadata' $'broken\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12' bug)
+  reviewed=$'good\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12'
+  D=$(commit_file 'passing repair with metadata' "$reviewed" bug)
+  metadata_D=$D
+  g revert --no-edit "$D" >/dev/null
+  metadata_R=$(git rev-parse HEAD)
+  for mainline in 1 2; do
+    for retained_metadata in no yes; do
+      D=$metadata_D
+      g checkout -q --detach "$metadata_R"
+      side=$(commit_file 'unrelated metadata after the constituent revert' $'broken\n1\n2\n3\n4\nside metadata\n6\n7\n8\n9\n10\n11\n12' bug)
+      g checkout -q --detach "$D"
+      if [ "$retained_metadata" = yes ]; then
+        retained=$(commit_file 'unrelated retained mainline metadata' "${reviewed/11/mainline metadata}" bug)
+      else
+        g commit -q --allow-empty -m 'retained mainline'
+        retained=$(git rev-parse HEAD)
+      fi
+      if [ "$mainline" = 2 ]; then g checkout -q --detach "$side"; side=$retained; fi
+      g merge -q --no-ff -m 'merge the revert and unrelated metadata' "$side"
+      M=$(git rev-parse HEAD)
+      g revert --no-edit -m "$mainline" "$M" >/dev/null
+      restored_metadata=$(git rev-parse HEAD)
+      git diff --exit-code "$retained" HEAD || fail 'metadata fixture did not restore its retained tree'
+      if [ "$retained_metadata" = no ]; then
+        git diff --exit-code "$D" HEAD || fail 'metadata fixture did not restore the exact reviewed tree'
+      fi
+      repair_round "$D"
+      only_fixes "$E" "$F" || fail "mainline $mainline metadata after R invalidated a restored repair (retained=$retained_metadata)"
+      run 4 "review $F" success skipped "$E" tests-only-fix
+      RP "$F" o/r "$P" || fail "restored repair lost deployment coverage: $(cat "$T/err")"
+      echo "ok: mainline $mainline restoration tolerates unrelated metadata (retained=$retained_metadata)"
+
+      g checkout -q --detach "$restored_metadata"
+      g revert --no-edit "$restored_metadata" >/dev/null
+      [ "$(head -1 bug)" = broken ] || fail 'reverting metadata restoration did not remove the repair'
+      repair_round "$D"
+      if only_fixes "$E" "$F"; then fail 'reverted metadata restoration retained tests-only approval'; fi
+      run 4 "review $F" success skipped "$E" tests-only-fix
+      if RP "$F" o/r "$P"; then fail 'reverted metadata restoration retained deployment coverage'; fi
+    done
+  done
+  C=$saved_C; D=$saved_D
+
   # Candidate merge drivers must not turn a conflicting repair into a no-op.
   # Q's final assignment disables auth; M resolves it safely, and reverting M
   # restores Q. Union (including a nested macro) and a custom driver all hide

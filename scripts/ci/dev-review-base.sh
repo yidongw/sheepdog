@@ -92,7 +92,7 @@ verdict_m() { # verdict_m <sha> → sets vm to its verdict, asked once per scrip
   [ -n "${_verdicts[$1]+x}" ] || _verdicts[$1]=$(verdict "$1")
   vm=${_verdicts[$1]}
 }
-preserves_patch() ( # preserves_patch <constituent> <post-revert commit>
+preserves_patch() ( # preserves_patch <before> <after> <at commit>
   # Candidate attributes (notably merge=union) can hide a real conflict and
   # return the post-revert tree unchanged. Prove preservation in an isolated
   # bare repository: info/attributes has priority over every tree's attributes,
@@ -107,18 +107,20 @@ preserves_patch() ( # preserves_patch <constituent> <post-revert commit>
   printf '%s\n' '* merge=text' > "$proof/info/attributes" || return 1
   merged=$(GIT_ATTR_NOSYSTEM=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
     git --git-dir="$proof" -c core.attributesFile=/dev/null -c merge.renormalize=false \
-    merge-tree --write-tree --merge-base="$1^1" "$1" "$2" 2>/dev/null) || return 1
-  [ "$merged" = "$(git rev-parse "$2^{tree}")" ]
+    merge-tree --write-tree --merge-base="$1" "$2" "$3" 2>/dev/null) || return 1
+  [ "$merged" = "$(git rev-parse "$3^{tree}")" ]
 )
 reverts_of() { # reverts_of <commit> <since> <head> [restore]
   # Git names the merge, not its constituent commits, in a merge revert. Only
   # commits introduced relative to the recorded mainline can be undone by it.
-  # For restoration, prove both ends of the inverse on ALL constituent paths:
-  # the undo's parent contains the constituent's result, and the undo restores
-  # its previous state. Final contents alone prove nothing when constituents
-  # cancel each other and the merge undo changes only unrelated paths.
+  # For restoration, prove both patch directions: the constituent's complete
+  # delta survives in the undo's parent, and its inverse survives after the
+  # undo. Unrelated hunks may differ at either endpoint. Final contents alone
+  # prove nothing when constituents cancel inside the merge.
+  # In invalidation mode, mark a merge undo that retained the patch as
+  # "<sha> preserved". Its consumer must verify preservation through head;
+  # the snapshot alone cannot vouch for later reverts of a sibling cherry-pick.
   local c=$1 since=$2 h=$3 restore=${4:-0} r m p body
-  local -a paths=()
   git log --format=%H -F --grep="This reverts commit $c" "$since..$h" 2>/dev/null || return 1
   while read -r r; do
     body=$(git show -s --format=%B "$r")
@@ -132,17 +134,19 @@ reverts_of() { # reverts_of <commit> <since> <head> [restore]
     # Reachability only identifies a possible constituent. An equivalent patch
     # can already live on the retained mainline (e.g. a cherry-pick). If applying
     # c's delta to the post-revert tree is a clean no-op, its reviewed changes
-    # survived, even with unrelated edits in the same file. A conflict is not
-    # proof of preservation: conservatively require a full review in that case.
+    # survived at this snapshot, even with unrelated edits in the same file.
+    # Keep that dependency visible to the caller rather than discarding r.
     if [ "$restore" != 1 ]; then
-      if preserves_patch "$c" "$r"; then continue; fi
+      if preserves_patch "$c^1" "$c" "$r"; then
+        printf '%s preserved\n' "$r"
+        continue
+      fi
     fi
     if [ "$restore" = 1 ]; then
       git rev-parse --verify "$c^1" >/dev/null 2>&1 || continue
-      mapfile -d '' -t paths < <(git diff --no-renames --name-only -z "$c^1" "$c")
-      [ "${#paths[@]}" -gt 0 ] || continue
-      git --literal-pathspecs diff --quiet "$c" "$r^1" -- "${paths[@]}" || continue
-      git --literal-pathspecs diff --quiet "$c^1" "$r" -- "${paths[@]}" || continue
+      if git diff --quiet "$c^1" "$c"; then continue; fi
+      preserves_patch "$c^1" "$c" "$r^1" || continue
+      preserves_patch "$c" "$c^1" "$r" || continue
     fi
     printf '%s\n' "$r"
   done < <(git log --format=%H -F --grep=', reversing' "$since..$h" 2>/dev/null)
@@ -169,7 +173,7 @@ superseded() { # superseded <C> <the base C's blocked review used, or -> <head> 
   # in D's round, and D's findings — C's still-open ones among them — are what the repairs answer (owner 11-13: dev gets one
   # review; tralyx 11-13/14: dev heads blocked and superseded at once by a main→dev merge — 4b6671346, bc1f40bd3,
   # f54379cfd — were never repaired by trailer, so no range above them could ever be a tests-only round again).
-  local c=$1 rc=$2 h=$3 d v rb x r st undone
+  local c=$1 rc=$2 h=$3 d v rb x r preservation st undone
   [[ "$rc" =~ ^[0-9a-f]{40}$ ]] || return 1
   for d in $(git rev-list "$c..$h" "^$MAINREF" 2>/dev/null); do
     # one containment rule (as repaired()): D's head contains C — a review on a side branch merged in later never saw C
@@ -189,10 +193,18 @@ superseded() { # superseded <C> <the base C's blocked review used, or -> <head> 
     # (review of sheepdog 87dce4aec #1). Only a revert that is itself undone (revert_state 1) is ignored.
     undone=0
     for x in $(git rev-list "$c..$d" 2>/dev/null); do
-      for r in $(reverts_of "$x" "$d" "$h"); do
+      while read -r r preservation; do
+        if [ "$preservation" = preserved ]; then
+          # Equivalent repairs can live outside C..D. Their later removal is
+          # invisible to that ancestry walk, so prove the complete patch at
+          # the candidate too. Undoing r may change only unrelated paths and
+          # cannot cancel evidence that the repair is missing at head.
+          if preserves_patch "$x^1" "$x" "$h"; then continue; fi
+          undone=1; break 2
+        fi
         st=0; revert_state "$r" "$h" || st=$?
         [ "$st" = 1 ] || { undone=1; break 2; }   # the revert stands, or the chain is too deep to tell: D does not count
-      done
+      done < <(reverts_of "$x" "$d" "$h")
     done
     [ "$undone" = 0 ] || continue
     return 0
