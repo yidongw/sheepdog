@@ -9,8 +9,10 @@ commit_file() {
   git rev-parse HEAD
 }
 bad=0
+focus=${1:-}
+updates=()
 approval() { # approval <0: allow, 1: reject> <description>
-  local expected=$1 description=$2 b e f actual
+  local expected=$1 description=$2 b e f actual update base coverage_base id=10
   b=$(git rev-parse HEAD)
   e=$(commit_file 'later blocked change' broken later)
   f=$(commit_file 'repair later change' fixed later)
@@ -20,7 +22,27 @@ approval() { # approval <0: allow, 1: reject> <description>
   run 1 "review $C" success failure "$P" '' blocked
   run 2 "review $D" success success "$P"
   printf 'review-range: %s %s\n' "$P" "$D" > "$FX/log-1002.txt"
-  run 3 "review $e" success failure "$D" '' blocked
+  base=$D
+  for update in "${updates[@]}"; do
+    run "$id" "review $update" success success "$base"
+    printf 'review-range: %s %s\n' "$base" "$update" > "$FX/log-$((id + 1000)).txt"
+    base=$update; id=$((id + 1))
+  done
+  coverage_base=$base
+  case "${3:-}" in
+    gap)
+      base=$(git rev-parse "$base^1")
+      jq --arg b "$base" '.base = $b' "$FX/attest-$((id - 1)).json" > "$FX/gap.json"
+      mv "$FX/gap.json" "$FX/attest-$((id - 1)).json"
+      printf 'review-range: %s %s\n' "$base" "${updates[-1]}" > "$FX/log-$((id + 999)).txt"
+      ;;
+    missing-proof) rm "$FX/attest-$((id - 1)).json" ;;
+    crash)
+      jq '.jobs[1].steps[0].conclusion = "failure"' "$FX/jobs-$((id - 1)).json" > "$FX/crash.json"
+      mv "$FX/crash.json" "$FX/jobs-$((id - 1)).json"
+      ;;
+  esac
+  run 3 "review $e" success failure "$coverage_base" '' blocked
   actual=0; bash "$CI/dev-review-base.sh" --only-fixes "$e" "$f" || actual=$?
   if [ "$actual" != "$expected" ]; then
     echo "FAIL: $description: tests-only gate returned $actual, expected $expected" >&2
@@ -32,11 +54,14 @@ approval() { # approval <0: allow, 1: reject> <description>
     echo "FAIL: $description: deployment coverage returned $actual, expected $expected" >&2
     bad=1
   fi
+  # Keep the focused before/after proof short once both consumers disagree.
+  if [ "$focus" = --reviewed-updates ] && [ "$bad" != 0 ]; then fail "$description"; fi
   g checkout -q --detach "$b"
 }
 P=$(commit_file production good bug)
 git update-ref refs/remotes/origin/main "$P"
 C=$(commit_file 'blocked bug' $'broken\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12' bug)
+if [ "${1:-}" != --reviewed-updates ]; then
 D=$(commit_file 'passing repair' $'good\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12' bug)
 side=$(commit_file 'unrelated merged file' side side)
 for mainline in 1 2; do
@@ -167,5 +192,78 @@ for mainline in 1 2; do
   [ "$(head -1 bug)" = fixed ] || fail 'reverting restoration did not remove the reviewed refinement'
   approval 1 "refinement, mainline $mainline restoration reverted again"
   echo "ok: mainline $mainline preserves the reviewed refinement through restoration"
+done
+fi
+
+# A's reviewed contribution must not freeze D's unrelated config. Also test
+# updates to A's own paths: only a continuous, standing review chain may
+# replace their approved state. Exercise both producer and approval consumer.
+for contribution in separate-path shared-path; do
+  g checkout -q --detach "$C"
+  A=$(commit_file 'initial repair before config review' good bug)
+  if [ "$contribution" = shared-path ]; then
+    printf '0\n' > config
+    g add config; g commit -q --amend --no-edit
+    A=$(git rev-parse HEAD)
+  fi
+  D=$(commit_file 'reviewed config beside the initial repair' 1 config)
+  for mainline in 1 2; do
+    updates=()
+    g checkout -q --detach "$C"
+    g cherry-pick "$A" >/dev/null
+    g commit -q --amend -m 'independent initial repair before config review'
+    Q=$(git rev-parse HEAD)
+    if [ "$mainline" = 2 ]; then g checkout -q --detach "$D"; side=$Q; else side=$D; fi
+    if ! g merge -q --no-ff --no-commit "$side"; then
+      [ "$contribution" = shared-path ] || fail 'unexpected retained-repair merge conflict'
+    fi
+    g read-tree --reset -u "$D"
+    g commit -q -m 'merge with the exact reviewed repair and config'
+    M=$(git rev-parse HEAD)
+    g revert --no-edit -m "$mainline" "$M" >/dev/null
+    U=$(git rev-parse HEAD)
+    g revert --no-edit "$U" >/dev/null
+    V=$(git rev-parse HEAD)
+    git diff --exit-code "$D" "$V" || fail 'restored tree differs from reviewed D'
+    approval 0 "$contribution mainline $mainline exact D restored"
+
+    L=$(commit_file 'separately reviewed config update' 2 config)
+    updates=("$L")
+    approval 0 "$contribution mainline $mainline later reviewed config update"
+
+    # A second review has its own incremental range, not D..L2.
+    L2=$(commit_file 'another separately reviewed config update' 3 config)
+    updates+=("$L2")
+    approval 0 "$contribution mainline $mainline two linked reviewed updates"
+
+    if ! g revert --no-edit "$Q" >/dev/null; then
+      [ "$contribution" = shared-path ] || fail 'unexpected repair removal conflict'
+      g checkout --ours -- config
+      g add config; g revert --continue >/dev/null
+    fi
+    [ "$(head -1 bug)" = broken ] || fail 'removing Q did not restore the blocked bug'
+    approval 1 "$contribution mainline $mainline reviewed config cannot hide missing repair"
+
+    # A review may refine the repair itself. Its replacement state must stand,
+    # and a missing link / review or later removal cannot authorize that state.
+    updates=()
+    g checkout -q --detach "$V"
+    L=$(commit_file 'separately reviewed repair refinement' better bug)
+    approval 1 "$contribution mainline $mainline unreviewed replacement repair"
+    updates=("$L")
+    approval 1 "$contribution mainline $mainline gapped replacement review" gap
+    approval 1 "$contribution mainline $mainline replacement without proof" missing-proof
+    approval 1 "$contribution mainline $mainline crashed replacement review" crash
+    approval 0 "$contribution mainline $mainline later reviewed replacement repair"
+    g revert --no-edit "$L" >/dev/null
+    approval 0 "$contribution mainline $mainline original approved repair restored"
+    if ! g revert --no-edit "$Q" >/dev/null; then
+      [ "$contribution" = shared-path ] || fail 'unexpected repair removal conflict'
+      g checkout --ours -- config
+      g add config; g revert --continue >/dev/null
+    fi
+    approval 1 "$contribution mainline $mainline reverted later review cannot hide missing repair"
+    echo "ok: $contribution mainline $mainline scopes preservation across later reviews"
+  done
 done
 [ "$bad" = 0 ] || fail 'merge-undo preservation disagrees with the approved net state'
