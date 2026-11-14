@@ -121,6 +121,11 @@ preserves_patch() ( # preserves_patch <before> <after> <at commit> [<literal pat
     merge-tree --write-tree --merge-base="$before" "$after" "$at" 2>/dev/null) || return 1
   [ "$merged" = "$(git rev-parse "$at^{tree}")" ]
 )
+restores_patch() { # <reverted commit> <undo>: complete causal restoration at both endpoints
+  git rev-parse --verify "$1^1" >/dev/null 2>&1 || return 1
+  if git diff --quiet "$1^1" "$1"; then return 1; fi
+  preserves_patch "$1^1" "$1" "$2^1" && preserves_patch "$1" "$1^1" "$2"
+}
 reverts_of() { # reverts_of <commit> <since> <head> [restore]
   # Git names the merge, not its constituent commits, in a merge revert. Only
   # commits introduced relative to the recorded mainline can be undone by it.
@@ -132,7 +137,10 @@ reverts_of() { # reverts_of <commit> <since> <head> [restore]
   # "<sha> preserved". Its consumer must verify preservation through head;
   # the snapshot alone cannot vouch for later reverts of a sibling cherry-pick.
   local c=$1 since=$2 h=$3 restore=${4:-0} r m p body
-  git log --format=%H -F --grep="This reverts commit $c" "$since..$h" 2>/dev/null || return 1
+  while read -r r; do
+    if [ "$restore" = 1 ]; then restores_patch "$c" "$r" || continue; fi
+    printf '%s\n' "$r"
+  done < <(git log --format=%H -F --grep="This reverts commit $c" "$since..$h" 2>/dev/null)
   while read -r r; do
     body=$(git show -s --format=%B "$r")
     m=$(sed -nE 's/^This reverts commit ([0-9a-f]{40}), reversing$/\1/p' <<<"$body")
@@ -154,10 +162,7 @@ reverts_of() { # reverts_of <commit> <since> <head> [restore]
       fi
     fi
     if [ "$restore" = 1 ]; then
-      git rev-parse --verify "$c^1" >/dev/null 2>&1 || continue
-      if git diff --quiet "$c^1" "$c"; then continue; fi
-      preserves_patch "$c^1" "$c" "$r^1" || continue
-      preserves_patch "$c" "$c^1" "$r" || continue
+      restores_patch "$c" "$r" || continue
     fi
     printf '%s\n' "$r"
   done < <(git log --format=%H -F --grep=', reversing' "$since..$h" 2>/dev/null)
@@ -219,6 +224,11 @@ review_stands() { # <reviewed range base> <reviewed head> <candidate> <depth>
       fi
       st=0; revert_state "$r" "$h" || st=$?
       [ "$st" = 1 ] || return 1
+      # An undo is evidence at its own snapshot. A later merge resolution can
+      # discard it, or adjacent edits can make a subsequent undo unprovable.
+      # Require the reviewed contribution at the candidate as well, using the
+      # same scoped proof / independently reviewed replacements as retention.
+      contribution_stands "$x" "$d" "$h" "$k" || return 1
     done < <(reverts_of "$x" "$d" "$h")
   done
   return 0

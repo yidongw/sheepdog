@@ -61,6 +61,99 @@ approval() { # <0: allow, 1: reject> <description> [review failure] [later-round
 P=$(commit_file production good bug)
 git update-ref refs/remotes/origin/main "$P"
 C=$(commit_file 'blocked bug' $'broken\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12' bug)
+
+# Keep a retained feature distinct from the repair: its survival cannot vouch
+# for a partial undo, a restoration discarded by a merge, or a missed undo.
+restoration_cases() {
+  local mainline original_C=$C X Q side M U V N retained merged L
+  local broken=$'broken-b\nbroken-c' fixed=$'good-b\ngood-c'
+  g checkout -q --detach "$P"
+  C=$(commit_file 'blocked two-line defect' "$broken" bug)
+  X=$(commit_file 'feature before the repair' present feature)
+  D=$(commit_file 'passing complete two-line repair' "$fixed" bug)
+  for mainline in 1 2; do
+    updates=()
+    g checkout -q --detach "$C"
+    g cherry-pick "$X" >/dev/null
+    g commit -q --amend -m 'independently retained feature'
+    Q=$(git rev-parse HEAD)
+    if [ "$mainline" = 2 ]; then g checkout -q --detach "$D"; side=$Q; else side=$D; fi
+    g merge -q --no-ff -m 'merge the reviewed repair beside the retained feature' "$side"
+    M=$(git rev-parse HEAD)
+    g revert --no-edit -m "$mainline" "$M" >/dev/null
+    U=$(git rev-parse HEAD)
+    git diff --exit-code "$Q" "$U" || fail 'undo must restore the independently retained feature'
+
+    # #1/#2: use Git's genuine revert conflict, retaining only half the fix.
+    commit_file 'divergence before the direct undo' $'diverged-b\nbroken-c' bug >/dev/null
+    if g revert --no-edit "$U" >"$T/revert.out" 2>&1; then fail 'expected a direct undo conflict'; fi
+    [ -n "$(git ls-files -u -- bug)" ] || fail 'direct undo did not conflict in bug'
+    printf 'good-b\nbroken-c\n' > bug
+    g add bug; g revert --continue >/dev/null
+    approval 1 "#1/#2 mainline $mainline partial direct restoration"
+
+    g checkout -q --detach "$U"
+    g revert --no-edit "$U" >/dev/null
+    approval 0 "mainline $mainline complete direct restoration"
+
+    # Restore U by undoing a merge which introduced it from the other parent.
+    g checkout -q --detach "$D"
+    retained=$(commit_file 'retained restoration branch' present restoration-side)
+    if [ "$mainline" = 2 ]; then g checkout -q --detach "$U"; side=$retained; else side=$U; fi
+    g merge -q --no-ff -m 'merge the repair undo' "$side"
+    N=$(git rev-parse HEAD)
+    g revert --no-edit -m "$mainline" "$N" >/dev/null
+    V=$(git rev-parse HEAD)
+    [ "$(cat bug)" = "$fixed" ] || fail 'merge undo did not restore both defect lines'
+    approval 0 "mainline $mainline complete merge restoration"
+
+    # #3: reachability of V is insufficient after a conflict resolution drops it.
+    g checkout -q --detach "$U"
+    commit_file 'competing broken resolution' $'worse-b\nbroken-c' bug >/dev/null
+    if g merge -q --no-ff --no-commit "$V" >"$T/merge.out" 2>&1; then fail 'expected competing restoration conflict'; fi
+    [ -n "$(git ls-files -u -- bug)" ] || fail 'restoration discard did not conflict in bug'
+    printf '%s\n' "$broken" > bug
+    g add bug; g commit -q -m 'discard the repair while merging its restoration'
+    approval 1 "#3 mainline $mainline merge discards restoration"
+
+    # A separate full review can replace the old repair after restoration.
+    g checkout -q --detach "$V"
+    L=$(commit_file 'separately reviewed replacement repair' $'better-b\nbetter-c' bug)
+    approval 1 "mainline $mainline unreviewed replacement of restored repair"
+    updates=("$L")
+    approval 1 "mainline $mainline replacement lacks attestation" missing-proof
+    approval 0 "mainline $mainline reviewed replacement of restored repair"
+    updates=()
+
+    # #4: adjacent metadata makes the endpoint proof for undoing V conflict.
+    # Its omission must never authorize the broken candidate after this revert.
+    g checkout -q --detach "$U"
+    commit_file 'adjacent metadata beside the broken repair' "$broken"$'\nmetadata' bug >/dev/null
+    if g merge -q --no-ff --no-commit "$V" >"$T/merge.out" 2>&1; then fail 'expected adjacent metadata conflict'; fi
+    [ -n "$(git ls-files -u -- bug)" ] || fail 'adjacent merge did not conflict in bug'
+    printf '%s\nmetadata\n' "$fixed" > bug
+    g add bug; g commit -q -m 'restore repair and retain adjacent metadata'
+    merged=$(git rev-parse HEAD)
+    approval 1 "mainline $mainline ambiguous adjacent restoration requires review"
+    updates=("$merged")
+    approval 0 "mainline $mainline independently reviewed adjacent restoration"
+    updates=()
+    g revert --no-edit -m 1 "$merged" >/dev/null
+    [ "$(cat bug)" = "$broken"$'\nmetadata' ] || fail 'merge undo did not remove the repair beside metadata'
+    approval 1 "#4 mainline $mainline adjacent metadata hides later undo"
+    updates=("$merged")
+    approval 1 "#4 mainline $mainline reverted reviewed restoration cannot restore eligibility"
+    updates=()
+    echo "ok: restoration provenance and survival exercised for mainline $mainline"
+  done
+  C=$original_C
+}
+if [ "$focus" = --restoration ]; then
+  restoration_cases
+  [ "$bad" = 0 ] || fail 'restoration proof approved a missing repair or rejected a reviewed replacement'
+  exit 0
+fi
+
 if [ -z "$focus" ]; then
 D=$(commit_file 'passing repair' $'good\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12' bug)
 side=$(commit_file 'unrelated merged file' side side)
@@ -304,4 +397,5 @@ for mainline in 1 2; do
     echo "ok: feature mainline $mainline accepts the independently reviewed unrelated update"
   fi
 done
+if [ -z "$focus" ]; then restoration_cases; fi
 [ "$bad" = 0 ] || fail 'merge-undo preservation disagrees with the approved net state'
