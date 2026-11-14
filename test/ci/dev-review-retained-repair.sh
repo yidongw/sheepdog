@@ -11,11 +11,11 @@ commit_file() {
 bad=0
 focus=${1:-}
 updates=()
-approval() { # approval <0: allow, 1: reject> <description>
+approval() { # <0: allow, 1: reject> <description> [review failure] [later-round path]
   local expected=$1 description=$2 b e f actual update base coverage_base id=10
   b=$(git rev-parse HEAD)
-  e=$(commit_file 'later blocked change' broken later)
-  f=$(commit_file 'repair later change' fixed later)
+  e=$(commit_file 'later blocked change' broken "${4:-later}")
+  f=$(commit_file 'repair later change' fixed "${4:-later}")
   g commit -q --amend -m 'repair later change' -m "Review-Fix-Of: $e"
   f=$(git rev-parse HEAD)
   reset
@@ -61,7 +61,7 @@ approval() { # approval <0: allow, 1: reject> <description>
 P=$(commit_file production good bug)
 git update-ref refs/remotes/origin/main "$P"
 C=$(commit_file 'blocked bug' $'broken\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12' bug)
-if [ "${1:-}" != --reviewed-updates ]; then
+if [ -z "$focus" ]; then
 D=$(commit_file 'passing repair' $'good\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12' bug)
 side=$(commit_file 'unrelated merged file' side side)
 for mainline in 1 2; do
@@ -195,6 +195,7 @@ for mainline in 1 2; do
 done
 fi
 
+if [ "$focus" != --reviewed-feature ]; then
 # A's reviewed contribution must not freeze D's unrelated config. Also test
 # updates to A's own paths: only a continuous, standing review chain may
 # replace their approved state. Exercise both producer and approval consumer.
@@ -265,5 +266,42 @@ for contribution in separate-path shared-path; do
     approval 1 "$contribution mainline $mainline reverted later review cannot hide missing repair"
     echo "ok: $contribution mainline $mainline scopes preservation across later reviews"
   done
+done
+fi
+
+# A retained constituent may add a feature while D repairs C and changes another
+# path. A later full review may update that other path without freezing D's
+# version. Keep the later blocked/repair round on its own path.
+g checkout -q --detach "$C"
+X=$(commit_file 'feature before the passing repair' feature-present feature)
+printf 'good\n' > bug
+printf 'version-one\n' > later
+g add bug later; g commit -q -m 'passing repair and unrelated initial version'
+D=$(git rev-parse HEAD)
+for mainline in 1 2; do
+  updates=()
+  g checkout -q --detach "$C"
+  g cherry-pick "$X" >/dev/null
+  g commit -q --amend -m 'independent feature on retained mainline'
+  Q=$(git rev-parse HEAD)
+  if git merge-base --is-ancestor "$Q" "$D"; then fail 'Q must be outside the reviewed ancestry'; fi
+  if [ "$mainline" = 2 ]; then g checkout -q --detach "$D"; side=$Q; else side=$D; fi
+  g merge -q --no-ff -m 'merge the passing repair into the independent feature' "$side"
+  M=$(git rev-parse HEAD)
+  g revert --no-edit -m "$mainline" "$M" >/dev/null
+  U=$(git rev-parse HEAD)
+  g revert --no-edit "$U" >/dev/null
+  git diff --exit-code "$D" HEAD || fail 'reverting the undo did not restore D exactly'
+  approval 0 "feature mainline $mainline exact D restored" '' later-round
+
+  Z=$(commit_file 'separately reviewed unrelated version update' version-two later)
+  updates=("$Z")
+  approval 0 "feature mainline $mainline independently reviewed version-two survives" '' later-round
+  [ "$(cat bug)" = good ] || fail 'fixture lost the passing repair'
+  [ "$(cat feature)" = feature-present ] || fail 'fixture lost the retained feature'
+  [ "$(cat later)" = version-two ] || fail 'repair round overwrote the reviewed update'
+  if [ "$bad" = 0 ]; then
+    echo "ok: feature mainline $mainline accepts the independently reviewed unrelated update"
+  fi
 done
 [ "$bad" = 0 ] || fail 'merge-undo preservation disagrees with the approved net state'
