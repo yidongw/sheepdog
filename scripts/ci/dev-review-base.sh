@@ -124,12 +124,23 @@ preserves_patch() ( # preserves_patch <before> <after> <at commit> [<literal pat
     merge-tree --write-tree --merge-base="$before" "$after" "$at" 2>/dev/null) || return 1
   [ "$merged" = "$(git rev-parse "$at^{tree}")" ]
 )
-restores_patch() { # <reverted commit> <undo>: complete causal restoration at both endpoints
+restores_patch() { # <reverted commit> <undo> [<contribution before> <after> [<paths>...]]
+  # A containing merge undo may also remove unreviewed changes. Carry the
+  # original contribution through recursion, in the current revert direction,
+  # so restoring it need not restore those unrelated changes too. Both ends
+  # must prove the complete delta; a matching final snapshot alone is unsafe.
+  if [ "$#" -ge 4 ] && ! git --literal-pathspecs diff --quiet --ignore-submodules=none "$3" "$4" -- "${@:5}" &&
+    preserves_patch "$4" "$3" "$1^1" "${@:5}" && preserves_patch "$3" "$4" "$1" "${@:5}" &&
+    preserves_patch "$3" "$4" "$2^1" "${@:5}" && preserves_patch "$4" "$3" "$2" "${@:5}"; then
+    return 0
+  fi
+  # The full revert delta also proves restoration (including partial removals
+  # of a contribution, for which the contextual inverse is not complete).
   git rev-parse --verify "$1^1" >/dev/null 2>&1 || return 1
   if git diff --quiet --ignore-submodules=none "$1^1" "$1"; then return 1; fi
   preserves_patch "$1^1" "$1" "$2^1" && preserves_patch "$1" "$1^1" "$2"
 }
-reverts_of() { # reverts_of <commit> <since> <head> [restore]
+reverts_of() { # <commit> <since> <head> [restore [<contribution before> <after> [<paths>...]]]
   # Git names the merge, not its constituent commits, in a merge revert. Only
   # commits introduced relative to the recorded mainline can be undone by it.
   # For restoration, prove both patch directions: the constituent's complete
@@ -140,8 +151,9 @@ reverts_of() { # reverts_of <commit> <since> <head> [restore]
   # "<sha> preserved". Its consumer must verify preservation through head;
   # the snapshot alone cannot vouch for later reverts of a sibling cherry-pick.
   local c=$1 since=$2 h=$3 restore=${4:-0} r m p body
+  local -a context=("${@:5}")
   while read -r r; do
-    if [ "$restore" = 1 ]; then restores_patch "$c" "$r" || continue; fi
+    if [ "$restore" = 1 ]; then restores_patch "$c" "$r" "${context[@]}" || continue; fi
     printf '%s\n' "$r"
   done < <(git log --format=%H -F --grep="This reverts commit $c" "$since..$h" 2>/dev/null)
   while read -r r; do
@@ -171,7 +183,7 @@ reverts_of() { # reverts_of <commit> <since> <head> [restore]
       fi
     fi
     if [ "$restore" = 1 ]; then
-      restores_patch "$c" "$r" || continue
+      restores_patch "$c" "$r" "${context[@]}" || continue
     fi
     printf '%s\n' "$r"
   done < <(git log --format=%H -F --grep=', reversing' "$since..$h" 2>/dev/null)
@@ -183,21 +195,39 @@ revert_state() { # revert_state <r> <head> [depth] → 0: r stands in r..head ·
   # Both direct and merge undos use reverts_of's recorded-mainline and complete
   # restoration checks. An ancestry-only fallback would accept partial undos.
   local r=$1 h=$2 k=${3:-0} x st unknown=0
+  local -a context=("${@:4}") inverse=()
+  if [ "${#context[@]}" -ge 2 ]; then inverse=("${context[1]}" "${context[0]}" "${context[@]:2}"); fi
   [ "$k" -lt 64 ] || return 2
-  for x in $(reverts_of "$r" "$r" "$h" 1); do
-    st=0; revert_state "$x" "$h" $((k + 1)) || st=$?
+  for x in $(reverts_of "$r" "$r" "$h" 1 "${context[@]}"); do
+    st=0; revert_state "$x" "$h" $((k + 1)) "${inverse[@]}" || st=$?
     case "$st" in 0) return 1 ;; 2) unknown=1 ;; esac
   done
   [ "$unknown" = 0 ] || return 2
   return 0
 }
+contribution_paths() { # <constituent> <reviewed head> -> NUL-delimited path lineage
+  local x=$1 d=$2 path status old new
+  local -A paths=()
+  while IFS= read -r -d '' path; do paths["$path"]=1; done < <(
+    git diff --no-renames --ignore-submodules=none --name-only -z "$x^1" "$x")
+  # Walk reviewed rename edges, rather than comparing only the endpoints:
+  # successive refinements can make the final name too dissimilar to x.
+  # Include both ends so the projection carries the deletion AND destination.
+  while IFS= read -r -d '' status && IFS= read -r -d '' old && IFS= read -r -d '' new; do
+    [ -n "${paths[$old]+x}" ] || continue
+    paths["$new"]=1
+  done < <(git log --format= --reverse --topo-order --diff-merges=separate \
+    --name-status -z --find-renames=50% -l0 --diff-filter=R --no-color \
+    --no-ext-diff --no-textconv --ignore-submodules=none "$x..$d")
+  [ "${#paths[@]}" = 0 ] || printf '%s\0' "${!paths[@]}"
+}
 contribution_stands() { # <constituent> <approved head> <candidate> <depth>
   local x=$1 d=$2 h=$3 k=$4 l v rb att
   local -a paths=()
-  mapfile -d '' -t paths < <(git diff --no-renames --ignore-submodules=none --name-only -z "$x^1" "$x")
+  mapfile -d '' -t paths < <(contribution_paths "$x" "$d")
   [ "${#paths[@]}" -gt 0 ] || return 0
   # If D still contains x's original patch, require just that patch. Otherwise
-  # D refined or cancelled x: use D's net result on x's paths, not all of x^..D.
+  # D refined or cancelled x: use D's net result along x's path lineage.
   if preserves_patch "$x^1" "$x" "$d"; then
     preserves_patch "$x^1" "$x" "$h" && return 0
   else
@@ -217,12 +247,14 @@ contribution_stands() { # <constituent> <approved head> <candidate> <depth>
     rb=$(jq -r .base <<<"$att")
     review_covered "$rb" "$d" "$h" 0 || continue
     review_stands "$rb" "$l" "$h" "$((k + 1))" || continue
+    mapfile -d '' -t paths < <(contribution_paths "$x" "$l")
     preserves_patch "$x^1" "$l" "$h" "${paths[@]}" && return 0
   done
   return 1
 }
 review_stands() { # <reviewed range base> <reviewed head> <candidate> <depth>
   local b=$1 d=$2 h=$3 k=$4 x r preservation st
+  local -a context=() paths=()
   for x in $(git rev-list "$b..$d" 2>/dev/null); do
     while read -r r preservation; do
       if [ "$preservation" = preserved ]; then
@@ -231,7 +263,12 @@ review_stands() { # <reviewed range base> <reviewed head> <candidate> <depth>
         contribution_stands "$x" "$d" "$h" "$k" || return 1
         continue
       fi
-      st=0; revert_state "$r" "$h" || st=$?
+      # Use the reviewed range's net contribution: one containing undo can
+      # remove several successive refinements together. Its unreviewed side
+      # changes impose no restoration obligation, even within the same file.
+      mapfile -d '' -t paths < <(contribution_paths "$x" "$d")
+      context=("$d" "$b" "${paths[@]}")
+      st=0; revert_state "$r" "$h" 0 "${context[@]}" || st=$?
       [ "$st" = 1 ] || return 1
       # An undo is evidence at its own snapshot. A later merge resolution can
       # discard it, or adjacent edits can make a subsequent undo unprovable.
