@@ -123,11 +123,24 @@ revert_state() { # revert_state <r> <head> [depth] → 0: r stands in r..head ·
   # 2: unknown (a revert chain deeper than 64). Tri-state, so the depth limit never flips a verdict by parity: a caller
   # that needs "undone" to proceed treats 2 as "stands" (review of sheepdog ea594cc26 #1/#2: review-repair.sh reverted()
   # answers "reverted" at its limit — fail-closed for a repair, fail-OPEN when it is asked whether a revert was undone).
-  local r=$1 h=$2 k=${3:-0} x st unknown=0
+  # Undone by: a revert naming r, or (review of foxhole-backend b96e6e4ef #1/#2) a `git revert -m 1` of a merge M that
+  # brought r in from its second side (r not on M's first parent) — "This reverts commit M, reversing changes made to
+  # M^1" undoes everything M merged, r included. Either undoing commit counts only while it stands itself.
+  local r=$1 h=$2 k=${3:-0} x m p1 msg st unknown=0
   [ "$k" -lt 64 ] || return 2
   for x in $(reverts_of "$r" "$r" "$h" 1); do
     st=0; revert_state "$x" "$h" $((k + 1)) || st=$?
     case "$st" in 0) return 1 ;; 2) unknown=1 ;; esac
+  done
+  for m in $(git rev-list --merges --ancestry-path "$r..$h" 2>/dev/null || true); do
+    p1=$(git rev-parse -q --verify "$m^1") || continue
+    git merge-base --is-ancestor "$r" "$p1" 2>/dev/null && continue   # r was already on M's mainline
+    for x in $(git log --format=%H -F --grep="This reverts commit $m" "$m..$h" 2>/dev/null || true); do
+      msg=$(git show -s --format=%B "$x") || continue   # whole message first: an early grep -q exit is no SIGPIPE here
+      grep -qF "changes made to $p1" <<<"${msg//$'\n'/ }" || continue
+      st=0; revert_state "$x" "$h" $((k + 1)) || st=$?
+      case "$st" in 0) return 1 ;; 2) unknown=1 ;; esac
+    done
   done
   [ "$unknown" = 0 ] || return 2
   return 0
