@@ -70,6 +70,22 @@ if of "$E7" "$F7"; then fail "a passed review of D superseded C although D was r
 g checkout -q dev
 echo 'not superseded: a passed covering review whose change was reverted since'
 
+# 8. (review of sheepdog 87dce4aec #1) a revert INSIDE the range D reviewed (X, then its revert, then D passing P..D)
+#    was reviewed by D: D still supersedes C, and the repair of a later block is a tests-only round
+g checkout -q -b inner "$C"; X=$(c "X" '' devfile4); RX=$(c "Revert \"X\"" "This reverts commit $X." devfile4)
+D8=$(c "D8 (passes P..D8)" '' devfile2); E9=$(c "E9 (blocked)" '' devfile3); F9=$(c "fix of E9" "Review-Fix-Of: $E9" devfile3)
+reset; run 1 "review $C" success failure "$P" '' blocked; run 2 "review $D8" success success "$P"; pass_log 2 "$P" "$D8"
+run 3 "review $E9" success failure "$D8" '' blocked
+of "$E9" "$F9" || fail "a revert that the covering review itself saw disqualified it"
+#    … while the revert of X's revert AFTER D8 (X's code back, unreviewed by D8) does disqualify it
+RRX=$(c "Revert \"Revert X\"" "This reverts commit $RX." devfile4)
+E10=$(c "E10 (blocked)" '' devfile3); F10=$(c "fix of E10" "Review-Fix-Of: $E10" devfile3)
+reset; run 1 "review $C" success failure "$P" '' blocked; run 2 "review $D8" success success "$P"; pass_log 2 "$P" "$D8"
+run 3 "review $E10" success failure "$RRX" '' blocked
+if of "$E10" "$F10"; then fail "a revert after D of a commit D saw did not disqualify D"; fi
+g checkout -q dev
+echo 'a revert inside the covering range keeps the supersession; one after it does not'
+
 # 6. a crash (no verdict) of D never supersedes
 reset; run 1 "review $C" success failure "$P" '' blocked; run 2 "review $D" success failure "$P"   # no BLOCKED line: crash
 if of "$D" "$F"; then fail "a crashed review of D superseded C"; fi
