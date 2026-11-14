@@ -60,6 +60,16 @@ if of "$MS" "$FS"; then fail "a side-branch review that never contained C supers
 g checkout -q dev
 echo 'not superseded: a review of a side branch that does not contain C'
 
+# 7. (review of foxhole-backend b4d18dbbc #1) D passed re-reviewing P..D, then a standing revert of D (or of any commit
+#    D's review saw above C) undoes what that review vouched for: D no longer supersedes C
+g checkout -q -b reverted "$D"; RD=$(c "Revert \"next dev head\"" "This reverts commit $D." devfile2)
+E7=$(c "E7 (blocked)" '' devfile3); F7=$(c "fix of E7" "Review-Fix-Of: $E7" devfile3)
+reset; run 1 "review $C" success failure "$P" '' blocked; run 2 "review $D" success success "$P"; pass_log 2 "$P" "$D"
+run 3 "review $E7" success failure "$RD" '' blocked
+if of "$E7" "$F7"; then fail "a passed review of D superseded C although D was reverted since"; fi
+g checkout -q dev
+echo 'not superseded: a passed covering review whose change was reverted since'
+
 # 6. a crash (no verdict) of D never supersedes
 reset; run 1 "review $C" success failure "$P" '' blocked; run 2 "review $D" success failure "$P"   # no BLOCKED line: crash
 if of "$D" "$F"; then fail "a crashed review of D superseded C"; fi
