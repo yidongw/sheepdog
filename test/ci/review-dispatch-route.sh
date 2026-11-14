@@ -419,6 +419,14 @@ grep -q "dropped finding(s) 1 2 3 — dev already repairs their culprit commit(s
 test ! -e "$T/msg-${A##*:}"; test "$(cat "$woken")" = "$S rest"
 grep -q 'retired keys stay' "$T/task-rest"; grep -q "^#4 → commit ${CB:0:12}" "$T/task-rest"; grep -q 'stay there (do NOT reset' "$T/task-rest"
 ! grep -qE 'singleton valuation|batched settlement|^#[123] →|git reset --hard' "$T/task-rest" || { echo "negative check failed: the fixer got repaired findings or the devfix reset" >&2; exit 1; }
+# A whole-review repair must suppress the partial split fixer too.
+reset
+g checkout -q -B devw origin/dev
+commit src/b.ts "$B" "Review-Fix-Of: $S" >/dev/null
+g push -q origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
+dev_blocked "$S" "$F4" "" run-url task
+test ! -e "$woken"
+grep -q 'already carries a fix' "$LOG"
 g push -q -f origin "$S:refs/heads/dev"; g fetch -q origin
 echo 'tralyx 26b73ac1b shape: repaired findings dropped, the unrepaired one routed alone'
 

@@ -1179,6 +1179,11 @@ dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> 
     fi
     # shellcheck disable=SC2086 # finding numbers, one word each
     { f=$(findings_subset "$f" 1 $open_nums); att=$(att_of "$att" $open_nums); }
+    if dev_carries_fix "$s" "$(named_files "$f")"; then
+      if [ -n "${DRY:-}" ]; then echo "DRY blocked ${s:0:9}: $DEV already carries a fix for ${s:0:9} ($dupfix_why) — no fixer"
+      elif [ ! -e "$STATE/sent/$s.dupfix" ]; then log "blocked ${s:0:9}: $DEV already carries a fix for ${s:0:9} ($dupfix_why) — no fixer"; touch "$STATE/sent/$s.dupfix"; fi
+      return 0
+    fi
     # The caller's fixer task lists EVERY finding and resets to S (the devfix fast path) — that would hand the fixer the
     # dropped findings and discard the dev state that repairs them (review of dev 8dbbecc94 #1). The rest goes the split
     # way instead: author groups (dev_blocked_split, below), or a $DEV-pushing fixer for exactly the open findings that
