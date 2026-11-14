@@ -4,8 +4,8 @@
 # woken, found nothing to fix, "fix failed" went to the supervisor and the dev auto-revert clock started). Runs the real dev
 # merge-train block scan and the real final branch loop:
 #   · no dev_blocked (no fixer, no author notice), dev.blocked_since not started, no revert / overdue;
-#   · the supervisor hears ONCE per episode (receipt bound to the episode; undelivered → retried; later heads only logged);
-#   · a review that completes with a verdict ends the episode; a later reviewer failure is a new one;
+#   · the supervisor hears once per failed review attempt (run + review job id; a rerun is a new job), never again on later
+#     scans (train scan + head loop, repeated ticks, a historical verdict next to it); undelivered → retried;
 #   · control: findings, failed trusted tests or gates errors next to it keep the block path.
 set -euo pipefail
 ghm() { gh "$@"; }; ghc_note_jobs() { cat > /dev/null; }
@@ -22,8 +22,8 @@ mkdir -p "$STATE/sent" "$TRUSTED/scripts/ci" "$OUTBOX"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$TRUSTED/scripts/ci/review-passed.sh"   # no round here passed
 LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D"; done; }
-eval "$(fns dev_round_noop dev_merge_only run_verdict dev_verdict_run named_files review_infra_reason dev_infra dev_infra_end infra_alert)"
-for f in review_infra_reason dev_infra dev_infra_end infra_alert; do declare -F "$f" >/dev/null || fail "missing $f"; done
+eval "$(fns dev_round_noop dev_merge_only run_verdict dev_verdict_run named_files review_infra_reason dev_infra infra_alert)"
+for f in review_infra_reason dev_infra infra_alert; do declare -F "$f" >/dev/null || fail "missing $f"; done
 review_list() { gh run list -R "$REPO" -w review.yml -L "$1" --json "$2" -q "$3"; }
 loop=$(python3 - "$D" <<'PY'
 import sys
@@ -65,7 +65,8 @@ c a base >/dev/null; g push -q origin HEAD:refs/heads/main
 g checkout -q -b devw; S1=$(c src/x.ts "dev work 1"); g push -q -f origin "$S1:refs/heads/dev"; g fetch -q origin
 calls() { cat "$T/calls" 2>/dev/null || true; }
 n_notices() { grep -c '^notify .* infra\.dev' "$T/calls" 2>/dev/null || echo 0; }
-FAILJOBS='{"jobs":[{"name":"tests","conclusion":"success"},{"name":"review","conclusion":"failure"}]}'
+FAILJOBS='{"jobs":[{"name":"tests","conclusion":"success"},{"name":"review","id":1,"conclusion":"failure"}]}'
+failjobs() { jq -c --argjson id "$1" '.jobs[1].id = $id' <<<"$FAILJOBS"; }   # failjobs <review job id>
 E2BIG=$'review-gate: reviewer failed: spawn E2BIG'
 
 # 0. the classifier: only a reviewer failure with no finding / failed test / gates error
@@ -79,15 +80,15 @@ done
 echo 'classifier: reviewer failures only, never next to a finding, failed tests or gates errors'
 
 # 1. the dev head's review: reviewer failed → no block, no clock, supervisor once (head loop and train scan agree)
-RUNS="101 completed failure"; JOBS_OF[101]=$FAILJOBS; FIND_OF[101]=$E2BIG; TRAIN="101 review $S1"
+RUNS="101 completed failure"; JOBS_OF[101]=$(failjobs 1011); FIND_OF[101]=$E2BIG; TRAIN="101 review $S1"
 eval "$train"; eval "$loop"; eval "$train"; eval "$loop"
 if grep -q '^dev_blocked' "$T/calls" 2>/dev/null; then fail "a reviewer failure was treated as a dev block (fixer / authors): $(calls)"; fi
 if grep -q 'overdue\|revert' "$T/calls" 2>/dev/null; then fail "a revert / overdue path ran: $(calls)"; fi
 test ! -e "$STATE/dev.blocked_since" || fail "the revert clock started for a reviewer failure"
-test "$(n_notices)" = 1 && grep -q "^notify $S1 infra\.dev\.[0-9]* $SUPERVISOR_THREAD$" "$T/calls" || fail "not one supervisor notice: $(calls)"
-m=$(ls "$T"/msg-infra.dev.*)
+test "$(n_notices)" = 1 && grep -q "^notify $S1 infra\.dev\.101\.1011 $SUPERVISOR_THREAD$" "$T/calls" || fail "not one supervisor notice: $(calls)"
+m=$T/msg-infra.dev.101.1011
 grep -q 'reviewer failed: spawn E2BIG' "$m" && grep -q 'gh run rerun 101 -R test/repo --failed' "$m" || fail "the notice: $(cat "$m")"
-ls "$STATE"/dev-infra.delivered."$S1".101 >/dev/null || fail "no receipt for the delivered alert"
+test "$(grep -c "review run 101 (job 1011)" "$LOG")" = 1 || fail "not logged once: $(cat "$LOG")"
 echo 'dev reviewer failure: no block, no clock, no fixer; the supervisor once with the rerun command'
 
 # 2. an old block clock is left alone (this round decides nothing), and still no revert fires for this head
@@ -98,69 +99,45 @@ test ! -e "$STATE/sent/$S1.reverted" || fail "the overdue clock reverted on a re
 rm -f "$STATE/dev.blocked_since" "$STATE/dev.blocked_since.sha"
 echo 'an existing clock is neither started, cleared nor acted on'
 
-# 3. a later dev head failing the same way: logged once, no second notice
-S2=$(c src/y.ts "dev work 2"); g push -q -f origin "$S2:refs/heads/dev"; g fetch -q origin
-RUNS="102 completed failure"; JOBS_OF[102]=$FAILJOBS; FIND_OF[102]=$E2BIG; TRAIN=$'102 review '"$S2"$'\n101 review '"$S1"
-eval "$train"; eval "$loop"; eval "$loop"
-test "$(n_notices)" = 1 || fail "the same episode was alerted again: $(calls)"
-test "$(grep -c "${S2:0:9}: review run 102 .*same infrastructure episode as ${S1:0:9}" "$LOG")" = 1 || fail "the later head is not logged once: $(cat "$LOG")"
-if grep -q '^dev_blocked' "$T/calls" 2>/dev/null; then fail "a later head was blocked"; fi
-echo 'same episode: later heads logged once, no second notice'
+# 3. the rerun of the same run fails again (a new review job): one more notice — the head is still unreviewed; then quiet
+JOBS_OF[101]=$(failjobs 1012)
+eval "$train"; eval "$loop"; eval "$train"; eval "$loop"
+test "$(n_notices)" = 2 && grep -q "^notify $S1 infra\.dev\.101\.1012 " "$T/calls" || fail "a failed rerun was not told once: $(calls)"
+echo 'a failed rerun: its own notice, once'
 
-# 4. the reviewer is fixed, the rerun reviews and blocks with findings → the episode ends, the block path runs as before
+# 4. (reviews of 301053acd #3) a later head failing while a historical head's verdict is listed too: repeated ticks never
+#    re-notify; the later head's attempt is told once
+S2=$(c src/y.ts "dev work 2"); g push -q -f origin "$S2:refs/heads/dev"; g fetch -q origin
+RUNS="102 completed failure"; JOBS_OF[102]=$(failjobs 1021); FIND_OF[102]=$E2BIG
+FIND_OF[99]='review-gate: BLOCKED #1 regression [should]: src/x.ts x'
+for tick in 1 2 3; do TRAIN=$'99 review '"$S1"; eval "$train"; TRAIN=$'102 review '"$S2"$'\n99 review '"$S1"; eval "$train"; eval "$loop"; done
+test "$(n_notices)" = 3 && grep -q "^notify $S2 infra\.dev\.102\.1021 " "$T/calls" || fail "repeated ticks: $(calls)"
+if grep -q "^dev_blocked $S2" "$T/calls"; then fail "the infra head was blocked"; fi
+grep -q "^dev_blocked $S1" "$T/calls" || fail "control: the historical verdict is no longer a block"
+echo 'repeated ticks with a historical verdict: no repeat, the new attempt once'
+
+# 5. the reviewer is fixed, the rerun reviews and blocks with findings → the block path runs as before
 FIND_OF[102]='review-gate: BLOCKED #1 regression [should]: src/y.ts drops rows'
 eval "$loop"
-grep -q "^dev_blocked $S2" "$T/calls" || fail "a real verdict after the episode is not a block: $(calls)"
+grep -q "^dev_blocked $S2" "$T/calls" || fail "a real verdict is not a block: $(calls)"
 test -s "$STATE/dev.blocked_since" || fail "the real block did not start its clock"
-test ! -e "$STATE/dev-infra" || fail "a completed review did not end the episode"
 rm -f "$STATE/dev.blocked_since" "$STATE/dev.blocked_since.sha"
-echo 'a completed review ends the episode; real findings still block'
+echo 'real findings still block'
 
-# 5. a new reviewer failure after that is a new episode; an undelivered alert is retried on the next run
+# 6. an undelivered alert is retried on the next run, then once
 S3=$(c src/z.ts "dev work 3"); g push -q -f origin "$S3:refs/heads/dev"; g fetch -q origin
-RUNS="103 completed failure"; JOBS_OF[103]=$FAILJOBS; FIND_OF[103]="review-gate: reviewer timed out: codex timed out after 3600000ms"; TRAIN=""
+RUNS="103 completed failure"; JOBS_OF[103]=$(failjobs 1031); FIND_OF[103]="review-gate: reviewer timed out: codex timed out after 3600000ms"; TRAIN=""
 UNDELIVERED=1; eval "$loop"
-test "$(n_notices)" = 1 && test "$(wc -l < "$T/attempts")" = 1 || fail "setup: the undelivered attempt: $(calls)"
-if ls "$STATE"/dev-infra.delivered."$S3".* >/dev/null 2>&1; then fail "an undelivered alert has a receipt"; fi
+test "$(n_notices)" = 3 && test "$(wc -l < "$T/attempts")" = 1 || fail "setup: the undelivered attempt: $(calls)"
 eval "$loop"
-test "$(n_notices)" = 2 && grep -q "^notify $S3 infra\.dev\." "$T/calls" || fail "the new episode's alert was not retried: $(calls)"
-eval "$loop"; test "$(n_notices)" = 2 || fail "the delivered alert repeated"
-echo 'new episode: alerted; an undelivered alert is retried, then once'
+test "$(n_notices)" = 4 && grep -q "^notify $S3 infra\.dev\.103\.1031 " "$T/calls" || fail "the undelivered alert was not retried: $(calls)"
+eval "$loop"; test "$(n_notices)" = 4 || fail "the delivered alert repeated"
+echo 'undelivered alert: retried, then once'
 
-# 6. control: the reviewer failure next to failed trusted tests is a block (the tests are a finding)
+# 7. control: the reviewer failure next to failed trusted tests is a block (the tests are a finding)
 S4=$(c src/w.ts "dev work 4"); g push -q -f origin "$S4:refs/heads/dev"; g fetch -q origin
-RUNS="104 completed failure"; JOBS_OF[104]=$FAILJOBS; FIND_OF[104]="$E2BIG"$'\ntrusted tests job: failure'
+RUNS="104 completed failure"; JOBS_OF[104]=$(failjobs 1041); FIND_OF[104]="$E2BIG"$'\ntrusted tests job: failure'
 eval "$loop"
 grep -q "^dev_blocked $S4" "$T/calls" || fail "failed tests next to a reviewer failure are no longer a block: $(calls)"
 echo 'control: failed tests next to it still block'
-
-# 7. (review of 96c16d11a #1) a completed review of a HISTORICAL dev head ends the episode only when it was created after the
-#    outage: S5 infra (run 106), an older verdict (run 105, S4) changes nothing; S6's review (run 107) completes with a
-#    finding while the head S7 is pending (train block scan) → over; S7's reviewer outage (run 108) is a new episode, alerted
-rm -f "$T/calls"
-S5=$(c src/v.ts "dev work 5"); g push -q -f origin "$S5:refs/heads/dev"; g fetch -q origin
-RUNS="106 completed failure"; JOBS_OF[106]=$FAILJOBS; FIND_OF[106]=$E2BIG; TRAIN=$'106 review '"$S5"
-eval "$loop"; test "$(n_notices)" = 1 || fail "setup 7: S5's alert: $(calls)"
-dev_infra_end 105; test -s "$STATE/dev-infra" || fail "a verdict of a run created before the outage ended the episode"
-S6=$(c src/u.ts "dev work 6"); S7=$(c src/t.ts "dev work 7"); g push -q -f origin "$S7:refs/heads/dev"; g fetch -q origin
-FIND_OF[107]='review-gate: BLOCKED #1 regression [should]: src/u.ts x'; TRAIN=$'107 review '"$S6"$'
-106 review '"$S5"
-RUNS="108 in_progress null"
-eval "$train"; eval "$loop"
-test ! -e "$STATE/dev-infra" || fail "a completed historical review (train scan) did not end the episode"
-RUNS="108 completed failure"; JOBS_OF[108]=$FAILJOBS; FIND_OF[108]=$E2BIG; TRAIN=$'108 review '"$S7"$'
-107 review '"$S6"
-eval "$train"; eval "$loop"
-test "$(n_notices)" = 2 && grep -q "^notify $S7 infra.dev" "$T/calls" || fail "a new outage after a historical verdict was not alerted: $(calls)"
-rm -f "$STATE/dev.blocked_since" "$STATE/dev.blocked_since.sha"
-echo 'historical verdicts: only newer ones end the episode; the next outage is alerted'
-
-# 8. (review of 96c16d11a #2) the same sha and run in a NEW episode (the run re-run after the episode ended, failing again):
-#    a fresh notice key, really delivered — never acknowledged by the earlier episode's notice
-rm -f "$T/calls"
-dev_infra_end 108; test ! -e "$STATE/dev-infra" || fail "setup 8: the episode did not end"
-eval "$loop"
-test "$(n_notices)" = 1 && grep -q "^notify $S7 infra.dev" "$T/calls" || fail "a new episode on the same sha/run was taken for delivered: $(calls)"
-test "$(ls "$STATE"/sent/"$S7".infra.dev.* | wc -l)" = 2 || fail "the episodes do not have their own notice keys: $(ls "$STATE/sent")"
-echo 'a new episode on the same sha / run: its own notice key, delivered again'
 echo 'dev reviewer-infrastructure checks passed'

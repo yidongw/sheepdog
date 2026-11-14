@@ -1176,44 +1176,25 @@ dev_round_noop() { # dev_round_noop <sha> <run id> <run conclusion> [clear] → 
 }
 dev_infra() { # dev_infra <S> <run id> <reviewer failure> → a dev review whose reviewer itself did not run (review_infra_reason):
   # infrastructure, not a finding — no fixer, no author notice, no revert clock (dev.blocked_since is neither started nor
-  # cleared: this round decides nothing, like a cancel). The supervisor hears ONCE per episode, with the rerun command; the
-  # episode ($STATE/dev-infra: "<first sha> <run> <episode id>") lasts until a dev review created after it completes with a
-  # verdict (dev_infra_end). Its notice key (infra.dev.<episode id>) and receipt ($STATE/dev-infra.delivered.<sha>.<run>,
-  # f9f0a918b's pattern) are the episode's own: a later episode on the same sha / run is never taken for delivered (review of
-  # 96c16d11a #2). An undelivered alert is retried every run, a gone supervisor falls back to the CI owner (infra_alert).
-  # Later dev heads of the episode are logged once.
-  local s=$1 run=$2 why=$3 f="$STATE/dev-infra" s0="" r0="" e0="" url msg
-  if [ -s "$f" ]; then read -r s0 r0 e0 < "$f" || true; fi
-  if [ -n "$s0" ] && [ "$s0 $r0" != "$s $run" ]; then
-    if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$s.dev-infra-logged.$run" ]; then
-      log "$DEV ${s:0:9}: review run $run — the reviewer did not run ($why); same infrastructure episode as ${s0:0:9} (run $r0); no fixer, no revert clock"
-      touch "$STATE/sent/$s.dev-infra-logged.$run"
-    fi
-    s=$s0; run=$r0   # the episode's alert, retried until delivered
-  fi
-  [ ! -e "$f.delivered.$s.$run" ] || return 0
+  # cleared: this round decides nothing, like a cancel). The supervisor hears once per failed review ATTEMPT — the run and its
+  # review job (a rerun is a new job id): each one leaves a dev head unreviewed until it is re-run or superseded, so each is
+  # news, and nothing else is needed to tell episodes apart (reviews of 96c16d11a / 301053acd: verdict-ended episodes
+  # mis-ordered stale verdicts, reruns and repeated scans). The notice key infra.dev.<run>.<job> is its receipt (notify):
+  # repeated scans, the train scan and the head loop never repeat it; an undelivered alert is retried every run, a gone
+  # supervisor falls back to the CI owner (infra_alert).
+  local s=$1 run=$2 why=$3 jid url msg
+  jid=$(ghm api "repos/$REPO/actions/runs/$run/jobs" 2>/dev/null | jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].id // "0"' 2>/dev/null || echo 0)
+  [[ "$jid" =~ ^[0-9]+$ ]] || jid=0
   url="https://github.com/$REPO/actions/runs/$run"
-  if [ -n "${DRY:-}" ]; then echo "DRY $DEV ${s:0:9}: the reviewer did not run ($why) — infrastructure: supervisor told once, no fixer, no revert clock"; return 0; fi
-  if [ -z "$s0" ] || [ -z "$e0" ]; then
-    e0=$(date +%s%N); echo "$s $run $e0" > "$f"
-    log "$DEV ${s:0:9}: review run $run — the reviewer did not run ($why): infrastructure, not a finding: supervisor told; no fixer, no author notice, no revert clock"
+  if [ -n "${DRY:-}" ]; then echo "DRY $DEV ${s:0:9}: the reviewer did not run ($why) — infrastructure: supervisor told, no fixer, no revert clock"; return 0; fi
+  if [ ! -e "$STATE/sent/$s.dev-infra-logged.$run.$jid" ]; then
+    log "$DEV ${s:0:9}: review run $run (job $jid) — the reviewer did not run ($why): infrastructure, not a finding: supervisor told; no fixer, no author notice, no revert clock"
+    touch "$STATE/sent/$s.dev-infra-logged.$run.$jid"
   fi
-  msg="[review-dispatch] the $DEV review of ${s:0:9} did not review anything: $why. This is a CI / review-machinery failure, not a code finding: no fixer or author is woken, and no revert clock runs. Later $DEV heads failing the same way are only logged until a $DEV review completes again.
+  msg="[review-dispatch] the $DEV review of ${s:0:9} did not review anything: $why. This is a CI / review-machinery failure, not a code finding: no fixer or author is woken, and no revert clock runs.
 Once the machinery is fixed: gh run rerun $run -R $REPO --failed (or the next push to $DEV re-triggers the review).
 run: $url"
-  INFRA_WHERE=$DEV infra_alert "$s" "$run" "dev.$e0" "$f" "$msg"
-}
-dev_infra_end() { # dev_infra_end <run id> → a dev review run (any dev sha: the head, a historical head, a train approval) completed
-  # with a verdict — the reviewer ran. It ends the infrastructure episode when that run is not older than the episode's run
-  # (GitHub run ids grow with creation; the episode's own run re-run and reviewed counts): a verdict of a run created before
-  # the outage says nothing about it (review of 96c16d11a #1).
-  local r=${1:-0} s0="" r0=""
-  [ -z "${DRY:-}" ] && [ -s "$STATE/dev-infra" ] || return 0
-  read -r s0 r0 _ < "$STATE/dev-infra" || true
-  [[ "$r" =~ ^[0-9]+$ ]] && [[ "${r0:-}" =~ ^[0-9]+$ ]] && [ "$r" -ge "$r0" ] || return 0
-  log "$DEV: review run $r completed with a verdict — the reviewer infrastructure episode of ${s0:0:9} (run $r0) is over"
-  rm -f "$STATE/dev-infra" "$STATE"/dev-infra.delivered.*
-  return 0
+  INFRA_WHERE=$DEV infra_alert "$s" "$run" "dev.$run.$jid" "$STATE/sent/$s.dev-infra.$jid" "$msg"
 }
 
 # Automatic dependency reclamation is intentionally disabled. Process cwd, open files,
@@ -1962,7 +1943,6 @@ if [ -z "${DRY:-}" ] && git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/
        && ! dev_round_noop "$bsha" "$brid" failure; then   # a merge-only round is never blocked
       bf=$(findings "$brid")
       if binfra=$(review_infra_reason "$bf"); then dev_infra "$bsha" "$brid" "$binfra"; else
-      dev_infra_end "$brid"
       bcul=$(culprit_threads "$bsha" "$bf")
       # reviewer → fixer → author: the fixer gets it; the authors only when it failed (dev_blocked)
       dev_blocked "$bsha" "$bf" "$bcul" "https://github.com/$REPO/actions/runs/$brid" "Task: the blocking review stopped $DEV at ${bsha:0:9}. Findings:
@@ -1976,8 +1956,6 @@ Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). You
     grep -qx "review $tsha" <<<"$done_titles" || continue
     : > "$STATE/train.kind"
     (cd "$TRUSTED" && REVIEW_KIND_OUT="$STATE/train.kind" bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" >/dev/null 2>&1) || continue
-    # a passed review ran the reviewer: it ends a reviewer infrastructure episode begun before it (routing: the memoised listing)
-    dev_infra_end "$(review_list 100 databaseId,displayTitle,status,conclusion ".[] | select(.displayTitle == \"review $tsha\" and .status == \"completed\" and .conclusion == \"success\") | .databaseId" | head -1 || true)"
     # a tests-only approval never lands review machinery, by fast-forward or Train-Merge (review of dev a171d3396 #1/#2)
     if [ "$(cat "$STATE/train.kind" 2>/dev/null)" != review ]; then
       tmfiles=$(landing_machinery_files "$SRC" "origin/$MAIN" "$tsha")
@@ -2212,7 +2190,6 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
     if dev_round_noop "$sha" "$rid" "$concl" clear; then continue; fi   # before any blocked / fixer / overdue decision
   fi   # before any blocked / fixer / overdue decision
   if (cd "$TRUSTED" && bash "$CI_SCRIPTS/review-passed.sh" "$sha" "$REPO" >/dev/null 2>&1); then
-    [ "$ref" != "$DEV" ] || dev_infra_end "$rid"
     if git -C "$SRC" merge-base --is-ancestor origin/$MAIN "$sha"; then
       [ $merged_one = 0 ] || continue
       if [ -n "${DRY:-}" ]; then echo "DRY merge $ref ${sha:0:9}"; merged_one=1; continue; fi
@@ -2250,7 +2227,6 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
     f=$(findings "$rid")
     # the reviewer itself did not run: nothing was reviewed — no block, no fixer, no author notice, no revert clock
     if dinfra=$(review_infra_reason "$f"); then dev_infra "$sha" "$rid" "$dinfra"; continue; fi
-    dev_infra_end "$rid"
     since_f="$STATE/dev.blocked_since"
     if [ ! -s "$since_f" ]; then echo "$now" > "$since_f"; echo "$sha" > "$since_f.sha"; fi   # the episode's owner (dev_round_noop)
     since=$(cat "$since_f")
