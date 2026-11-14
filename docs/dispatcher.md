@@ -29,9 +29,11 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   `review_infra_reason`): the alert names the step and the reviewer's failure and carries the `gh run rerun` command.
 - **Dev reviews whose reviewer did not run** (same `review_infra_reason`): infrastructure, not a block — no fixer, no
   author notice, `dev.blocked_since` is neither started nor cleared and no revert / overdue notice fires for that head.
-  The supervisor is told once per episode (`$STATE/dev-infra`, receipt `$STATE/dev-infra.delivered.<sha>.<run>`; an
-  undelivered alert is retried, a gone supervisor falls back to the CI owner); later dev heads failing the same way are
-  logged once; the episode ends when a dev review completes with a verdict. Rerun the review once fixed
+  The supervisor is told once per episode (`$STATE/dev-infra`, notice key `infra.dev.<episode id>`, receipt
+  `$STATE/dev-infra.delivered.<sha>.<run>`; an undelivered alert is retried, a gone supervisor falls back to the CI
+  owner); later dev heads failing the same way are logged once; the episode ends when a dev review run created no
+  earlier than the episode's run completes with a verdict — the head's, a historical head's (train block scan) or a
+  train approval's. Rerun the review once fixed
   (`gh run rerun <id> --failed`), or the next push to dev re-triggers it.
 - **Open findings**: findings whose fix rounds are spent are kept in `$STATE/open-findings.log`, which the review job
   passes to the reviewer (`open-findings-file`) so repeats are recognised as pre-existing.
