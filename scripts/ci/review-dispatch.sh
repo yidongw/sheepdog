@@ -353,7 +353,7 @@ dev_fixer_free() { # dev_fixer_free <sha> → 0 when a fixer may be woken for th
   # devfix branch) and every per-group authorto-<hash> one (re-check of 46686e7a3 #8: those also claim the slot):
   # nobody is fixing it any more, so the slot is free now instead of after the 60 min timeout.
   local r tid st seen=0 live=0
-  for r in "$STATE/sent/$a.fixer-blocked" "$STATE/sent/$a".fixer-authorto-*; do
+  for r in "$STATE/sent/$a.fixer-blocked" "$STATE/sent/$a.fixer-rest" "$STATE/sent/$a".fixer-authorto-*; do   # rest: the split fixer of a partly repaired block (re-check of 0cd95ca42 #3)
     [ -f "$r" ] || continue
     tid=$(head -1 "$r" 2>/dev/null || true); [ -n "$tid" ] || continue   # an empty receipt is a marker, not a fixer
     seen=1
@@ -505,7 +505,7 @@ fixer_gate_scan() { # sets fixer_gate_holder to the live fixer of this repo ("" 
   fi
   # receipts of the last 6 h, newest first; released ones are cached in ended/ (receipts stay: landing needs them)
   for r in $(find "$STATE/sent" -maxdepth 1 -type f -name '*.fixer-*' -printf '%T@ %f\n' 2>/dev/null | sort -rn | cut -d' ' -f2); do
-    [[ "$r" =~ ^([0-9a-f]{40})\.fixer-(blocked|authorto|recheck|hotfixfix|testsfail|(landmain|mainmerge|train|authorto|mainfix)-[0-9a-f]{9})$ ]] || continue
+    [[ "$r" =~ ^([0-9a-f]{40})\.fixer-(blocked|rest|authorto|recheck|hotfixfix|testsfail|(landmain|mainmerge|train|authorto|mainfix)-[0-9a-f]{9})$ ]] || continue
     sha=${BASH_REMATCH[1]}; key=${BASH_REMATCH[2]}; name=$r
     [ -e "$FIXER_GATE/ended/$name" ] && continue
     tid=$(head -1 "$STATE/sent/$name" 2>/dev/null || true)

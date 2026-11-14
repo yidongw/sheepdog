@@ -115,3 +115,19 @@ wake_fixer "$(sha 0 2)" blocked t task
 test "$(started)" = 6
 echo 'empty receipts never hold the gate; unknown state holds only while fresh'
 echo 'fixer gate checks passed'
+
+# re-check of 0cd95ca42 #3: the split fixer of a partly repaired block (receipt <sha>.fixer-rest) holds the gate like any other
+rm -rf "$STATE/sent"/* "$STATE/fixer-gate"; mkdir -p "$STATE/sent"
+fresh_run
+wake_fixer "$D" rest t task
+tidR=$(head -1 "$STATE/sent/$D.fixer-rest")
+n=$(started)
+fresh_run
+if wake_fixer "$A" recheck t task; then echo "unexpected: a second fixer woken while the rest fixer runs" >&2; exit 1; fi
+test "$(started)" = "$n"
+set_status "$tidR" completed
+fresh_run
+wake_fixer "$A" recheck t task
+test "$(started)" = $((n + 1))
+echo 'rest fixer receipts hold the gate'
+
