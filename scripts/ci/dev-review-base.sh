@@ -92,23 +92,34 @@ verdict_m() { # verdict_m <sha> → sets vm to its verdict, asked once per scrip
   [ -n "${_verdicts[$1]+x}" ] || _verdicts[$1]=$(verdict "$1")
   vm=${_verdicts[$1]}
 }
-preserves_patch() ( # preserves_patch <before> <after> <at commit>
+preserves_patch() ( # preserves_patch <before> <after> <at commit> [<literal paths>...]
   # Candidate attributes (notably merge=union) can hide a real conflict and
   # return the post-revert tree unchanged. Prove preservation in an isolated
   # bare repository: info/attributes has priority over every tree's attributes,
   # and forces Git's built-in conflict-detecting text driver on every path.
   # Borrow objects read-only; temporary merge results stay in the proof repo.
-  local proof merged
+  local proof merged before=$1 after=$2 at=$3
   proof=$(mktemp -d) || return 1
   trap 'rm -rf "$proof"' EXIT
   git init -q --bare --template= "$proof" || return 1
   mkdir -p "$proof/info" || return 1
   git rev-parse --path-format=absolute --git-path objects > "$proof/objects/info/alternates" || return 1
   printf '%s\n' '* merge=text' > "$proof/info/attributes" || return 1
+  if [ "$#" -gt 3 ]; then
+    # Project the approved result onto the constituent's paths. Other paths
+    # stay at the baseline, so their old deltas impose no obligation at head.
+    shift 3
+    git --git-dir="$proof" read-tree "$before" || return 1
+    git --literal-pathspecs diff --binary --full-index --no-renames --no-ext-diff --no-textconv "$before" "$after" -- "$@" |
+      git --git-dir="$proof" apply --cached --allow-empty || return 1
+    after=$(git --git-dir="$proof" write-tree) || return 1
+    after=$(git --git-dir="$proof" -c user.name=review-proof -c user.email=review-proof@invalid \
+      commit-tree "$after" -p "$before" --no-gpg-sign -m 'scoped reviewed contribution') || return 1
+  fi
   merged=$(GIT_ATTR_NOSYSTEM=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
     git --git-dir="$proof" -c core.attributesFile=/dev/null -c merge.renormalize=false \
-    merge-tree --write-tree --merge-base="$1" "$2" "$3" 2>/dev/null) || return 1
-  [ "$merged" = "$(git rev-parse "$3^{tree}")" ]
+    merge-tree --write-tree --merge-base="$before" "$after" "$at" 2>/dev/null) || return 1
+  [ "$merged" = "$(git rev-parse "$at^{tree}")" ]
 )
 reverts_of() { # reverts_of <commit> <since> <head> [restore]
   # Git names the merge, not its constituent commits, in a merge revert. Only
@@ -166,6 +177,52 @@ revert_state() { # revert_state <r> <head> [depth] → 0: r stands in r..head ·
   [ "$unknown" = 0 ] || return 2
   return 0
 }
+contribution_stands() { # <constituent> <approved head> <candidate> <depth>
+  local x=$1 d=$2 h=$3 k=$4 l v rb att
+  local -a paths=()
+  mapfile -d '' -t paths < <(git diff --no-renames --name-only -z "$x^1" "$x")
+  [ "${#paths[@]}" -gt 0 ] || return 0
+  # If D still contains x's original patch, require just that patch. Otherwise
+  # D refined or cancelled x: use D's net result on x's paths, not all of x^..D.
+  if preserves_patch "$x^1" "$x" "$d"; then
+    preserves_patch "$x^1" "$x" "$h" && return 0
+  else
+    preserves_patch "$x^1" "$d" "$h" "${paths[@]}" && return 0
+  fi
+  [ "$k" -lt 40 ] || return 1
+  # Later incremental reviews may replace this contribution. They must cover
+  # every change since D through a usable full-review chain, pass, and their own
+  # reviewed contributions must still stand. A skipped, gapped, side-branch,
+  # blocked or reverted review cannot bless an arbitrary new endpoint.
+  for l in $(git rev-list "$d..$h" "^$MAINREF" 2>/dev/null); do
+    git merge-base --is-ancestor "$d" "$l" 2>/dev/null || continue
+    verdict_m "$l"; v=$vm
+    [ "${v%% *}" = pass ] || continue
+    att=$(review_attestation "${v##* }" "$l") || continue
+    [ "$(jq -r .kind <<<"$att")" = review ] || continue
+    rb=$(jq -r .base <<<"$att")
+    review_covered "$rb" "$d" "$h" 0 || continue
+    review_stands "$rb" "$l" "$h" "$((k + 1))" || continue
+    preserves_patch "$x^1" "$l" "$h" "${paths[@]}" && return 0
+  done
+  return 1
+}
+review_stands() { # <reviewed range base> <reviewed head> <candidate> <depth>
+  local b=$1 d=$2 h=$3 k=$4 x r preservation st
+  for x in $(git rev-list "$b..$d" 2>/dev/null); do
+    while read -r r preservation; do
+      if [ "$preservation" = preserved ]; then
+        # Retained equivalents outside the reviewed ancestry must survive at
+        # head, accounting for refinements and subsequent reviewed changes.
+        contribution_stands "$x" "$d" "$h" "$k" || return 1
+        continue
+      fi
+      st=0; revert_state "$r" "$h" || st=$?
+      [ "$st" = 1 ] || return 1
+    done < <(reverts_of "$x" "$d" "$h")
+  done
+  return 0
+}
 superseded() { # superseded <C> <the base C's blocked review used, or -> <head> → 0 when a LATER completed dev review re-reviewed
   # all of C's range and stands: a review of a descendant D of C (C is an ancestor of D; D in C..head, not on main) whose own range started at or
   # below C's (its review-range base is an ancestor of C's base, so every commit C's review saw was in D's) and that passed,
@@ -173,7 +230,7 @@ superseded() { # superseded <C> <the base C's blocked review used, or -> <head> 
   # in D's round, and D's findings — C's still-open ones among them — are what the repairs answer (owner 11-13: dev gets one
   # review; tralyx 11-13/14: dev heads blocked and superseded at once by a main→dev merge — 4b6671346, bc1f40bd3,
   # f54379cfd — were never repaired by trailer, so no range above them could ever be a tests-only round again).
-  local c=$1 rc=$2 h=$3 d v rb x r preservation st undone
+  local c=$1 rc=$2 h=$3 d v rb
   [[ "$rc" =~ ^[0-9a-f]{40}$ ]] || return 1
   for d in $(git rev-list "$c..$h" "^$MAINREF" 2>/dev/null); do
     # one containment rule (as repaired()): D's head contains C — a review on a side branch merged in later never saw C
@@ -191,25 +248,7 @@ superseded() { # superseded <C> <the base C's blocked review used, or -> <head> 
     # review saw above C (review of foxhole-backend b4d18dbbc #1: a passing fix reverted later restored C's blocked code,
     # and D's pass still superseded C's block). A revert inside C..D was itself reviewed by D: it disqualifies nothing
     # (review of sheepdog 87dce4aec #1). Only a revert that is itself undone (revert_state 1) is ignored.
-    undone=0
-    for x in $(git rev-list "$c..$d" 2>/dev/null); do
-      while read -r r preservation; do
-        if [ "$preservation" = preserved ]; then
-          # Equivalent repairs can live outside C..D. Prove the approved net
-          # delta from x's parent THROUGH D at head, including later reviewed
-          # edits/cancellations of x. Requiring x's historical patch would
-          # reject D's own tree when that review cancelled it. Undoing r alone
-          # is still insufficient: an unrelated undo cannot restore a missing
-          # retained repair. Non-preserved constituents below still require
-          # revert_state's causal, two-endpoint restoration proof.
-          if preserves_patch "$x^1" "$d" "$h"; then continue; fi
-          undone=1; break 2
-        fi
-        st=0; revert_state "$r" "$h" || st=$?
-        [ "$st" = 1 ] || { undone=1; break 2; }   # the revert stands, or the chain is too deep to tell: D does not count
-      done < <(reverts_of "$x" "$d" "$h")
-    done
-    [ "$undone" = 0 ] || continue
+    review_stands "$c" "$d" "$h" 0 || continue
     return 0
   done
   return 1
