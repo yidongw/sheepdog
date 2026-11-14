@@ -13,7 +13,8 @@
 #       qualifying run (review of vpn-sub c2cb135f0 #1); the approving run's main findings are recorded before it lands
 #       (review of sheepdog dev d9228afe7 #1)
 #   (h) … and only once that record is confirmed written: an unavailable routing read → not landed, retried next run
-#       (review of sheepdog main 625246776 #1)
+#       (review of sheepdog main 625246776 #1); (i) an unwritable record never yields a main-only approval (train or head
+#       loop; review of main 725a2adc1 #1); (j) receipts are per run (review of dev 8ba5aaa38 #1/#2)
 set -uo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 cd "$(dirname "$0")/../.."
@@ -344,4 +345,34 @@ rm -f "$T/ghm-logs-fail"
 grep -q "run $RID): finding(s) 1 2 — culprit on main" "$STATE/open-findings.log" 2>/dev/null || fail "(h) the retry did not record the findings"
 landed || fail "(h) the retry did not land H: $(cat "$LOG" 2>/dev/null)"
 echo "ok - (h) a main-only approval lands only after its findings are recorded; an unavailable read retries next run"
+# ── review of sheepdog main 725a2adc1 #1: open-findings.log cannot be written (here: a directory) → no caller treats the
+#    run as main-only; neither the train nor the head loop that follows it lands H; nothing routed as main's ──
+fixture_log "$T/log" "$C" 0
+scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+reset_dev; mkdir "$STATE/open-findings.log"
+( cd "$ROOT" && DRY="" && eval "$train" ) || fail "(i) train failed"; g fetch -q origin
+! landed || fail "(i) the train landed H with an unwritable open-findings.log"
+( cd "$ROOT" && merged_one=0 && DRY="" && eval "$loop" ) || fail "(i) head loop failed"; g fetch -q origin
+! landed || fail "(i) the head loop merged H with an unwritable open-findings.log: $(cat "$LOG")"
+grep -q "open-findings.log could not be written" "$LOG" || fail "(i) no log line for the failed record"
+ls "$STATE/sent/" | grep -q mainfindings && fail "(i) a receipt without a record"
+rmdir "$STATE/open-findings.log"
+echo "ok - (i) a record that cannot be written: no main-only approval, H not landed by the train or the head loop"
+
+# ── review of sheepdog dev 8ba5aaa38 #1/#2: receipts are per run. H's newer run 501 (failed tests, main finding #1 only) is
+#    recorded first; the train's approving run is the older 500 (#1 and #2): its own findings are recorded before landing ──
+fixture_log "$T/log" "$C" 0
+scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+NRID=$((RID + 1)); NJID=$((JID + 1))
+echo "{\"jobs\":[{\"name\":\"sheepdog / tests\",\"conclusion\":\"failure\"},{\"name\":\"sheepdog / review\",\"id\":$NJID,\"conclusion\":\"failure\",\"steps\":[$STEPS_OK]}]}" > "$FX/jobs-$NRID.json"
+awk '/review-gate: (FINDING|BLOCKED) #2 /{skip = 1; next} skip && /^[^ ]+ evidence:/{skip = 0; next} {skip = 0; print}' "$T/log" > "$FX/log-$NJID.txt"
+echo "{\"head\":\"$H\",\"base\":\"$B0\",\"kind\":\"review\",\"main\":\"$MAINSHA\"}" > "$FX/attest-$NRID.json"
+echo "[{\"id\":$NRID,\"display_title\":\"review $H\",\"status\":\"completed\",\"conclusion\":\"failure\"},{\"id\":$RID,\"display_title\":\"review $H\",\"status\":\"completed\",\"conclusion\":\"failure\"}]" > "$FX/runs.json"
+reset_dev
+( DRY=""; dev_split_main "$H" "$NRID" "$(findings "$NRID")"; [ "$main_only" = 1 ] ) || fail "(j) fixture: run $NRID is not main-only"
+grep -q "run $NRID): finding(s) 1 — culprit on main" "$STATE/open-findings.log" || fail "(j) fixture: run $NRID not recorded"
+( cd "$ROOT" && DRY="" && eval "$train" ) || fail "(j) train failed"; g fetch -q origin
+landed || fail "(j) the train did not land H: $(cat "$LOG")"
+grep -q "run $RID): finding(s) 1 2 — culprit on main" "$STATE/open-findings.log" || fail "(j) the approving run $RID's findings were not recorded (another run's receipt counted)"
+echo "ok - (j) receipts are per run: the approving run's own findings are recorded before landing"
 echo "main-culprit checks passed"
