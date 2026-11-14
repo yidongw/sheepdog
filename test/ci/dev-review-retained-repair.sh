@@ -175,6 +175,56 @@ case "$focus" in
     exit 0 ;;
 esac
 
+# A sibling renamed old before the blocked C; independent repair X never saw
+# that rename. D keeps both paths and refines X in old. The sibling's rename
+# must not freeze unrelated when a later merge undo checks X's contribution.
+unrelated_rename_cases() {
+  local O X renamed side retained other M mainline
+  local old=$'broken\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12'
+  g checkout -q --detach "$P"
+  O=$(commit_file 'old path before independent histories' "$old" old)
+  X=$(commit_file 'independent repair of old' "${old/broken/good}" old)
+  g checkout -q --detach "$O"
+  g mv old unrelated
+  g commit -q -m 'unrelated sibling renames old before blocked review'
+  renamed=$(git rev-parse HEAD)
+  C=$(commit_file 'blocked independent change' broken bug)
+  if git merge-base --is-ancestor "$X" "$renamed"; then fail 'sibling rename must not descend from X'; fi
+  if ! g merge -q --no-ff --no-commit "$X" >"$T/merge.out" 2>&1; then
+    [ -n "$(git ls-files -u)" ] || fail 'unexpected independent repair merge failure'
+  fi
+  printf '%s\n' "$old" > unrelated
+  printf '%s\n' "${old/broken/better}" > old
+  printf 'good\n' > bug
+  g add -A; g commit -q -m 'passing merge retains sibling file and refines repair in old'
+  D=$(git rev-parse HEAD)
+  side=$(commit_file 'unrelated descendant side file' side side)
+  for mainline in 1 2; do
+    updates=()
+    g checkout -q --detach "$D"
+    approval 0 "sibling rename mainline $mainline reviewed merge intact"
+    g commit -q --allow-empty -m 'retained reviewed ancestry'
+    retained=$(git rev-parse HEAD)
+    if [ "$mainline" = 2 ]; then g checkout -q --detach "$side"; other=$retained; else other=$side; fi
+    g merge -q --no-ff -m 'merge unrelated descendant beside reviewed repair' "$other"
+    M=$(git rev-parse HEAD)
+    g revert --no-edit -m "$mainline" "$M" >/dev/null
+    git diff --exit-code "$D" HEAD || fail 'unrelated merge undo must retain exactly D'
+    approval 0 "sibling rename mainline $mainline reviewed tree retained after undo"
+    commit_file 'edit unrelated sibling rename destination' unrelated-update unrelated >/dev/null
+    [ "$(head -1 old)" = better ] || fail 'unrelated edit must retain the reviewed repair'
+    approval 0 "sibling rename mainline $mainline unrelated edit preserves reviewed repair"
+    commit_file 'remove reviewed repair after unrelated edit' "$old" old >/dev/null
+    approval 1 "sibling rename mainline $mainline missing reviewed repair rejected"
+  done
+  echo 'exercised: sibling rename history stays outside the reviewed contribution'
+}
+if [ "$focus" = --unrelated-renames ]; then
+  unrelated_rename_cases
+  [ "$bad" = 0 ] || fail 'unrelated rename history contaminated the reviewed contribution'
+  exit 0
+fi
+
 # A reviewed rename/refinement remains the same contribution. Shared ancestry
 # must still be checked when only an unrelated descendant is merged and undone.
 rename_cases() {
@@ -799,6 +849,7 @@ if [ -z "$focus" ]; then
   proof_input_cases color
   shared_contribution_cases
   rename_cases
+  unrelated_rename_cases
   scoped_restoration_cases
   composed_restoration_cases
   blocked_replacement_cases

@@ -215,10 +215,12 @@ contribution_paths() { # <constituent> <reviewed head> -> NUL-delimited path lin
   # Walk reviewed rename edges, rather than comparing only the endpoints:
   # successive refinements can make the final name too dissimilar to x.
   # Include both ends so the projection carries the deletion AND destination.
+  # Only descendants of x can carry its contribution through a rename.
+  # A merged sibling's earlier rename of the same path is unrelated history.
   while IFS= read -r -d '' status && IFS= read -r -d '' old && IFS= read -r -d '' new; do
     [ -n "${paths[$old]+x}" ] || continue
     paths["$new"]=1
-  done < <(git log --format= --reverse --topo-order --diff-merges=separate \
+  done < <(git log --format= --reverse --topo-order --ancestry-path --diff-merges=separate \
     --name-status -z --find-renames=50% -l0 --diff-filter=R --no-color \
     --no-ext-diff --no-textconv --ignore-submodules=none "$x..$d")
   [ "${#paths[@]}" = 0 ] || printf '%s\0' "${!paths[@]}"
