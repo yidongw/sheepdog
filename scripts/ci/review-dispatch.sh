@@ -2023,6 +2023,11 @@ Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). You
       grep -qx "review $tsha" <<<"$failed_titles" || continue
       rp_main=1
     fi
+    # Persist main findings independently of the approval result, including older qualifying runs.
+    for trid in $(review_list 100 databaseId,displayTitle,status,conclusion \
+      ".[] | select(.status == \"completed\" and .conclusion == \"failure\" and .displayTitle == \"review $tsha\") | .databaseId"); do
+      dev_split_main "$tsha" "$trid" "$(findings "$trid")"
+    done
     : > "$STATE/train.kind"
     rp_out=$(cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=$rp_main REVIEW_KIND_OUT="$STATE/train.kind" bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" 2>/dev/null) || continue
     if [ "$rp_main" = 1 ]; then

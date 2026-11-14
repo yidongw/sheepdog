@@ -311,6 +311,7 @@ echo "{\"head\":\"$H\",\"base\":\"$B0\",\"kind\":\"review\",\"main\":\"$MAINSHA\
 echo "[{\"id\":$NRID,\"display_title\":\"review $H\",\"status\":\"completed\",\"conclusion\":\"failure\"},{\"id\":$RID,\"display_title\":\"review $H\",\"status\":\"completed\",\"conclusion\":\"failure\"}]" > "$FX/runs.json"
 RP || fail "(g) review-passed.sh does not approve H from its older main-only run: $(cat "$T/rp.err")"
 run_train
+grep -q 'BLOCKED #1 ' "$STATE/open-findings.log" 2>/dev/null || fail "(g) qualifying main findings were not recorded"
 landed || fail "(g) the train stranded H behind a newer infrastructure-failed review: $(cat "$LOG" 2>/dev/null)"
 ! grep -qE '^(dev_blocked|wake_fixer|notify)' "$T/calls" 2>/dev/null || fail "(g) the train routed main's findings: $(cat "$T/calls")"
 # … and records the approving (older) run's main findings before landing: later reviews see them as known-open
