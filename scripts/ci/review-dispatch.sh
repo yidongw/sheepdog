@@ -98,6 +98,7 @@ if [ -f "$TRUSTED/.github/sheepdog.yml" ]; then CI_SCRIPTS=$SHEEPDOG_CI; else CI
 
 source "$(dirname "${BASH_SOURCE[0]}")/review-notify.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machinery_files: what a tests-only approval never lands
+source "$(dirname "${BASH_SOURCE[0]}")/review-main-culprits.sh"   # review_main_culprits: pre-existing main findings of a dev review
 
 # Delivery failures stay retryable, but must never stop dispatch or fixer launch. With notify_outbox=<episode sha> set, a notice
 # goes to the outbox instead (terminal revert notices: delivered by revert_notices_flush, retried until delivered).
@@ -1072,7 +1073,49 @@ culprits_repaired() { # Commit-level repair ancestry cannot prove a finding was 
   open_nums=${open_nums# }
   return 1
 }
-
+# ── pre-existing MAIN findings in a dev review (supervisor 11-14: the dev review of 0cd95ca42, run 43577623889, blocked on
+#    FINDING #1/#2 commit=341cca4e9 — already on main, carried into the dev range by a main→dev merge; a dev fixer was woken,
+#    a round counted, fixfailed sent, and dev could never land). A blocking finding whose culprit (the reviewer's full-sha
+#    commit=) is on main as the review recorded it is main's: main's own re-check chain owns it. It is recorded once as a
+#    pre-existing main finding (open-findings.log → the next reviews' known-open list) and never routed on $DEV: no
+#    fixer, no fix round, no author notice, no revert clock. Blocked only by such findings, the head lands like a passing
+#    review — review-passed.sh decides that from the trusted run with the same rule (scripts/ci/review-main-culprits.sh).
+#    Only where the contract scripts in use know the rule (CI_SCRIPTS has review-main-culprits.sh): otherwise the head
+#    could neither be routed nor land. ──
+main_culprits_api() { ghm api "repos/$REPO/$1"; }   # a routing read: the landing decision reads GitHub itself (the contract scripts)
+main_culprit_hint() { # main_culprit_hint <S> <findings> → 0 when some FINDING names a full-sha commit= on origin/$MAIN and S
+  # (local, no GitHub read: whether the trusted classification is worth asking for)
+  local c
+  [ -f "${CI_SCRIPTS:-}/review-main-culprits.sh" ] || return 1
+  for c in $(sed -nE 's/^review-gate: FINDING #[0-9]+ route=[a-z]+ commit=([0-9a-f]{40})( .*)?$/\1/p' <<<"$2" | sort -u); do
+    if git -C "$SRC" merge-base --is-ancestor "$c" "origin/$MAIN" 2>/dev/null && git -C "$SRC" merge-base --is-ancestor "$c" "$1" 2>/dev/null; then return 0; fi
+  done
+  return 1
+}
+dev_split_main() { # dev_split_main <S> <run id> <findings> → sets dev_f (the findings left for $DEV: the main findings removed),
+  # main_nums / dev_nums, and main_only=1 when EVERY blocking finding is a main finding (review_main_culprits: the run's
+  # own log and attestation); the main findings are recorded once per S. Unreadable evidence → nothing is removed.
+  local s=$1 run=$2 f=$3 cls rc=0 n
+  dev_f=$f main_nums="" dev_nums="" main_only=0
+  main_culprit_hint "$s" "$f" || return 0
+  cls=$(cd "$SRC" && review_main_culprits main_culprits_api "$run" "$s") || rc=$?
+  [ "$rc" -le 1 ] && [ -n "$cls" ] || return 0
+  main_nums=$(awk '$2 == "main" {printf "%s ", $1}' <<<"$cls"); main_nums=${main_nums% }
+  dev_nums=$(awk '$2 != "main" {printf "%s ", $1}' <<<"$cls"); dev_nums=${dev_nums% }
+  [ -n "$main_nums" ] || return 0
+  [ -n "$dev_nums" ] || main_only=1
+  # shellcheck disable=SC2086 # finding numbers, one word each
+  dev_f=$(findings_subset "$f" 1 $dev_nums)
+  if [ -n "${DRY:-}" ]; then echo "DRY $DEV ${s:0:9}: finding(s) $main_nums — culprit on $MAIN (pre-existing main finding): not routed on $DEV${dev_nums:+; routing $dev_nums}"; return 0; fi
+  if [ ! -e "$STATE/sent/$s.mainfindings" ]; then
+    # shellcheck disable=SC2086
+    { echo "[$(date -u +%FT%TZ)] ${s:0:9} ($DEV review, run $run): finding(s) $main_nums — culprit on $MAIN ($(for n in $main_nums; do awk -v n="$n" '$1 == n {printf "#%s %s ", $1, substr($3, 1, 9)}' <<<"$cls"; done | sed 's/ $//')); pre-existing main finding(s), owned by main's own re-check chain, not routed on $DEV:"
+      findings_subset "$f" 0 $main_nums; echo; } >> "$STATE/open-findings.log"
+    log "$DEV ${s:0:9}: finding(s) $main_nums of run $run name a culprit already on $MAIN — recorded as pre-existing main finding(s) (open-findings.log); no $DEV fixer, no fix round${dev_nums:+; routing only $dev_nums}"
+    touch "$STATE/sent/$s.mainfindings"
+  fi
+  return 0
+}
 dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> <run url> <fixer task> → the reviewer's route per
   # finding (author groups, see dev_blocked_split); otherwise fixer first, authors only when it failed
   local s=$1 f=$2 cul=$3 url=$4 why att task=$5
@@ -1958,6 +2001,9 @@ if [ -z "${DRY:-}" ] && git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/
        && ! dev_round_noop "$bsha" "$brid" failure; then   # a merge-only round is never blocked
       bf=$(findings "$brid")
       if binfra=$(review_infra_reason "$bf"); then dev_infra "$bsha" "$brid" "$binfra"; else
+      # findings whose culprit is already on main are main's (dev_split_main): recorded, never routed on $DEV
+      dev_split_main "$bsha" "$brid" "$bf"; bf=$dev_f
+      if [ -n "$(tr -d '[:space:]' <<<"$bf")" ]; then
       bcul=$(culprit_threads "$bsha" "$bf")
       # reviewer → fixer → author: the fixer gets it; the authors only when it failed (dev_blocked)
       dev_blocked "$bsha" "$bf" "$bcul" "https://github.com/$REPO/actions/runs/$brid" "Task: the blocking review stopped $DEV at ${bsha:0:9}. Findings:
@@ -1965,12 +2011,22 @@ ${bf:-(none parsed; read the run)}
 Run: https://github.com/$REPO/actions/runs/$brid
 Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). Your worktree starts at origin/$DEV; first git reset --hard ${bsha} so the fix sits directly on the reviewed commit (later dev commits are NOT part of this fix). ONE commit with trailers Review-Fix-Of: ${bsha} and Hotfix: review fix of ${bsha:0:9}; push it with git push origin HEAD:refs/heads/devfix/${bsha:0:12} (NOT to $DEV, not to main). Once the trusted tests pass there, ${bsha:0:9} plus your fix land on main without a second review."
       fi
+      fi
     fi
   fi
   for tsha in $(git -C "$SRC" rev-list origin/$MAIN.."origin/$DEV" | head -60); do
-    grep -qx "review $tsha" <<<"$done_titles" || continue
+    rp_main=0   # review-passed.sh's main-findings path only for a sha blocked by nothing but main findings (it saves the reads)
+    if ! grep -qx "review $tsha" <<<"$done_titles"; then
+      # blocked only by pre-existing main findings (dev_split_main) → a candidate like a passing review
+      trid=$(review_list 100 databaseId,displayTitle,status,conclusion \
+             ".[] | select(.status == \"completed\" and .conclusion == \"failure\" and .displayTitle == \"review $tsha\") | .databaseId" | head -1)
+      [ -n "$trid" ] && [ ! -e "$STATE/sent/$tsha.nomain-$trid" ] || continue
+      dev_split_main "$tsha" "$trid" "$(findings "$trid")"
+      if [ "$main_only" != 1 ]; then [ -n "$main_nums" ] || touch "$STATE/sent/$tsha.nomain-$trid"; continue; fi
+      rp_main=1
+    fi
     : > "$STATE/train.kind"
-    (cd "$TRUSTED" && REVIEW_KIND_OUT="$STATE/train.kind" bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" >/dev/null 2>&1) || continue
+    (cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=$rp_main REVIEW_KIND_OUT="$STATE/train.kind" bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" >/dev/null 2>&1) || continue
     # a tests-only approval never lands review machinery, by fast-forward or Train-Merge (review of dev a171d3396 #1/#2)
     if [ "$(cat "$STATE/train.kind" 2>/dev/null)" != review ]; then
       tmfiles=$(landing_machinery_files "$SRC" "origin/$MAIN" "$tsha")
@@ -2178,8 +2234,11 @@ Then you can delete this branch. The rules: the Shipping section of CLAUDE.md on
     # The review already blocked this sha: its tests can no longer make it mergeable, so free
     # the test runners for other branches (the findings are sent once the run completes).
     # A review-fix head keeps its tests running: they are what lands it (owner 11-10, below).
+    # A dev review blocked by findings naming a main commit keeps its tests too: blocked only by such pre-existing main
+    # findings, the head lands on its tests (review-passed.sh, review-main-culprits.sh).
     if ! git -C "$SRC" show -s --format=%B "$sha" | grep -qE '^Review-Fix-Of: [0-9a-f]{40}$' \
-       && [ "$(gh api "repos/$REPO/actions/runs/$rid/jobs" -q '[.jobs[] | select((.name | sub("^.* / "; "")) == "review" and .conclusion=="failure")] | length' 2>/dev/null)" = 1 ]; then
+       && [ "$(gh api "repos/$REPO/actions/runs/$rid/jobs" -q '[.jobs[] | select((.name | sub("^.* / "; "")) == "review" and .conclusion=="failure")] | length' 2>/dev/null)" = 1 ] \
+       && ! { [ "$ref" = "$DEV" ] && main_culprit_hint "$sha" "$(findings "$rid")"; }; then
       [ -n "${DRY:-}" ] && { echo "DRY cancel $rid"; continue; }
       if [ ! -e "$STATE/sent/$sha.cancelled" ]; then      # one cancel request per run
         gh run cancel "$rid" -R "$REPO" >/dev/null 2>&1 && log "cancelled run $rid of $ref ${sha:0:9}: review blocked, tests no longer needed"
@@ -2204,7 +2263,13 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
     read -r rid concl <<<"$(dev_verdict_run "$sha" "$rid" "$concl")"; url="https://github.com/$REPO/actions/runs/$rid"
     if dev_round_noop "$sha" "$rid" "$concl" clear; then continue; fi   # before any blocked / fixer / overdue decision
   fi   # before any blocked / fixer / overdue decision
-  if (cd "$TRUSTED" && bash "$CI_SCRIPTS/review-passed.sh" "$sha" "$REPO" >/dev/null 2>&1); then
+  # a blocked dev review: its findings first — those whose culprit is already on main are main's (dev_split_main); blocked
+  # only by those, review-passed.sh's main-findings path decides whether it lands (otherwise skipped: it saves the reads)
+  f=""; rp_main=1
+  if [ "$ref" = "$DEV" ] && [ "$concl" != success ]; then
+    f=$(findings "$rid"); dev_split_main "$sha" "$rid" "$f"; [ "$main_only" = 1 ] || rp_main=0
+  fi
+  if (cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=$rp_main bash "$CI_SCRIPTS/review-passed.sh" "$sha" "$REPO" >/dev/null 2>&1); then
     if git -C "$SRC" merge-base --is-ancestor origin/$MAIN "$sha"; then
       [ $merged_one = 0 ] || continue
       if [ -n "${DRY:-}" ]; then echo "DRY merge $ref ${sha:0:9}"; merged_one=1; continue; fi
@@ -2239,9 +2304,18 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
       git -C "$SRC" worktree remove --force "$WORK" >/dev/null 2>&1 || true
     fi
   elif [ "$ref" = "$DEV" ]; then
-    f=$(findings "$rid")
+    if [ -z "$f" ]; then f=$(findings "$rid"); dev_split_main "$sha" "$rid" "$f"; fi   # (a failed run: split above already)
     # the reviewer itself did not run: nothing was reviewed — no block, no fixer, no author notice, no revert clock
     if dinfra=$(review_infra_reason "$f"); then dev_infra "$sha" "$rid" "$dinfra"; continue; fi
+    # findings whose culprit is on main are main's: recorded, never routed on $DEV (no fixer, round, notice or revert clock)
+    f=$dev_f
+    if [ -z "$(tr -d '[:space:]' <<<"$f")" ]; then
+      if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$sha.mainonly-wait.$rid" ]; then
+        log "$DEV ${sha:0:9}: run $rid blocked only by pre-existing main finding(s) ($main_nums) but not approved (yet) — nothing of $DEV's to route; no fixer, no revert clock"
+        touch "$STATE/sent/$sha.mainonly-wait.$rid"
+      fi
+      continue
+    fi
     since_f="$STATE/dev.blocked_since"
     if [ ! -s "$since_f" ]; then echo "$now" > "$since_f"; echo "$sha" > "$since_f.sha"; fi   # the episode's owner (dev_round_noop)
     since=$(cat "$since_f")
