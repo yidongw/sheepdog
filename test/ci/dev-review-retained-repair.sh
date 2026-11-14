@@ -62,6 +62,119 @@ P=$(commit_file production good bug)
 git update-ref refs/remotes/origin/main "$P"
 C=$(commit_file 'blocked bug' $'broken\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12' bug)
 
+# A clean undo can supply only the part not already independently restored.
+# It must still complete the contribution, and removing that remainder must
+# invalidate approval again. Exercise direct and containing-merge removals.
+composed_restoration_cases() {
+  local mode R S U retained other M
+  g checkout -q --detach "$P"
+  printf 'broken-a\n' > a; printf 'broken-b\n' > b
+  g add a b; g commit -q -m 'blocked two-file defect'; C=$(git rev-parse HEAD)
+  printf 'fixed-a\n' > a; printf 'fixed-b\n' > b
+  g add a b; g commit -q -m 'passing two-file repair'; D=$(git rev-parse HEAD)
+  for mode in direct 1 2; do
+    g checkout -q --detach "$D"
+    if [ "$mode" = direct ]; then
+      g revert --no-edit "$D" >/dev/null
+    else
+      g checkout -q --detach "$C"
+      g commit -q --allow-empty -m 'independent blocked mainline'
+      retained=$(git rev-parse HEAD)
+      if [ "$mode" = 2 ]; then g checkout -q --detach "$D"; other=$retained; else other=$D; fi
+      g merge -q --no-ff -m 'merge two-file repair' "$other"
+      M=$(git rev-parse HEAD)
+      g revert --no-edit -m "$mode" "$M" >/dev/null
+    fi
+    R=$(git rev-parse HEAD)
+    S=$(commit_file 'independently restore the first file' fixed-a a)
+    approval 1 "$mode independently restored subset is incomplete"
+    g revert --no-edit "$R" >/dev/null
+    U=$(git rev-parse HEAD)
+    git diff --exit-code "$D" "$U" || fail 'composed undo must restore the exact approved tree'
+    [ "$(git diff --name-only "$S" "$U")" = b ] || fail 'clean undo must change only the remaining file'
+    approval 0 "$mode clean undo completes independent restoration"
+    g revert --no-edit "$U" >/dev/null
+    approval 1 "$mode completed restoration removed again"
+    g revert --no-edit HEAD >/dev/null
+    approval 0 "$mode completed restoration reinstated"
+  done
+  echo 'exercised: composed restoration through both approval consumers'
+}
+
+blocked_replacement_cases() {
+  local mode variant U Q side M E F H expected actual base description
+  for mode in control restored retained; do
+    g checkout -q --detach "$P"
+    C=$(commit_file 'blocked replacement baseline' broken bug)
+    D=$(commit_file 'passing version one repair' fixed-v1 bug)
+    if [ "$mode" = restored ]; then
+      g revert --no-edit "$D" >/dev/null
+      g revert --no-edit HEAD >/dev/null
+    elif [ "$mode" = retained ]; then
+      side=$(commit_file 'unrelated descendant' side side)
+      g checkout -q --detach "$C"
+      g cherry-pick "$D" >/dev/null
+      g commit -q --amend -m 'independent retained version one'; Q=$(git rev-parse HEAD)
+      g merge -q --no-ff -m 'merge review with retained equivalent' "$side"
+      M=$(git rev-parse HEAD)
+      g revert --no-edit -m 1 "$M" >/dev/null
+    fi
+    U=$(git rev-parse HEAD)
+    # E reviews D..E; its completed blocked verdict plus F is a coverage link.
+    # The repair itself refines D, so checking only E's snapshot is too strict.
+    E=$(commit_file 'later blocked review' broken later)
+    F=$(commit_file 'repair and refine earlier contribution' fixed-v2 bug)
+    g commit -q --amend -m 'repair and refine earlier contribution' -m "Review-Fix-Of: $E"
+    F=$(git rev-parse HEAD)
+    for variant in valid missing-proof crash skipped gap unrepaired; do
+      # The control differs only by omission of the net-zero revert pair.
+      if [ "$mode" = control ] && [ "$variant" != valid ]; then continue; fi
+      g checkout -q --detach "$F"
+      H=$F; base=$E; expected=1
+      case "$variant" in
+        valid) expected=0 ;;
+        unrepaired)
+          g commit -q --amend -m 'refinement without a repair trailer'; H=$(git rev-parse HEAD) ;;
+      esac
+      reset
+      run 1 "review $C" success failure "$P" '' blocked
+      run 2 "review $D" success success "$P"
+      printf 'review-range: %s %s\n' "$P" "$D" > "$FX/log-1002.txt"
+      case "$variant" in
+        crash) run 3 "review $E" success failure "$D" ;;
+        skipped) run 3 "review $E" success skipped "$D" tests-only-fix ;;
+        *) run 3 "review $E" success failure "$D" '' blocked ;;
+      esac
+      case "$variant" in
+        missing-proof) rm "$FX/attest-3.json" ;;
+        gap)
+          jq --arg b "$U" '.base = $b' "$FX/attest-3.json" > "$FX/gap.json"
+          mv "$FX/gap.json" "$FX/attest-3.json" ;;
+      esac
+      run 4 "review $H" success skipped "$base" tests-only-fix
+      description="$mode blocked replacement $variant"
+      actual=0; bash "$CI/dev-review-base.sh" --only-fixes "$base" "$H" || actual=$?
+      if [ "$actual" != "$expected" ]; then
+        echo "FAIL: $description: tests-only gate returned $actual, expected $expected" >&2; bad=1
+      fi
+      actual=0; RP "$H" o/r "$P" || actual=$?
+      if [ "$actual" != "$expected" ]; then
+        echo "FAIL: $description: deployment coverage returned $actual, expected $expected" >&2; bad=1
+      fi
+    done
+  done
+  echo 'exercised: completed blocked-review replacements and invalid coverage'
+}
+case "$focus" in
+  --composed-restoration) composed_restoration_cases ;;
+  --blocked-replacements) blocked_replacement_cases ;;
+esac
+case "$focus" in
+  --composed-restoration|--blocked-replacements)
+    [ "$bad" = 0 ] || fail 'composed restoration or completed repair coverage rejected'
+    exit 0 ;;
+esac
+
 # A reviewed rename/refinement remains the same contribution. Shared ancestry
 # must still be checked when only an unrelated descendant is merged and undone.
 rename_cases() {
@@ -687,5 +800,7 @@ if [ -z "$focus" ]; then
   shared_contribution_cases
   rename_cases
   scoped_restoration_cases
+  composed_restoration_cases
+  blocked_replacement_cases
 fi
 [ "$bad" = 0 ] || fail 'merge-undo preservation disagrees with the approved net state'

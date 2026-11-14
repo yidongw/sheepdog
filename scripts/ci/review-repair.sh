@@ -12,7 +12,7 @@ reverted() { # reverted <c> <head> [depth] → 0 when a standing "This reverts c
   done
   return 1
 }
-repaired() { # repaired <S> <head> → 0 when S..head carries an effective repair of S
+effective_repairs() { # <S> <head> → commits carrying effective repairs of S
   local c msg
   for c in $(git log --format=%H -F --grep="Review-Fix-Of: $1" "$1..$2" 2>/dev/null || true); do
     # Read the full message before matching; an early-closing grep -q can give git SIGPIPE under pipefail.
@@ -21,7 +21,9 @@ repaired() { # repaired <S> <head> → 0 when S..head carries an effective repai
     # the repair must descend from S (tralyx fd935e7c5, 11-14: a main hotfix naming a dev sha reached dev through a
     # main→dev merge and sat in S..head without containing S — a trailer that names no ancestor repairs nothing)
     git merge-base --is-ancestor "$1" "$c" 2>/dev/null || continue
-    reverted "$c" "$2" || return 0
+    if ! reverted "$c" "$2"; then printf '%s\n' "$c"; fi
   done
-  return 1
+}
+repaired() { # repaired <S> <head> → 0 when S..head carries an effective repair of S
+  [ -n "$(effective_repairs "$1" "$2")" ]
 }
