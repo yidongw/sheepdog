@@ -78,4 +78,55 @@ for mainline in 1 2; do
   approval 0 "mainline $mainline equivalent repair restored at candidate"
   echo "ok: mainline $mainline tracks equivalent repair through the candidate head"
 done
-[ "$bad" = 0 ] || fail 'stale merge-undo preservation approved a missing repair'
+
+# Preservation follows the approved net state, including constituents cancelled
+# before D's review. Q retains X independently; undoing M resurrects X, and
+# undoing that undo restores D exactly. X must not then be required at head.
+for cancellation in full partial; do
+  g checkout -q --detach "$C"
+  printf 'temporary\n' > transient
+  printf 'retained\n' > lasting
+  g add transient lasting; g commit -q -m 'temporary and lasting constituents before review'
+  X=$(git rev-parse HEAD)
+  if [ "$cancellation" = full ]; then
+    g revert --no-edit "$X" >/dev/null
+  else
+    g rm -q transient
+    g commit -q -m 'cancel only the transient part before review'
+  fi
+  D=$(commit_file 'passing repair after cancellation' $'good\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12' bug)
+  for mainline in 1 2; do
+    g checkout -q --detach "$C"
+    g cherry-pick "$X" >/dev/null
+    g commit -q --amend -m 'independent temporary patch on retained mainline'
+    Q=$(git rev-parse HEAD)
+    if git merge-base --is-ancestor "$Q" "$D"; then fail 'Q must be outside the reviewed ancestry'; fi
+    if [ "$mainline" = 2 ]; then g checkout -q --detach "$D"; side=$Q; else side=$D; fi
+    g merge -q --no-ff --no-commit "$side"
+    # The approved merge resolution cancels Q's transient addition too.
+    g read-tree --reset -u "$D"
+    g commit -q -m 'merge with the exact approved net tree'
+    M=$(git rev-parse HEAD)
+    git diff --exit-code "$D" "$M" || fail 'merge did not resolve to the reviewed tree'
+    g revert --no-edit -m "$mainline" "$M" >/dev/null
+    U=$(git rev-parse HEAD)
+    [ -f transient ] || fail 'merge undo did not resurrect the cancelled constituent'
+    approval 1 "$cancellation cancellation, mainline $mainline cancelled constituent resurrected and repair removed"
+
+    g revert --no-edit "$U" >/dev/null
+    V=$(git rev-parse HEAD)
+    git diff --exit-code "$D" "$V" || fail 'undoing the undo did not restore the reviewed tree'
+    approval 0 "$cancellation cancellation, mainline $mainline approved cancellation restored exactly"
+
+    # Exact tree equality is not the rule: independent hunks may differ at head.
+    printf 'candidate metadata\n' >> bug
+    g add bug; g commit -q -m 'unrelated metadata after restoring the approved cancellation'
+    approval 0 "$cancellation cancellation, mainline $mainline approved cancellation restored with metadata"
+
+    # Restoring the cancelled constituent again must invalidate D's evidence.
+    g revert --no-edit "$V" >/dev/null
+    approval 1 "$cancellation cancellation, mainline $mainline restoration reverted again"
+    echo "ok: mainline $mainline preserves the approved cancellation through restoration"
+  done
+done
+[ "$bad" = 0 ] || fail 'merge-undo preservation disagrees with the approved net state'

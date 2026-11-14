@@ -195,11 +195,14 @@ superseded() { # superseded <C> <the base C's blocked review used, or -> <head> 
     for x in $(git rev-list "$c..$d" 2>/dev/null); do
       while read -r r preservation; do
         if [ "$preservation" = preserved ]; then
-          # Equivalent repairs can live outside C..D. Their later removal is
-          # invisible to that ancestry walk, so prove the complete patch at
-          # the candidate too. Undoing r may change only unrelated paths and
-          # cannot cancel evidence that the repair is missing at head.
-          if preserves_patch "$x^1" "$x" "$h"; then continue; fi
+          # Equivalent repairs can live outside C..D. Prove the approved net
+          # delta from x's parent THROUGH D at head, including later reviewed
+          # edits/cancellations of x. Requiring x's historical patch would
+          # reject D's own tree when that review cancelled it. Undoing r alone
+          # is still insufficient: an unrelated undo cannot restore a missing
+          # retained repair. Non-preserved constituents below still require
+          # revert_state's causal, two-endpoint restoration proof.
+          if preserves_patch "$x^1" "$d" "$h"; then continue; fi
           undone=1; break 2
         fi
         st=0; revert_state "$r" "$h" || st=$?
