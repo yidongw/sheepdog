@@ -599,7 +599,8 @@ If you cannot run the tests (no matching dependency installation, a service you 
 and never tick it or claim a run you did not make. Unproven fixes are logged and reported to the supervisor.
 
 Record what you repaired (owner 11-13): next to Review-Fix-Of:, your commit message names every finding it fixes, one
-line each: Fixes-Finding: #<n> <the finding's text> (the authors are told which of their findings a fixer repaired).
+line each: Fixes-Finding: #<n> <the finding's text: its BLOCKED line after the verdict and [severity] prefix, verbatim> (the
+authors are told which of their findings a fixer repaired, and only a finding named so counts as repaired by your commit).
 How to ship: follow the task-specific base, destination branch and push command above. Fix at the source, run the
 relevant tests, commit with Loop: dev-fixer, Thread: \$T3CODE_THREAD_ID (your OWN T3 thread id; if that variable is
 empty, use the id the dispatcher sends you right after launch — never a thread id copied from this task) and a
@@ -738,7 +739,7 @@ repair_effective() { # repair_effective <S> <thread|""> <ref>... → THE definit
   # prints the newest commit on the refs, beyond S ("^<sha>" excludes that commit's history), carrying the exact trailer
   # "Review-Fix-Of: S", not reverted since on a ref that contains it (fix_reverted), and — <thread> given — committed by
   # that thread (Thread: trailer: the author / the fixer that owns the finding group); 1 when none
-  local s=$1 want=$2 c; shift 2
+  local s=$1 want=$2 c found=0; shift 2   # _repair_all=1: print EVERY effective repair (newest first), not only the newest
   # every matching commit (re-check of e3aca30fd #7: "head -20" before the thread filter lost a thread's repair behind
   # twenty newer ones of other threads)
   # a short sha in the trailer (≥ 7 hex, a prefix of S) is accepted too: the commit-msg hook refuses new ones, older ones exist
@@ -763,9 +764,10 @@ repair_effective() { # repair_effective <S> <thread|""> <ref>... → THE definit
       if ! fix_reverted "$c" "$ref" && [ "$_fix_reverted_unsure" = 0 ]; then ok=1; break; fi
     done
     [ "$ok" = 1 ] || continue
-    printf '%s\n' "$c"; return 0
+    printf '%s\n' "$c"; found=1
+    [ "${_repair_all:-0}" = 1 ] || return 0
   done
-  return 1
+  [ "$found" = 1 ]
 }
 hotfix_fix_pushed() { # hotfix_fix_pushed <H> → prints the effective repair of H on origin/$MAIN or origin/$DEV; 1 when none
   local refs=("origin/$MAIN")
@@ -1061,17 +1063,48 @@ blocked_author_reason() { # blocked_author_reason <S> → why the authors must a
   if launch_failed "$s" blocked; then echo "the fixer agent failed to start (t3 thread start failed repeatedly)"; fi
   return 0
 }
-culprits_repaired() { # Commit-level repair ancestry cannot prove a finding was repaired.
-  # Finding numbers belong to a particular review, and Fixes-Finding trailers do
-  # not bind them to that review or its text. Keep every finding open until a
-  # fresh review verifies it; Review-Fix-Of alone is never suppression evidence.
-  local n route c t
-  repaired_nums="" open_nums="" dupfix_why=""
-  while read -r n route c t; do
-    [ -n "$n" ] && open_nums="$open_nums $n"
-  done <<<"$2"
-  open_nums=${open_nums# }
+finding_norm() { # stdin → the finding text normalised for matching: "<verdict> [<tags>]: " prefix dropped, whitespace collapsed
+  sed -E 's/^(ducktape|missed-class|regression|clean)( \[[^]]*\])?: //' | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/[ .]*$//'
+}
+finding_text() { # finding_text <findings> <n> → the normalised text of BLOCKED #n
+  sed -nE "s/^review-gate: BLOCKED #$2 (.*)/\1/p" <<<"$1" | head -1 | finding_norm
+}
+repair_declares() { # repair_declares <repair commit> <normalised finding text> → 0 when its message declares THAT finding fixed
+  # (or disputed): a "Fixes-Finding: #<k> <text>" or "Review-Disputed: <k> <text>" line whose text is the finding's (numbers
+  # differ between rounds, so the text decides — review of dev 973b53dd8 #1/#2)
+  local line t
+  [ -n "$2" ] || return 1
+  while IFS= read -r line; do
+    t=$(sed -E 's/^(Fixes-Finding|Review-Disputed):[[:space:]]*#?[0-9]+[[:space:]]+//' <<<"$line" | finding_norm)
+    [ "$t" = "$2" ] && return 0
+    case "$line" in Review-Disputed:*) [[ "$t" == *"$2"* ]] && return 0 ;; esac
+  done < <(git -C "$SRC" show -s --format=%B "$1" 2>/dev/null | grep -E '^(Fixes-Finding|Review-Disputed):' || true)
   return 1
+}
+culprits_repaired() { # culprits_repaired <S> <attribution> <findings> → per finding (supervisor 11-14, tralyx 26b73ac1b / 33b2b479b: one
+  # unrepaired culprit re-routed the whole set, so authors got findings dev had already repaired again): sets
+  #   repaired_nums — the findings that an effective repair of their culprit commit on origin/$DEV (one S does NOT already
+  #                   contain: repair_effective; re-check of b06fcbb80 #1) DECLARES fixed: a Fixes-Finding: (or
+  #                   Review-Disputed:) line with that finding's text (repair_declares — review of dev 973b53dd8 #1/#2: a
+  #                   repair naming the culprit commit fixed only the first of its two defects, and the second was dropped)
+  #   open_nums     — every other blocking finding (no culprit commit, no such repair, or no repair that names it)
+  #   dupfix_why    — which repair answers which finding
+  # → 0 when at least one finding is repaired, 1 when none is (or there is no attribution)
+  local s=$1 f=${3:-} n route c t r x txt why=""
+  repaired_nums="" open_nums="" dupfix_why=""
+  [ -n "$2" ] || return 1
+  declare -A rep=()
+  while read -r n route c t; do
+    [ -n "$n" ] || continue
+    if [ -z "$c" ] || [ "$c" = "-" ]; then open_nums="$open_nums $n"; continue; fi
+    if [ -z "${rep[$c]+x}" ]; then rep[$c]=$(_repair_all=1 repair_effective "$c" "" "origin/$DEV" "^$s" || true); fi
+    txt=$(finding_text "$f" "$n"); r=""
+    for x in ${rep[$c]}; do if repair_declares "$x" "$txt"; then r=$x; break; fi; done
+    if [ -n "$r" ]; then repaired_nums="$repaired_nums $n"; why="$why #$n: ${r:0:9} repairs ${c:0:9};"
+    else open_nums="$open_nums $n"; fi
+  done <<<"$2"
+  repaired_nums=${repaired_nums# } open_nums=${open_nums# } dupfix_why=${why# }
+  [ -n "$repaired_nums" ]
 }
 # ── pre-existing MAIN findings in a dev review (supervisor 11-14: the dev review of 0cd95ca42, run 43577623889, blocked on
 #    FINDING #1/#2 commit=341cca4e9 — already on main, carried into the dev range by a main→dev merge; a dev fixer was woken,
@@ -1125,7 +1158,7 @@ dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> 
   # this head is an older copy of an already-fixed bug — no fixer, no author, no budget (supervisor 11-12: fc8381277's
   # findings, fixed by ca1de4505, re-blocked every later head without it, each spending a full fix budget).
   # Per finding: one whose culprit dev already repairs is dropped (logged with its repair); only the rest is routed.
-  if culprits_repaired "$s" "$att"; then
+  if culprits_repaired "$s" "$att" "$f"; then
     if [ -z "$open_nums" ]; then
       if [ -n "${DRY:-}" ]; then echo "DRY blocked ${s:0:9}: $DEV already repairs its culprit commit(s) ($dupfix_why) — no fixer"
       elif [ ! -e "$STATE/sent/$s.dupfix" ]; then log "blocked ${s:0:9}: $DEV already repairs its culprit commit(s) ($dupfix_why) — no fixer"; touch "$STATE/sent/$s.dupfix"; fi

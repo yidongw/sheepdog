@@ -17,7 +17,7 @@ eval "$(fns repair_effective author_group_key findings_cap thread_of fixer_recei
   dev_round_pending dev_carries_fix fix_reverted hotfix_fix_pushed escalate_ended_fixer named_files blocked_author_reason \
   dev_blocked norm_tid finding_blocks finding_meta finding_route review_round_route route_reason attribute_finding \
   attribution findings_subset att_of culprit_lines notify_attributed author_fixed author_turn split_fixer_failed \
-  split_fixer dev_blocked_split revert_after_for own_findings fyi_author culprits_repaired att_threads)"
+  split_fixer dev_blocked_split revert_after_for own_findings fyi_author culprits_repaired finding_norm finding_text repair_declares att_threads)"
 eval "$(sed -n '/^digest_file() {/p; /^digest_add() {/,/^}/p' scripts/ci/review-notify.sh)"   # fyi_author → the authors' digest
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 SRC=$T/src STATE=$T/state MAIN=main DEV=dev REPO=test/repo DEV_REVERT_AFTER_SEC=3600 FIXER_GATE_STALE_MIN=90 AUTHOR_FIX_WINDOW_SEC=3600
@@ -94,14 +94,17 @@ grep -q 'a.ts siblings' "$T/msg-${A##*:}"; ! grep -q 'b.ts' "$T/msg-${A##*:}" ||
 grep -q 'patch hides b' "$T/msg-${B##*:}"; ! grep -q 'a.ts siblings' "$T/msg-${B##*:}" || { echo "negative check failed: test/ci/review-dispatch-route.sh:91" >&2; exit 1; }
 # supervisor 11-12: every finding's culprit commit already repaired on dev (one full sha, one short) → no fixer, nobody told
 reset
-g checkout -q -B devw origin/dev; commit src/a.ts "$A" "Review-Fix-Of: $CA" >/dev/null; commit src/b.ts "$B" "Review-Fix-Of: ${CB:0:9}" >/dev/null
+g checkout -q -B devw origin/dev; commit src/a.ts "$A" "Review-Fix-Of: $CA
+Fixes-Finding: #1 same bug in a.ts siblings" >/dev/null; commit src/b.ts "$B" "Review-Fix-Of: ${CB:0:9}
+Fixes-Finding: #2 patch hides b" >/dev/null
 g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
 dev_blocked "$S" "$F2" "" run-url task
 test ! -e "$woken"; test ! -e "$sent"; grep -q 'already repairs its culprit commit' "$LOG"
 # only one culprit repaired → per finding (supervisor 11-14, tralyx 26b73ac1b / 33b2b479b): A's #1 (repaired on dev) is dropped
 # and logged with its repair; only B hears, of #2 only
 reset
-g checkout -q -B devw "$S"; RA=$(commit src/a.ts "$A" "Review-Fix-Of: $CA")
+g checkout -q -B devw "$S"; RA=$(commit src/a.ts "$A" "Review-Fix-Of: $CA
+Fixes-Finding: #1 same bug in a.ts siblings")
 g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
 dev_blocked "$S" "$F2" "" run-url task
 ! grep -q 'already repairs its culprit commit(s) (' "$LOG" || { echo "negative check failed: the partial case is no full dupfix" >&2; exit 1; }
@@ -403,7 +406,10 @@ review-gate: FINDING #4 route=fixer commit=$CB — retired task keys
 review-gate: BLOCKED #4 regression [should]: retired keys stay in the failure set
 evidence: src/b.ts:4 four"
 reset
-g checkout -q -B devw "$S"; RA4=$(commit src/a.ts "$A" "Review-Fix-Of: $CA")
+g checkout -q -B devw "$S"; RA4=$(commit src/a.ts "$A" "Review-Fix-Of: $CA
+Fixes-Finding: #4 singleton valuation one
+Fixes-Finding: #5 singleton valuation two
+Fixes-Finding: #6 batched settlement three.")
 g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
 # a production-shaped task (dev scan): every finding + the devfix reset — none of it may reach the fixer of the rest
 dev_blocked "$S" "$F4" "" run-url "Task: the blocking review stopped dev at ${S:0:9}. Findings:
@@ -415,3 +421,50 @@ grep -q 'retired keys stay' "$T/task-rest"; grep -q "^#4 → commit ${CB:0:12}" 
 ! grep -qE 'singleton valuation|batched settlement|^#[123] →|git reset --hard' "$T/task-rest" || { echo "negative check failed: the fixer got repaired findings or the devfix reset" >&2; exit 1; }
 g push -q -f origin "$S:refs/heads/dev"; g fetch -q origin
 echo 'tralyx 26b73ac1b shape: repaired findings dropped, the unrepaired one routed alone'
+
+# review of dev 973b53dd8 #1/#2: a repair naming the culprit commit proves nothing about a finding it does not declare.
+# CA introduced broken-one and broken-two; the repair fixes only broken-one (Fixes-Finding names only it); an older head's
+# review reports broken-two (on CA) and B's finding → broken-two is kept and routed to its author, B's too.
+F5="review-gate: FINDING #1 route=author commit=$CA — two defects
+review-gate: BLOCKED #1 regression [should]: broken-two still drops the row
+evidence: src/a.ts:2 broken-two
+review-gate: FINDING #2 route=author commit=$CB — b
+review-gate: BLOCKED #2 ducktape [should]: patch hides b
+evidence: src/b.ts:2 swallows the error"
+reset
+g checkout -q -B devw "$S"; RA5=$(commit src/a.ts "$A" "Review-Fix-Of: $CA
+Fixes-Finding: #1 broken-one loses the total")
+g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
+culprits_repaired "$S" "$(attribution "$S" "$F5")" "$F5" && { echo "FAIL: a repair that declares only broken-one dropped broken-two" >&2; exit 1; }
+test "$open_nums" = "1 2"
+dev_blocked "$S" "$F5" "" run-url task
+! grep -q 'dropped finding' "$LOG" 2>/dev/null || { echo "negative check failed: broken-two was dropped" >&2; exit 1; }
+grep -q 'broken-two still drops the row' "$T/msg-${A##*:}" || { echo "FAIL: A was not told broken-two" >&2; exit 1; }
+grep -q 'patch hides b' "$T/msg-${B##*:}"
+# the same repair declaring broken-two too (another round's number, "#9", and other whitespace): now it is dropped
+reset
+g checkout -q -B devw "$S"; RA6=$(commit src/a.ts "$A" "Review-Fix-Of: $CA
+Fixes-Finding: #1 broken-one loses the total
+Fixes-Finding: #9 broken-two  still drops   the row.")
+g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
+culprits_repaired "$S" "$(attribution "$S" "$F5")" "$F5"; test "$repaired_nums" = 1; test "$open_nums" = 2
+# a dispute of that very finding counts as declared; a dispute of something else does not
+reset
+g checkout -q -B devw "$S"; commit src/a.ts "$A" "Review-Fix-Of: $CA
+Review-Disputed: 1 broken-two still drops the row: the row is dropped on purpose (see docs)" >/dev/null
+g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
+culprits_repaired "$S" "$(attribution "$S" "$F5")" "$F5"; test "$repaired_nums" = 1
+reset
+g checkout -q -B devw "$S"; commit src/a.ts "$A" "Review-Fix-Of: $CA
+Review-Disputed: 1 something unrelated" >/dev/null
+g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
+if culprits_repaired "$S" "$(attribution "$S" "$F5")" "$F5"; then echo "FAIL: an unrelated dispute dropped broken-two" >&2; exit 1; fi
+# the older of two repairs declares it: still found (every effective repair is asked, not only the newest)
+reset
+g checkout -q -B devw "$S"; commit src/a.ts "$A" "Review-Fix-Of: $CA
+Fixes-Finding: #1 broken-two still drops the row" >/dev/null; commit src/a.ts "$A" "Review-Fix-Of: $CA
+Fixes-Finding: #3 something else" >/dev/null
+g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
+culprits_repaired "$S" "$(attribution "$S" "$F5")" "$F5"; test "$repaired_nums" = 1
+g push -q -f origin "$S:refs/heads/dev"; g fetch -q origin
+echo 'per-finding dupfix: only a repair that declares THAT finding (by text) drops it'
