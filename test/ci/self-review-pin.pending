@@ -2,3 +2,4 @@
 #   <suite file name> <the 40-char pin sha> <the protection that is not in the pinned snapshot yet>
 # Allowed only for that exact pin: a pin bump runs every suite against the new pin again. Keep this list empty whenever
 # the newest reviewed main carries the protection — bump the pin instead (docs/self-review.md).
+review-machinery-paths.sh 5f54f10b5372919fb5aca0c3f6e6cd59c957cd76 raw NUL-delimited, rename-free machinery paths (review of twitter-monitor 489ee563e #1) land on main first; the self-review pin bump follows

@@ -20,5 +20,10 @@ landing_machinery_files() {
     mb=$(git -C "$g" merge-base "$main" "$head") || { echo "(no merge base)"; return 0; }
     tree=$(git -C "$g" rev-parse "$head^{tree}"); main=$mb
   fi
-  git -C "$g" diff --name-only "$main" "$tree" -- 2>/dev/null | grep -E "$REVIEW_MACHINERY_RE" | sort -u || true
+  # Raw paths, both sides of a rename (review of twitter-monitor 489ee563e #1): with rename detection --name-only names
+  # only the destination (review.yml renamed out of .github/ listed nothing), and core.quotePath prints a non-ASCII
+  # path as "\346…" (a leading quote the anchored pattern never matches). -z gives each path verbatim, --no-renames
+  # a rename as its deletion + addition.
+  git -C "$g" diff --no-renames --name-only -z "$main" "$tree" -- 2>/dev/null \
+    | grep -zE "$REVIEW_MACHINERY_RE" | tr '\0' '\n' | LC_ALL=C sort -u || true
 }
