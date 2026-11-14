@@ -97,9 +97,10 @@ if of "$E11" "$F11"; then fail "a revert chain past the walk's depth counted as 
 g checkout -q dev
 echo 'a revert chain deeper than the walk: not superseded (fail closed)'
 
-# 10. (review of foxhole-backend b96e6e4ef #1/#2) real git: R reverts D on a side branch, merge M brings R in, then
-#     `git revert -m 1 M` undoes everything M brought (R) — D's exact tree is back, so D supersedes C again; without the
-#     merge revert D's change stays reverted and D does not count
+# 10. (review of foxhole-backend b96e6e4ef #1/#2) real git: R reverts D on a side branch, merge M brings R in — D does
+#     not count. Then `git revert -m 1 M` undoes everything M brought (R): D's exact tree is back, but a revert after D is
+#     never analysed any more (supervisor 11-14, eleven rounds of restoration proofs each re-check broke): still not
+#     superseded — C's range gets a full review (conservative, always safe)
 g checkout -q -b mrev "$D"; g checkout -q -b mside; g revert --no-edit HEAD >/dev/null; g checkout -q mrev
 W1=$(c "mainline work" '' devfile5); g merge -q --no-ff -m "merge mside" mside; M=$(git rev-parse HEAD)
 E12=$(c "E12 (blocked)" '' devfile3); F12=$(c "fix of E12" "Review-Fix-Of: $E12" devfile3)
@@ -111,9 +112,9 @@ git diff --quiet "$D" HEAD -- devfile2 || fail "fixture: the merge revert did no
 E13=$(c "E13 (blocked)" '' devfile3); F13=$(c "fix of E13" "Review-Fix-Of: $E13" devfile3)
 reset; run 1 "review $C" success failure "$P" '' blocked; run 2 "review $D" success success "$P"; pass_log 2 "$P" "$D"
 run 3 "review $E13" success failure "$(git rev-parse "$E13^")" '' blocked
-of "$E13" "$F13" || fail "reverting the merge that brought in D's revert did not restore D's supersession"
+if of "$E13" "$F13"; then fail "a revert after D (here: a merge revert restoring D) still let D supersede C"; fi
 g checkout -q dev
-echo 'a merge revert (-m 1) of the merge that brought in the revert restores the supersession'
+echo 'a merge revert (-m 1) of the merge that brought in the revert: still a full review (no restoration proofs)'
 
 # 6. a crash (no verdict) of D never supersedes
 reset; run 1 "review $C" success failure "$P" '' blocked; run 2 "review $D" success failure "$P"   # no BLOCKED line: crash

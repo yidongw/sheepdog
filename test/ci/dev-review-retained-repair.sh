@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# A merge undo's equivalent repair must survive all the way to the candidate.
+# Retained / restored repairs after reverts: every history here has a revert AFTER the passing review D (a merge undo,
+# a revert of a revert, a reverted sibling, …). These fixtures were added by thirteen rounds (11-13 17:08Z → 11-14, the
+# last d04a520aa: renamed / chained / scoped restorations, and ee438bc0e: composed restorations, blocked-round
+# replacements) that tried to prove D's reviewed contribution still stands; each
+# re-check found another case the proof got wrong. The rule is now the conservative one (dev-review-base.sh review_stands,
+# supervisor 11-14): any revert after D → D does not supersede the blocked C → C's range gets a full review. So every
+# fixture with a revert after D expects a full review (1) — the ones that used to expect a tests-only round (restorations, retained
+# equivalents, renamed contributions, reviewed replacements) included. Supersession without reverts (liveness):
+# dev-review-supersession-reverts.sh and the "control" of blocked_replacement_cases.
 set -euo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"
 . "$(dirname "$0")/../../scripts/ci/test-review-fixtures.sh"
@@ -92,11 +100,11 @@ composed_restoration_cases() {
     U=$(git rev-parse HEAD)
     git diff --exit-code "$D" "$U" || fail 'composed undo must restore the exact approved tree'
     [ "$(git diff --name-only "$S" "$U")" = b ] || fail 'clean undo must change only the remaining file'
-    approval 0 "$mode clean undo completes independent restoration"
+    approval 1 "$mode clean undo completes independent restoration"
     g revert --no-edit "$U" >/dev/null
     approval 1 "$mode completed restoration removed again"
     g revert --no-edit HEAD >/dev/null
-    approval 0 "$mode completed restoration reinstated"
+    approval 1 "$mode completed restoration reinstated"
   done
   echo 'exercised: composed restoration through both approval consumers'
 }
@@ -132,7 +140,7 @@ blocked_replacement_cases() {
       g checkout -q --detach "$F"
       H=$F; base=$E; expected=1
       case "$variant" in
-        valid) expected=0 ;;
+        valid) [ "$mode" = control ] && expected=0 ;;   # control: no revert after D → D still supersedes C
         unrepaired)
           g commit -q --amend -m 'refinement without a repair trailer'; H=$(git rev-parse HEAD) ;;
       esac
@@ -210,10 +218,10 @@ unrelated_rename_cases() {
     M=$(git rev-parse HEAD)
     g revert --no-edit -m "$mainline" "$M" >/dev/null
     git diff --exit-code "$D" HEAD || fail 'unrelated merge undo must retain exactly D'
-    approval 0 "sibling rename mainline $mainline reviewed tree retained after undo"
+    approval 1 "sibling rename mainline $mainline reviewed tree retained after undo"
     commit_file 'edit unrelated sibling rename destination' unrelated-update unrelated >/dev/null
     [ "$(head -1 old)" = better ] || fail 'unrelated edit must retain the reviewed repair'
-    approval 0 "sibling rename mainline $mainline unrelated edit preserves reviewed repair"
+    approval 1 "sibling rename mainline $mainline unrelated edit preserves reviewed repair"
     commit_file 'remove reviewed repair after unrelated edit' "$old" old >/dev/null
     approval 1 "sibling rename mainline $mainline missing reviewed repair rejected"
   done
@@ -254,7 +262,7 @@ rename_cases() {
       M=$(git rev-parse HEAD)
       g revert --no-edit -m "$mainline" "$M" >/dev/null
       git diff --exit-code "$D" HEAD || fail 'shared rename undo must retain exactly D'
-      approval 0 "$mode rename mainline $mainline complete reviewed tree retained"
+      approval 1 "$mode rename mainline $mainline complete reviewed tree retained"
 
       L=$(commit_file 'separately reviewed renamed repair update' "${old/old/newer}" "$file")
       g mv "$file" replacement
@@ -262,7 +270,7 @@ rename_cases() {
       approval 1 "$mode rename mainline $mainline unreviewed replacement"
       updates=("$L")
       approval 1 "$mode rename mainline $mainline replacement lacks proof" missing-proof
-      approval 0 "$mode rename mainline $mainline reviewed replacement follows rename"
+      approval 1 "$mode rename mainline $mainline reviewed replacement follows rename"
       updates=()
 
       g checkout -q --detach "$D"
@@ -335,12 +343,12 @@ scoped_restoration_cases() {
         g add "$file"; g revert --continue >/dev/null
         V=$(git rev-parse HEAD)
         git diff --exit-code "$D" HEAD || fail 'contextual undo must restore exactly D'
-        approval 0 "$repair $unrelated mainline $mainline only approved contribution restored"
+        approval 1 "$repair $unrelated mainline $mainline only approved contribution restored"
         g revert --no-edit "$V" >/dev/null
         approval 1 "$repair $unrelated mainline $mainline scoped restoration removed again"
         g revert --no-edit HEAD >/dev/null
         git diff --exit-code "$D" HEAD || fail 'second contextual undo must restore D'
-        approval 0 "$repair $unrelated mainline $mainline scoped restoration restored again"
+        approval 1 "$repair $unrelated mainline $mainline scoped restoration restored again"
       done
     done
   done
@@ -356,12 +364,8 @@ case "$focus" in
     exit 0 ;;
 esac
 
-# Machine-consumed diffs must retain gitlinks and contain an applicable patch
-# even when the candidate selects ignored submodules or forced diff coloring.
-scoped_proof() (
-  source <(sed -n '/^preserves_patch()/,/^restores_patch()/ { /^restores_patch()/!p; }' "$CI/dev-review-base.sh")
-  preserves_patch "$@"
-)
+# Submodules (gitlinks, ignore=all) and forced diff coloring used to be able to fool the patch proofs; with no content
+# proofs left, these histories (each with a revert after D) simply get a full review.
 proof_input_cases() {
   local kind=$1 mainline A Q side other M U removed s0 s1 s2 mode path
   for mode in tracked configured; do
@@ -389,16 +393,6 @@ proof_input_cases() {
       D=$(commit_file 'reviewed refinement for colored proof' better bug)
       git config color.ui always
     fi
-    # Check the scoped primitive as well as the consumers. Other constituent
-    # guards can reject the same endpoint while this projection silently
-    # drops its patch (color prefixes or diff.submodule=log display output).
-    path=bug
-    [ "$kind" != submodule ] || path=module
-    scoped_proof "$C" "$D" "$D" "$path" || fail 'scoped proof rejected its approved result'
-    if scoped_proof "$C" "$D" "$C" "$path"; then
-      echo "FAIL: $kind $mode scoped proof accepted the blocked baseline" >&2
-      bad=1
-    fi
     side=$(commit_file 'unrelated file beside refinement' side side)
     for mainline in 1 2; do
       g checkout -q --detach "$C"
@@ -416,7 +410,7 @@ proof_input_cases() {
       U=$(git rev-parse HEAD)
       approval 1 "$kind $mode mainline $mainline obsolete initial repair"
       g revert --no-edit "$U" >/dev/null
-      approval 0 "$kind $mode mainline $mainline reviewed refinement restored"
+      approval 1 "$kind $mode mainline $mainline reviewed refinement restored"
       # The removal of Q conflicts with D's refinement. Resolve to the blocked
       # state, retaining Git's genuine revert message for the equivalent repair.
       if g revert --no-edit "$Q" >"$T/revert.out" 2>&1; then fail 'expected refinement removal conflict'; fi
@@ -430,7 +424,7 @@ proof_input_cases() {
       git diff --quiet --ignore-submodules=none "$C" HEAD -- bug module || fail 'candidate must contain the blocked state'
       approval 1 "$kind $mode mainline $mainline removed equivalent repair"
       g revert --no-edit "$removed" >/dev/null
-      approval 0 "$kind $mode mainline $mainline equivalent repair restored again"
+      approval 1 "$kind $mode mainline $mainline equivalent repair restored again"
 
       if [ "$kind" = submodule ]; then
         # A direct undo must recognize a nonempty gitlink delta despite ignore.
@@ -439,7 +433,7 @@ proof_input_cases() {
         U=$(git rev-parse HEAD)
         approval 1 "$kind $mode direct revert of refinement"
         g revert --no-edit "$U" >/dev/null
-        approval 0 "$kind $mode direct restoration of refinement"
+        approval 1 "$kind $mode direct restoration of refinement"
       fi
     done
     git config --unset-all color.ui || true
@@ -484,15 +478,15 @@ shared_contribution_cases() {
       M=$(git rev-parse HEAD)
       g revert --no-edit -m "$mainline" "$M" >/dev/null
       git diff --quiet --ignore-submodules=none "$D" HEAD || fail 'merge undo must retain exactly the reviewed tree'
-      approval 0 "shared $sharing mainline $mainline complete reviewed tree retained"
+      approval 1 "shared $sharing mainline $mainline complete reviewed tree retained"
       g revert --no-edit "$Z" >/dev/null
       removed=$(git rev-parse HEAD)
       [ "$(cat bug)" = good ] && [ "$(cat extra)" = broken ] || fail 'shared repair removal fixture is wrong'
       approval 1 "shared $sharing mainline $mainline equivalent of shared repair removed"
       g revert --no-edit "$removed" >/dev/null
-      approval 0 "shared $sharing mainline $mainline shared repair restored"
+      approval 1 "shared $sharing mainline $mainline shared repair restored"
       updates=("$(commit_file 'later reviewed shared repair refinement' better extra)")
-      approval 0 "shared $sharing mainline $mainline independently reviewed replacement"
+      approval 1 "shared $sharing mainline $mainline independently reviewed replacement"
     done
   done
   echo 'exercised: shared reviewed contributions through candidate head'
@@ -540,7 +534,7 @@ restoration_cases() {
 
     g checkout -q --detach "$U"
     g revert --no-edit "$U" >/dev/null
-    approval 0 "mainline $mainline complete direct restoration"
+    approval 1 "mainline $mainline complete direct restoration"
 
     # Restore U by undoing a merge which introduced it from the other parent.
     g checkout -q --detach "$D"
@@ -551,7 +545,7 @@ restoration_cases() {
     g revert --no-edit -m "$mainline" "$N" >/dev/null
     V=$(git rev-parse HEAD)
     [ "$(cat bug)" = "$fixed" ] || fail 'merge undo did not restore both defect lines'
-    approval 0 "mainline $mainline complete merge restoration"
+    approval 1 "mainline $mainline complete merge restoration"
 
     # #3: reachability of V is insufficient after a conflict resolution drops it.
     g checkout -q --detach "$U"
@@ -568,7 +562,7 @@ restoration_cases() {
     approval 1 "mainline $mainline unreviewed replacement of restored repair"
     updates=("$L")
     approval 1 "mainline $mainline replacement lacks attestation" missing-proof
-    approval 0 "mainline $mainline reviewed replacement of restored repair"
+    approval 1 "mainline $mainline reviewed replacement of restored repair"
     updates=()
 
     # #4: adjacent metadata makes the endpoint proof for undoing V conflict.
@@ -582,7 +576,7 @@ restoration_cases() {
     merged=$(git rev-parse HEAD)
     approval 1 "mainline $mainline ambiguous adjacent restoration requires review"
     updates=("$merged")
-    approval 0 "mainline $mainline independently reviewed adjacent restoration"
+    approval 1 "mainline $mainline independently reviewed adjacent restoration"
     updates=()
     g revert --no-edit -m 1 "$merged" >/dev/null
     [ "$(cat bug)" = "$broken"$'\nmetadata' ] || fail 'merge undo did not remove the repair beside metadata'
@@ -619,12 +613,12 @@ for mainline in 1 2; do
   g revert --no-edit -m "$mainline" "$M" >/dev/null
   U=$(git rev-parse HEAD)
   git diff --exit-code "$D" "$U" || fail 'merge undo did not retain the complete repair'
-  approval 0 "mainline $mainline retained repair"
+  approval 1 "mainline $mainline retained repair"
 
   # Unrelated same-file changes at the candidate cannot invalidate the patch.
   printf 'candidate metadata\n' >> bug
   g add bug; g commit -q -m 'unrelated same-file change after the merge undo'
-  approval 0 "mainline $mainline retained repair with later metadata"
+  approval 1 "mainline $mainline retained repair with later metadata"
 
   g revert --no-edit "$Q" >/dev/null
   removed=$(git rev-parse HEAD)
@@ -639,7 +633,7 @@ for mainline in 1 2; do
 
   g revert --no-edit "$removed" >/dev/null
   [ "$(head -1 bug)" = good ] || fail 'reverting Q removal did not restore the repair'
-  approval 0 "mainline $mainline equivalent repair restored at candidate"
+  approval 1 "mainline $mainline equivalent repair restored at candidate"
   echo "ok: mainline $mainline tracks equivalent repair through the candidate head"
 done
 
@@ -680,12 +674,12 @@ for cancellation in full partial; do
     g revert --no-edit "$U" >/dev/null
     V=$(git rev-parse HEAD)
     git diff --exit-code "$D" "$V" || fail 'undoing the undo did not restore the reviewed tree'
-    approval 0 "$cancellation cancellation, mainline $mainline approved cancellation restored exactly"
+    approval 1 "$cancellation cancellation, mainline $mainline approved cancellation restored exactly"
 
     # Exact tree equality is not the rule: independent hunks may differ at head.
     printf 'candidate metadata\n' >> bug
     g add bug; g commit -q -m 'unrelated metadata after restoring the approved cancellation'
-    approval 0 "$cancellation cancellation, mainline $mainline approved cancellation restored with metadata"
+    approval 1 "$cancellation cancellation, mainline $mainline approved cancellation restored with metadata"
 
     # Restoring the cancelled constituent again must invalidate D's evidence.
     g revert --no-edit "$V" >/dev/null
@@ -721,11 +715,11 @@ for mainline in 1 2; do
   g revert --no-edit "$U" >/dev/null
   V=$(git rev-parse HEAD)
   git diff --exit-code "$D" "$V" || fail 'undoing the undo did not restore the reviewed refinement'
-  approval 0 "refinement, mainline $mainline approved result restored exactly"
+  approval 1 "refinement, mainline $mainline approved result restored exactly"
 
   printf 'candidate metadata\n' >> bug
   g add bug; g commit -q -m 'unrelated metadata after restoring the reviewed refinement'
-  approval 0 "refinement, mainline $mainline approved result restored with metadata"
+  approval 1 "refinement, mainline $mainline approved result restored with metadata"
 
   g revert --no-edit "$V" >/dev/null
   [ "$(head -1 bug)" = fixed ] || fail 'reverting restoration did not remove the reviewed refinement'
@@ -765,16 +759,16 @@ for contribution in separate-path shared-path; do
     g revert --no-edit "$U" >/dev/null
     V=$(git rev-parse HEAD)
     git diff --exit-code "$D" "$V" || fail 'restored tree differs from reviewed D'
-    approval 0 "$contribution mainline $mainline exact D restored"
+    approval 1 "$contribution mainline $mainline exact D restored"
 
     L=$(commit_file 'separately reviewed config update' 2 config)
     updates=("$L")
-    approval 0 "$contribution mainline $mainline later reviewed config update"
+    approval 1 "$contribution mainline $mainline later reviewed config update"
 
     # A second review has its own incremental range, not D..L2.
     L2=$(commit_file 'another separately reviewed config update' 3 config)
     updates+=("$L2")
-    approval 0 "$contribution mainline $mainline two linked reviewed updates"
+    approval 1 "$contribution mainline $mainline two linked reviewed updates"
 
     if ! g revert --no-edit "$Q" >/dev/null; then
       [ "$contribution" = shared-path ] || fail 'unexpected repair removal conflict'
@@ -794,9 +788,9 @@ for contribution in separate-path shared-path; do
     approval 1 "$contribution mainline $mainline gapped replacement review" gap
     approval 1 "$contribution mainline $mainline replacement without proof" missing-proof
     approval 1 "$contribution mainline $mainline crashed replacement review" crash
-    approval 0 "$contribution mainline $mainline later reviewed replacement repair"
+    approval 1 "$contribution mainline $mainline later reviewed replacement repair"
     g revert --no-edit "$L" >/dev/null
-    approval 0 "$contribution mainline $mainline original approved repair restored"
+    approval 1 "$contribution mainline $mainline original approved repair restored"
     if ! g revert --no-edit "$Q" >/dev/null; then
       [ "$contribution" = shared-path ] || fail 'unexpected repair removal conflict'
       g checkout --ours -- config
@@ -831,11 +825,11 @@ for mainline in 1 2; do
   U=$(git rev-parse HEAD)
   g revert --no-edit "$U" >/dev/null
   git diff --exit-code "$D" HEAD || fail 'reverting the undo did not restore D exactly'
-  approval 0 "feature mainline $mainline exact D restored" '' later-round
+  approval 1 "feature mainline $mainline exact D restored" '' later-round
 
   Z=$(commit_file 'separately reviewed unrelated version update' version-two later)
   updates=("$Z")
-  approval 0 "feature mainline $mainline independently reviewed version-two survives" '' later-round
+  approval 1 "feature mainline $mainline independently reviewed version-two survives" '' later-round
   [ "$(cat bug)" = good ] || fail 'fixture lost the passing repair'
   [ "$(cat feature)" = feature-present ] || fail 'fixture lost the retained feature'
   [ "$(cat later)" = version-two ] || fail 'repair round overwrote the reviewed update'
