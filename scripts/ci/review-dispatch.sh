@@ -2308,11 +2308,11 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
     if dinfra=$(review_infra_reason "$f"); then dev_infra "$sha" "$rid" "$dinfra"; continue; fi
     # findings whose culprit is on main are main's: recorded, never routed on $DEV (no fixer, round, notice or revert clock)
     fall=$f; f=$dev_f
-    if review_jobs "$rid" | jq -e '[.jobs[]? | select((.name | sub("^.* / "; "")) == "tests" and .conclusion == "cancelled")] | length > 0' >/dev/null; then
-      dev_infra "$sha" "$rid" "tests were terminally cancelled; rerun the failed jobs to recover this review"
-      continue
-    fi
     if [ -z "$(tr -d '[:space:]' <<<"$f")" ]; then
+      if review_jobs "$rid" | jq -e '[.jobs[]? | select((.name | sub("^.* / "; "")) == "tests" and .conclusion == "cancelled")] | length > 0' >/dev/null; then
+        dev_infra "$sha" "$rid" "tests were terminally cancelled; rerun the failed jobs to recover this review"
+        continue
+      fi
       if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$sha.mainonly-wait.$rid" ]; then
         log "$DEV ${sha:0:9}: run $rid blocked only by pre-existing main finding(s) ($main_nums) but not approved (yet) — nothing of $DEV's to route; no fixer, no revert clock"
         touch "$STATE/sent/$sha.mainonly-wait.$rid"
