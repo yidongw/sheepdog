@@ -2053,9 +2053,11 @@ Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). You
       # blocked only by pre-existing main findings (dev_split_main) → a candidate like a passing review
       trid=$(review_list 100 databaseId,displayTitle,status,conclusion \
              ".[] | select(.status == \"completed\" and .conclusion == \"failure\" and .displayTitle == \"review $tsha\") | .databaseId" | head -1)
-      [ -n "$trid" ] && [ ! -e "$STATE/sent/$tsha.nomain-$trid" ] || continue
+      [ -n "$trid" ] || continue
       dev_split_main "$tsha" "$trid" "$(findings "$trid")"
-      if [ "$main_only" != 1 ]; then [ -n "$main_nums" ] || touch "$STATE/sent/$tsha.nomain-$trid"; continue; fi
+      # Evidence can be temporarily unavailable or change on a rerun. Reclassify
+      # every attempt rather than persisting a negative result by run id.
+      if [ "$main_only" != 1 ]; then continue; fi
       rp_main=1
     fi
     : > "$STATE/train.kind"
