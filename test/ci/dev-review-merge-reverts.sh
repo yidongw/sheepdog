@@ -48,6 +48,78 @@ PIN=source
   only_fixes "$E" "$F" || fail 'reverting the revert did not restore valid supersession'
   echo 'ok: reverting the revert restores the evidence'
 
+  # D is introduced topologically, but its patch already lives on the retained
+  # mainline as Q. Reverting M must remove only the unrelated side change.
+  saved_C=$C; saved_D=$D
+  g checkout -q --detach "$C"
+  C=$(commit_file 'blocked repair with stable context' $'broken\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12' bug)
+  reviewed_content=$'good\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12'
+  D=$(commit_file 'passing repair with stable context' "$reviewed_content" bug)
+  for mainline in 1 2; do
+    for unrelated in separate-file same-file; do
+      g checkout -q --detach "$D"
+      if [ "$unrelated" = same-file ]; then
+        printf '%s\nside\n' "$reviewed_content" > bug
+        g add bug; g commit -q -m 'unrelated hunk beside the repair'
+        side=$(git rev-parse HEAD)
+      else
+        side=$(commit_file 'unrelated side file' side side)
+      fi
+      g checkout -q --detach "$C"
+      g cherry-pick "$D" >/dev/null
+      g commit -q --amend -m 'equivalent repair on the retained mainline'
+      Q=$(git rev-parse HEAD)
+      if git merge-base --is-ancestor "$D" "$Q"; then fail 'cherry-pick must be a sibling, not D itself'; fi
+      if [ "$mainline" = 2 ]; then g checkout -q --detach "$side"; side=$Q; fi
+      g merge -q --no-ff -m 'merge a repair already cherry-picked' "$side"
+      M=$(git rev-parse HEAD)
+      g revert --no-edit -m "$mainline" "$M" >/dev/null
+      git diff --exit-code "$D" HEAD || fail 'equivalent repair did not retain the reviewed tree'
+      repair_round
+      only_fixes "$E" "$F" || fail "mainline $mainline $unrelated revert invalidated a retained repair"
+      echo "ok: mainline $mainline $unrelated merge revert preserves equivalent repair"
+    done
+  done
+
+  # The retained tree may also have edits outside the reviewed patch. Do not
+  # require whole-tree equality with D, or even equality of its entire file.
+  g checkout -q --detach "$D"
+  printf '%s\nside\n' "$reviewed_content" > bug
+  g add bug; g commit -q -m 'side hunk'
+  side=$(git rev-parse HEAD)
+  g checkout -q --detach "$C"
+  g cherry-pick "$D" >/dev/null
+  g commit -q --amend -m 'equivalent repair on the retained mainline'
+  printf '%s\n' "${reviewed_content/4/mainline}" > bug
+  g add bug; g commit -q -m 'keep a separate mainline hunk'
+  Q=$(git rev-parse HEAD)
+  g merge -q --no-ff -m 'merge independent same-file hunks' "$side"
+  M=$(git rev-parse HEAD)
+  g revert --no-edit -m 1 "$M" >/dev/null
+  git diff --exit-code "$Q" HEAD || fail 'same-file fixture did not restore the retained mainline'
+  repair_round
+  only_fixes "$E" "$F" || fail 'an unrelated retained hunk invalidated a surviving repair'
+  echo 'ok: patch preservation permits unrelated retained edits in the same file'
+
+  # Preserving only one part of the reviewed patch is insufficient. The merge
+  # supplies the other repaired file, so its revert must invalidate the pass.
+  g checkout -q --detach "$C"
+  C=$(commit_file 'second blocked file' broken second)
+  printf '%s\n' "$reviewed_content" > bug
+  printf 'good\n' > second
+  g add bug second; g commit -q -m 'passing repair of both files'
+  D=$(git rev-parse HEAD)
+  g checkout -q --detach "$C"
+  Q=$(commit_file 'retain only the first repair' "$reviewed_content" bug)
+  g merge -q --no-ff -m 'merge the rest of the repair' "$D"
+  M=$(git rev-parse HEAD)
+  g revert --no-edit -m 1 "$M" >/dev/null
+  git diff --exit-code "$Q" HEAD || fail 'partial preservation did not restore its mainline'
+  repair_round
+  if only_fixes "$E" "$F"; then fail 'partial preservation counted as the complete reviewed repair'; fi
+  echo 'ok: removing part of the reviewed repair requires a full review'
+  C=$saved_C; D=$saved_D
+
   # Git's restoring commit names a merge, rather than the revert it introduced.
   g checkout -q --detach "$D"
   g merge -q --no-ff -m 'merge the revert' "$R"
