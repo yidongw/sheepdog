@@ -37,7 +37,7 @@ print(s[a:s.index('\ndone\n', a) + 6])
 PY
 )
 eval "$helpers"
-for f in recheck_prereview_failed main_infra dispute_only; do declare -F "$f" >/dev/null || fail "missing $f"; done
+for f in recheck_infra_failed main_infra dispute_only; do declare -F "$f" >/dev/null || fail "missing $f"; done
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 SRC=$T/src STATE=$T/state MAIN=main DEV=dev REPO=test/repo AUTHOR_FIX_WINDOW_SEC=3600 FIXER_GATE=$T/state/fixer-gate
 SUPERVISOR_THREAD=import:claudeAgent:sup DISPATCH_THREAD=mcp:77777777-7777-7777-7777-777777777777 key_prefix=""
@@ -75,6 +75,12 @@ addrun() { # addrun <id> <sha> <kind: pass|range|gates|blocked|running>
     blocked) echo '{"jobs":[{"name":"tests","id":'"$1"'0,"conclusion":"success"},{"name":"review","id":'"$1"'1,"conclusion":"failure","steps":[{"name":"Reviewed range","conclusion":"success"},{"name":"Review (blocking; x)","conclusion":"failure"}]}]}' > "$T/jobs-$1"
              echo failure > "$T/concl-$1"
              printf '2026-11-14T00:00:00Z review-range: %s %s\n2026-11-14T00:00:00Z review-gate: FINDING #1 route=fixer commit=- — x\n2026-11-14T00:00:00Z review-gate: BLOCKED #1 regression [should]: c drops rows\n2026-11-14T00:00:00Z evidence: src/c.ts:1 x\n' "$4" "$2" > "$T/log-$1" ;;
+    reviewer) echo '{"jobs":[{"name":"tests","id":'"$1"'0,"conclusion":"success"},{"name":"review","id":'"$1"'1,"conclusion":"failure","steps":[{"name":"Reviewed range","conclusion":"success"},{"name":"Review (blocking; x)","conclusion":"failure"}]}]}' > "$T/jobs-$1"
+              echo failure > "$T/concl-$1"
+              printf '2026-11-14T00:00:00Z review-range: %s %s\n2026-11-14T00:00:00Z review-gate: prior round — fixes of abc\n2026-11-14T00:00:00Z review-gate: reviewer failed: spawn E2BIG\n2026-11-14T00:00:01Z ##[error]Process completed with exit code 2.\n' "$4" "$2" > "$T/log-$1" ;;
+    reviewer-tests) echo '{"jobs":[{"name":"tests","id":'"$1"'0,"conclusion":"failure"},{"name":"review","id":'"$1"'1,"conclusion":"failure","steps":[{"name":"Reviewed range","conclusion":"success"},{"name":"Review (blocking; x)","conclusion":"failure"}]}]}' > "$T/jobs-$1"
+              echo failure > "$T/concl-$1"
+              printf '2026-11-14T00:00:00Z review-range: %s %s\n2026-11-14T00:00:00Z review-gate: reviewer failed: spawn E2BIG\n' "$4" "$2" > "$T/log-$1" ;;
     running) echo '{"jobs":[]}' > "$T/jobs-$1"; echo null > "$T/concl-$1" ;;
   esac
   printf '%s\n' "$runs" > "$T/runs.json"; hotfix_runs=""; rc_heads=(); rc_heads_built=""; cov_base=()
@@ -258,4 +264,30 @@ echo "$H17 17" > "$ef"   # interrupted right after switching the episode file
 eval "$loop"
 test "$(sent_n)" = 2 && sed -n 2p "$T/sent" | grep -q "^$H17 infra\." || fail "the new episode was acknowledged by the old receipt: $(cat "$T/sent")"
 echo 'receipts are bound to their episode head and run'
+# 15. (tralyx dev 9ef7d5d06, 11-14) the blocking step ran but the REVIEWER did not ("review-gate: reviewer failed: spawn E2BIG",
+#     no finding): infrastructure as well — the supervisor once (step + the reviewer's failure + the rerun command), no owner,
+#     no fixer, the head stays open; a later completed review settles it. Control: the same line next to failed trusted tests
+#     is a finding (the tests are), as before.
+fresh; SKIP=" "
+H18=$(commit src/n.ts "Hotfix: n
+Thread: $A"); push; addrun 18 "$H18" reviewer "$(git -C "$SRC" rev-parse "$H18^")"
+eval "$loop"; eval "$loop"
+test ! -e "$T/woken" || fail "a fixer was woken for a reviewer that did not run: $(cat "$T/woken")"
+test "$(sent_n)" = 1 && grep -q "^$H18 infra\.Review__blocking__x_ $SUPERVISOR_THREAD$" "$T/sent" || fail "reviewer failure: not one supervisor alert: $(cat "$T/sent" 2>/dev/null) $(tail -3 "$LOG")"
+m=$T/msg-$(cut -d' ' -f2 "$T/sent")
+grep -q 'review job step: Review (blocking; x) — reviewer failed: spawn E2BIG' "$m" || fail "the alert does not name the reviewer's failure: $(cat "$m")"
+grep -q "gh run rerun 18 -R test/repo --failed" "$m" || fail "the alert has no rerun command: $(cat "$m")"
+test ! -e "$STATE/sent/$H18.hotfix-complete" || fail "a head whose reviewer never ran was completed"
+if grep -q "mainowner" "$T/sent"; then fail "the owner was woken for a reviewer failure"; fi
+H19=$(dispute "$H18"); push; addrun 19 "$H19" reviewer "$H18"
+eval "$loop"
+test "$(sent_n)" = 1 && test ! -e "$T/woken" || fail "the reviewer episode was alerted twice: $(cat "$T/sent")"
+addrun 18 "$H18" pass "$(git -C "$SRC" rev-parse "$H18^")"; addrun 19 "$H19" pass "$(git -C "$SRC" rev-parse "$H18^")"   # reruns after the fix
+eval "$loop"
+test -e "$STATE/sent/$H18.hotfix-complete" && test -e "$STATE/sent/$H19.hotfix-complete" || fail "the reruns did not settle the heads"
+H20=$(commit src/o.ts "Hotfix: o
+Thread: $A"); push; addrun 20 "$H20" reviewer-tests "$H19"
+eval "$loop"
+grep -q "^$H20 mainowner\." "$T/sent" || fail "control: failed trusted tests next to a reviewer failure are no longer a finding: $(cat "$T/sent")"
+echo 'reviewer did not run (in the blocking step): infrastructure, supervisor once, no owner / fixer; failed tests stay a finding'
 echo 'pre-review re-check failures checks passed'

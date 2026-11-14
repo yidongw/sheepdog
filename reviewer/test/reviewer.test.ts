@@ -22,15 +22,17 @@ import {
 } from "../src/reviewer.ts";
 
 it("builds read-only and auto-fix Codex reviewer invocations", () => {
-  const readOnly = codexReviewerArgs("review", {});
+  const readOnly = codexReviewerArgs({});
   expect(readOnly).toContain("gpt-6.1-sol");
   expect(readOnly).toContain('model_reasoning_effort="high"');
   expect(readOnly).toEqual(expect.arrayContaining(["--sandbox", "read-only"]));
   // Fail-loud: the cwd is always a git worktree (rev-parse runs there first), so
   // never skip codex's repo check — a non-repo cwd must abort, not review garbage.
   expect(readOnly).not.toContain("--skip-git-repo-check");
+  // the prompt is never an argument (MAX_ARG_STRLEN): codex reads it from stdin
+  expect(readOnly.at(-1)).toBe("-");
   // The external Docker boundary owns filesystem enforcement for report-only runs.
-  const external = codexReviewerArgs("review", {}, [], true);
+  const external = codexReviewerArgs({}, [], true);
   expect(external).toContain("--dangerously-bypass-approvals-and-sandbox");
   expect(external).not.toContain("--dangerously-bypass-hook-trust");
   expect(external).not.toEqual(expect.arrayContaining(["--sandbox", "read-only"]));
@@ -60,6 +62,8 @@ it("isolated (untrusted PR) mode: no network, no credentials, no data dir, socke
   const args = codexReadOnlyDockerArgs("codex", ["exec", "review"], process.cwd(), env, "t", { socketDir: "/tmp/gw", port: 3425, configPath: clean });
   const joined = args.join(" ");
   expect(args[args.indexOf("--network") + 1]).toBe("none");
+  expect(args.slice(0, 2)).toEqual(["run", "-i"]); // stdin carries the prompt; no -t
+  expect(args).not.toContain("-t");
   expect(joined).not.toContain("auth.json");
   expect(args).not.toContain("GATEWAY_TOKEN");
   expect(args).not.toContain("OPENAI_API_KEY");

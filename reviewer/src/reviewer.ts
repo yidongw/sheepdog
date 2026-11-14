@@ -378,8 +378,11 @@ export interface ReviewerRunResult {
   timedOut: boolean;
 }
 
+/** codex exec's argv. The prompt is NEVER an argument: it goes to the process's stdin (`-`, see runReviewerProcess's
+ *  `input`). Linux caps one argv string at MAX_ARG_STRLEN (128 KiB) whatever ARG_MAX is, and a long dev range plus the
+ *  prior round's findings passed it — "reviewer failed: spawn E2BIG", the review never started (tralyx dev 9ef7d5d06,
+ *  2026-11-14). */
 export function codexReviewerArgs(
-  prompt: string,
   env: NodeJS.ProcessEnv = process.env,
   configOverrides: string[] = [],
   /** The process is inside the read-only Docker boundary built below. Codex's own
@@ -405,7 +408,7 @@ export function codexReviewerArgs(
     `model_reasoning_effort=${JSON.stringify(env.CODEREVIEW_EFFORT ?? REVIEWER_EFFORT)}`,
     ...configOverrides,
     ...accessArgs,
-    prompt,
+    "-",
   ];
 }
 
@@ -483,7 +486,8 @@ export function codexReadOnlyDockerArgs(
   // No network, no provider credentials, no auth.json: the model endpoint is reached through the socket relay, which
   // adds the bearer token on the host side.
   const args = [
-    "run", "--rm", "--pull=never", "--name", containerName,
+    // -i: the prompt arrives on stdin (codexReviewerArgs); stdin is the only input channel added, still no tty.
+    "run", "-i", "--rm", "--pull=never", "--name", containerName,
     "--network", "none", "--read-only", "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges", "--pids-limit", "512",
     "--tmpfs", `/tmp:rw,nosuid,nodev,size=512m,uid=${uid},gid=${gid},mode=1777`,
@@ -518,7 +522,8 @@ export function codexReadOnlyDockerArgs(
   // Inside the network-less container, re-expose the model endpoint on its usual loopback port, relayed over the
   // mounted unix socket (host /usr provides socat).
   args.push(...dockerBind(isolated.socketDir, "/run/review-gw"));
-  const relay = `socat TCP-LISTEN:${isolated.port},bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/review-gw/gw.sock`;
+  // socat never reads the container's stdin: that is codex's prompt.
+  const relay = `socat TCP-LISTEN:${isolated.port},bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/review-gw/gw.sock </dev/null`;
   return [
     ...args,
     "-w", cwd,
@@ -662,7 +667,7 @@ export async function runHeadlessReviewer(
     const relay = await startHostRelay(port, spawnEnv.CODEREVIEW_CODEX_HOME ?? spawnEnv.CODEX_HOME ?? "");
     stopRelay = relay.stop;
     const reviewerBinary = spawnEnv.CODEREVIEW_CODEX_BIN ?? spawnEnv.CODEREVIEW_BIN ?? "codex";
-    const reviewerArgs = codexReviewerArgs(prompt, spawnEnv, ["--config", "project_doc_max_bytes=0"], true);
+    const reviewerArgs = codexReviewerArgs(spawnEnv, ["--config", "project_doc_max_bytes=0"], true);
     const containerName = `sheepdog-review-${process.pid}-${Date.now()}`;
     const docker = spawnEnv.CODEREVIEW_DOCKER_BIN ?? "docker";
     const pinFiles = opts?.pin && buildPinBumpBlock(opts.pin) ? [opts.pin.diffFile, opts.pin.logFile] : [];
@@ -670,7 +675,8 @@ export async function runHeadlessReviewer(
     const cleanupContainer = () => {
       spawnSync(docker, ["rm", "-f", containerName], { env: spawnEnv, stdio: "ignore", timeout: 10_000 });
     };
-    return await runReviewerProcess(docker, workerArgs, cwd, spawnEnv, timeoutMs, "codex", cleanupContainer);
+    assertSmallArgv(workerArgs);
+    return await runReviewerProcess(docker, workerArgs, cwd, spawnEnv, timeoutMs, "codex", cleanupContainer, prompt);
   } catch (e) {
     return { stdout: "", error: (e as Error).message, timedOut: false };
   } finally {
@@ -678,8 +684,17 @@ export async function runHeadlessReviewer(
   }
 }
 
+/** Data never travels in argv (MAX_ARG_STRLEN = 128 KiB per string on Linux): fail with a clear message before spawn
+ *  rather than "spawn E2BIG" if a future argument grows unbounded. */
+export const MAX_REVIEWER_ARG_BYTES = 16 * 1024;
+export function assertSmallArgv(args: string[]): void {
+  const big = args.find((a) => Buffer.byteLength(a) > MAX_REVIEWER_ARG_BYTES);
+  if (big != null) throw new Error(`reviewer: an argument of ${Buffer.byteLength(big)} bytes would be passed in argv (data goes through stdin or a read-only file)`);
+}
+
 /** Run one reviewer process (its own process group) to completion or timeout, draining both pipes, and stop the whole
- *  group (plus `cleanup`, e.g. the container) on timeout, output overflow or a signal to this process. */
+ *  group (plus `cleanup`, e.g. the container) on timeout, output overflow or a signal to this process. `input` (the
+ *  prompt) is written to its stdin, which is then closed; without it stdin is /dev/null. */
 export async function runReviewerProcess(
   binary: string,
   args: string[],
@@ -688,8 +703,14 @@ export async function runReviewerProcess(
   timeoutMs: number,
   label: string,
   cleanup: () => void = () => {},
+  input?: string,
 ): Promise<ReviewerRunResult> {
-  const child = spawnWorker(binary, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env });
+  const child = spawnWorker(binary, args, { cwd, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"], env });
+  if (input !== undefined && child.stdin) {
+    // A reviewer that exits before reading all of it (EPIPE) is reported by its exit status, not by an unhandled error.
+    child.stdin.on("error", () => {});
+    child.stdin.end(input);
+  }
   return await new Promise<ReviewerRunResult>((resolve) => {
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];

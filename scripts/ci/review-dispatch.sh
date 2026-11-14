@@ -1174,6 +1174,40 @@ dev_round_noop() { # dev_round_noop <sha> <run id> <run conclusion> [clear] → 
   if [ ! -e "$STATE/sent/$sha.noop" ]; then log "$DEV ${sha:0:9}: not blocked — $why; no fixer, no revert clock"; touch "$STATE/sent/$sha.noop"; fi
   return 0
 }
+dev_infra() { # dev_infra <S> <run id> <reviewer failure> → a dev review whose reviewer itself did not run (review_infra_reason):
+  # infrastructure, not a finding — no fixer, no author notice, no revert clock (dev.blocked_since is neither started nor
+  # cleared: this round decides nothing, like a cancel). The supervisor hears ONCE per episode, with the rerun command; the
+  # episode ($STATE/dev-infra: "<first sha> <run>") lasts until a dev review completes with a verdict again (dev_infra_end).
+  # Its receipt is bound to the episode ($STATE/dev-infra.delivered.<sha>.<run>, f9f0a918b's pattern): an undelivered alert is
+  # retried every run, a gone supervisor falls back to the CI owner (infra_alert). Later dev heads of the episode are logged once.
+  local s=$1 run=$2 why=$3 f="$STATE/dev-infra" s0="" r0="" url msg
+  if [ -s "$f" ]; then read -r s0 r0 < "$f" || true; fi
+  if [ -n "$s0" ] && [ "$s0 $r0" != "$s $run" ]; then
+    if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$s.dev-infra-logged.$run" ]; then
+      log "$DEV ${s:0:9}: review run $run — the reviewer did not run ($why); same infrastructure episode as ${s0:0:9} (run $r0); no fixer, no revert clock"
+      touch "$STATE/sent/$s.dev-infra-logged.$run"
+    fi
+    s=$s0; run=$r0   # the episode's alert, retried until delivered
+  fi
+  [ ! -e "$f.delivered.$s.$run" ] || return 0
+  url="https://github.com/$REPO/actions/runs/$run"
+  if [ -n "${DRY:-}" ]; then echo "DRY $DEV ${s:0:9}: the reviewer did not run ($why) — infrastructure: supervisor told once, no fixer, no revert clock"; return 0; fi
+  if [ "$(cat "$f" 2>/dev/null)" != "$s $run" ]; then
+    echo "$s $run" > "$f"
+    log "$DEV ${s:0:9}: review run $run — the reviewer did not run ($why): infrastructure, not a finding: supervisor told; no fixer, no author notice, no revert clock"
+  fi
+  msg="[review-dispatch] the $DEV review of ${s:0:9} did not review anything: $why. This is a CI / review-machinery failure, not a code finding: no fixer or author is woken, and no revert clock runs. Later $DEV heads failing the same way are only logged until a $DEV review completes again.
+Once the machinery is fixed: gh run rerun $run -R $REPO --failed (or the next push to $DEV re-triggers the review).
+run: $url"
+  INFRA_WHERE=$DEV infra_alert "$s" "$run" dev "$f" "$msg"
+}
+dev_infra_end() { # a dev review completed with a verdict (passed, merged or blocked by findings): the infrastructure episode is over
+  if [ -z "${DRY:-}" ] && [ -e "$STATE/dev-infra" ]; then
+    log "$DEV: a review completed again — the reviewer infrastructure episode of $(cut -c1-9 "$STATE/dev-infra") is over"
+    rm -f "$STATE/dev-infra" "$STATE"/dev-infra.delivered.*
+  fi
+  return 0
+}
 
 # Automatic dependency reclamation is intentionally disabled. Process cwd, open files,
 # timestamps and link counts cannot prove that a running agent will not load another
@@ -1355,33 +1389,55 @@ review_job_state() { # review_job_state <run id> [<its jobs answer>] → the con
   local j=${2:-}; [ "$#" -ge 2 ] || j=$(review_jobs "$1" || true)
   jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].conclusion // ""' <<<"$j" 2>/dev/null || true
 }
-recheck_prereview_failed() { # recheck_prereview_failed <run id> [<its jobs answer>] → prints the review job's first failed step and
-  # returns 0 when that job failed BEFORE the code review ran: the job failed / timed out and its blocking step "Review (blocking …"
-  # never ran to an outcome (skipped, absent): the range, the commit gates or the setup failed. Such a run reviewed nothing — it is
-  # an infrastructure failure, never a code finding (tralyx 11-14: "Review-Fix-Of must name an ancestor" in the range step of
-  # every main re-check was routed as finding #0 to the strongest fixer, whose dispute-only commit started the next failing
-  # re-check — an endless loop).
-  local j=${2:-} st
+review_infra_reason() { # review_infra_reason <review-gate lines (findings)> → prints the reviewer's own failure and returns 0 when the
+  # blocking step failed because the REVIEWER did not run or gave no verdict ("review-gate: reviewer failed: …" / "reviewer timed
+  # out" / "no parseable VERDICT" / "crashed") and the text holds no finding (BLOCKED / FINDING), no commit-gates error and no
+  # failed trusted tests. Nothing was reviewed: infrastructure, never a code finding (tralyx dev 9ef7d5d06, 11-14: "reviewer
+  # failed: spawn E2BIG" — the prompt passed in argv — woke a fixer, which had nothing to fix, sent "fix failed" to the
+  # supervisor and started the dev revert clock).
+  local t=$1 l
+  if grep -qE '^(review-gate: (BLOCKED|FINDING)|\[gates .*ERROR|trusted tests job:)' <<<"$t"; then return 1; fi
+  l=$(grep -m1 -E '^review-gate: (reviewer (failed|timed out)|no parseable|crashed)' <<<"$t") || return 1
+  printf '%s\n' "${l#review-gate: }" | cut -c1-200
+}
+recheck_infra_failed() { # recheck_infra_failed <run id> [<its jobs answer>] → prints "<step>" (or "<step> — <reviewer failure>") and
+  # returns 0 when the review job failed without reviewing anything:
+  #  · BEFORE the code review ran: the job failed / timed out and its blocking step "Review (blocking …" never ran to an outcome
+  #    (skipped, absent): the range, the commit gates or the setup failed (tralyx 11-14: "Review-Fix-Of must name an ancestor" in
+  #    the range step of every main re-check was routed as finding #0 to the strongest fixer, whose dispute-only commit started
+  #    the next failing re-check — an endless loop);
+  #  · or IN the blocking step, when the reviewer itself did not run (review_infra_reason over the run's findings).
+  # Such a run is infrastructure, never a code finding. The second case reads the review log through findings (the per-run
+  # memo): a completed job's log never changes, and a rerun is a new job id from the real jobs answer; the answer can only make
+  # a run count as NOT reviewed (its heads stay open), never approve anything.
+  local j=${2:-} st sn why
   [ "$#" -ge 2 ] || j=$(review_jobs "$1" || true)
   case "$(review_job_state "$1" "$j")" in failure|timed_out) ;; *) return 1 ;; esac
   st=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review") | .steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] // ""' <<<"$j" 2>/dev/null || true)
-  case "$st" in success|failure|cancelled) return 1 ;; esac
+  case "$st" in
+    success|cancelled) return 1 ;;
+    failure)
+      why=$(review_infra_reason "$(findings "$1" "$j")") || return 1
+      sn=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review") | .steps[]? | select(.name | startswith("Review (blocking")) | .name][0] // "Review (blocking)"' <<<"$j" 2>/dev/null || echo 'Review (blocking)')
+      printf '%s — %s\n' "$sn" "$why"; return 0 ;;
+  esac
   jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review") | .steps[]? | select(.conclusion == "failure" or .conclusion == "timed_out") | .name][0] // "(no failed step recorded)"' <<<"$j" 2>/dev/null || echo '(unknown step)'
 }
-# a re-check REVIEWED its range when its review job ran to an outcome — not when it failed before the code review ran
+# a re-check REVIEWED its range when its review job ran to an outcome — not when it failed before the code review ran, nor when
+# the reviewer itself did not run (recheck_infra_failed)
 recheck_reviewed() {
   # One snapshot decides completion. An explicitly empty answer is unknown, never a reason to fetch again.
   local j=${2:-}
   if [ "$#" -lt 2 ]; then j=$(review_jobs "$1") || return 1; fi
   case "$(review_job_state "$1" "$j")" in success|failure|timed_out) ;; *) return 1 ;; esac
-  ! recheck_prereview_failed "$1" "$j" >/dev/null
+  ! recheck_infra_failed "$1" "$j" >/dev/null
 }
-main_infra() { # main_infra <H> <run id> <its jobs answer> <failed step> → the supervisor hears ONCE per episode of the same failing step on
+main_infra() { # main_infra <H> <run id> <its jobs answer> <failed step[ — reviewer failure]> → the supervisor hears ONCE per episode of the same failing step on
   # the same main line (an episode ends when its first head's own re-check, or a later main review covering it, completes);
   # nobody else is woken, nothing is assigned. The episode file $STATE/infra-<step> holds "<first head> <run>", and
   # <file>.delivered once the alert is out (an undelivered alert is retried every run); later heads are logged once each.
   local h=$1 run=$2 j=$3 step=$4 slug f h0 r0 jid ex url
-  slug=$(printf '%s' "$step" | tr -c 'A-Za-z0-9' _ | cut -c1-40); f="$STATE/infra-$slug"
+  slug=$(printf '%s' "${step%% — *}" | tr -c 'A-Za-z0-9' _ | cut -c1-40); f="$STATE/infra-$slug"   # the step names the episode
   url="https://github.com/$REPO/actions/runs/$run"
   if [ -s "$f" ]; then
     read -r h0 r0 < "$f" || true
@@ -1416,7 +1472,8 @@ main_infra() { # main_infra <H> <run id> <its jobs answer> <failed step> → the
     log "MAIN ${h:0:9}: re-check run $run failed before the code review (step '$step') — infrastructure, not a finding: supervisor told, no owner / fixer woken"
   fi
   local msg
-  msg="[review-dispatch] the main re-check of ${h:0:9} failed BEFORE the code review ran (review job step: $step). This is a CI / review-machinery failure, not a code finding: no owner or fixer is woken for it, and the main heads after ${h:0:9} that fail the same step are only logged until a main review completes again. Their commits stay in the next main review's range.
+  msg="[review-dispatch] the main re-check of ${h:0:9} failed BEFORE the code review ran (review job step: $step). This is a CI / review-machinery failure (the range, the gates or the setup failed, or the reviewer itself could not run), not a code finding: no owner or fixer is woken for it, and the main heads after ${h:0:9} that fail the same step are only logged until a main review completes again. Their commits stay in the next main review's range.
+Once the machinery is fixed: gh run rerun $run -R $REPO --failed (a later main head's review covers them too).
 run: $url
 log excerpt:
 ${ex:-(log unavailable)}"
@@ -1439,7 +1496,7 @@ infra_alert() { # infra_alert <h> <run> <slug> <episode file> <message> → the 
   fi
   case "$notify_outcome" in
     sent|dup) touch "$f.delivered.$h.$run" ;;
-    skipped) if [ ! -e "$u" ]; then log "MAIN ${h:0:9}: the infrastructure alert (run $run) reaches nobody (supervisor and CI owner threads unreachable) — retried in $((${INFRA_UNREACHABLE_RETRY_SEC:-3600} / 60)) min"; touch "$u"; fi ;;
+    skipped) if [ ! -e "$u" ]; then log "${INFRA_WHERE:-MAIN} ${h:0:9}: the infrastructure alert (run $run) reaches nobody (supervisor and CI owner threads unreachable) — retried in $((${INFRA_UNREACHABLE_RETRY_SEC:-3600} / 60)) min"; touch "$u"; fi ;;
   esac
   return 0
 }
@@ -1859,8 +1916,8 @@ for hsha in $(hotfix_candidates); do
     if hcov=$(recheck_covering "$hsha"); then
       if [ -n "${DRY:-}" ]; then echo "DRY HOTFIX ${hsha:0:9}: covered by the batched re-check of ${hcov%% *} — handled there"
       else log "HOTFIX ${hsha:0:9}: its reviewer was superseded; covered by the batched re-check of ${hcov%% *} (run ${hcov#* }) — handled there"; touch "$STATE/sent/$hsha.hotfix-complete"; fi
-    elif hstep=$(recheck_prereview_failed "$hrun" "$hjobs"); then
-      # failed before the code review: infrastructure — the supervisor, once per episode; no finding, no owner, no fixer.
+    elif hstep=$(recheck_infra_failed "$hrun" "$hjobs"); then
+      # failed before the code review, or its reviewer did not run: infrastructure — the supervisor, once per episode; no finding, no owner, no fixer.
       # H stays open: the next main review that completes covers it (above).
       main_infra "$hsha" "$hrun" "$hjobs" "$hstep"
     fi
@@ -1897,12 +1954,14 @@ if [ -z "${DRY:-}" ] && git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/
        && ! git -C "$SRC" merge-base --is-ancestor "$bsha" origin/$MAIN 2>/dev/null \
        && ! dev_round_noop "$bsha" "$brid" failure; then   # a merge-only round is never blocked
       bf=$(findings "$brid")
+      if binfra=$(review_infra_reason "$bf"); then dev_infra "$bsha" "$brid" "$binfra"; else
       bcul=$(culprit_threads "$bsha" "$bf")
       # reviewer → fixer → author: the fixer gets it; the authors only when it failed (dev_blocked)
       dev_blocked "$bsha" "$bf" "$bcul" "https://github.com/$REPO/actions/runs/$brid" "Task: the blocking review stopped $DEV at ${bsha:0:9}. Findings:
 ${bf:-(none parsed; read the run)}
 Run: https://github.com/$REPO/actions/runs/$brid
 Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). Your worktree starts at origin/$DEV; first git reset --hard ${bsha} so the fix sits directly on the reviewed commit (later dev commits are NOT part of this fix). ONE commit with trailers Review-Fix-Of: ${bsha} and Hotfix: review fix of ${bsha:0:9}; push it with git push origin HEAD:refs/heads/devfix/${bsha:0:12} (NOT to $DEV, not to main). Once the trusted tests pass there, ${bsha:0:9} plus your fix land on main without a second review."
+      fi
     fi
   fi
   for tsha in $(git -C "$SRC" rev-list origin/$MAIN.."origin/$DEV" | head -60); do
@@ -2143,6 +2202,7 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
     if dev_round_noop "$sha" "$rid" "$concl" clear; then continue; fi   # before any blocked / fixer / overdue decision
   fi   # before any blocked / fixer / overdue decision
   if (cd "$TRUSTED" && bash "$CI_SCRIPTS/review-passed.sh" "$sha" "$REPO" >/dev/null 2>&1); then
+    [ "$ref" != "$DEV" ] || dev_infra_end
     if git -C "$SRC" merge-base --is-ancestor origin/$MAIN "$sha"; then
       [ $merged_one = 0 ] || continue
       if [ -n "${DRY:-}" ]; then echo "DRY merge $ref ${sha:0:9}"; merged_one=1; continue; fi
@@ -2178,6 +2238,9 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
     fi
   elif [ "$ref" = "$DEV" ]; then
     f=$(findings "$rid")
+    # the reviewer itself did not run: nothing was reviewed — no block, no fixer, no author notice, no revert clock
+    if dinfra=$(review_infra_reason "$f"); then dev_infra "$sha" "$rid" "$dinfra"; continue; fi
+    dev_infra_end
     since_f="$STATE/dev.blocked_since"
     if [ ! -s "$since_f" ]; then echo "$now" > "$since_f"; echo "$sha" > "$since_f.sha"; fi   # the episode's owner (dev_round_noop)
     since=$(cat "$since_f")

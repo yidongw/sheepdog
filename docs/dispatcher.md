@@ -24,6 +24,15 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   blocking step never ran): infrastructure, not a finding — no owner or fixer is woken. The supervisor is told once per
   episode (`$STATE/infra-<step>`: the same failing step on the same main line until a main review completes again), with
   the step and a log excerpt; later heads of the episode are logged once each and settled by the next completed review.
+  The same holds when the blocking step ran but the **reviewer itself did not** (`review-gate: reviewer failed: …` /
+  `reviewer timed out` / `no parseable VERDICT` / `crashed`, and no finding, no gates error, no failed trusted tests —
+  `review_infra_reason`): the alert names the step and the reviewer's failure and carries the `gh run rerun` command.
+- **Dev reviews whose reviewer did not run** (same `review_infra_reason`): infrastructure, not a block — no fixer, no
+  author notice, `dev.blocked_since` is neither started nor cleared and no revert / overdue notice fires for that head.
+  The supervisor is told once per episode (`$STATE/dev-infra`, receipt `$STATE/dev-infra.delivered.<sha>.<run>`; an
+  undelivered alert is retried, a gone supervisor falls back to the CI owner); later dev heads failing the same way are
+  logged once; the episode ends when a dev review completes with a verdict. Rerun the review once fixed
+  (`gh run rerun <id> --failed`), or the next push to dev re-triggers it.
 - **Open findings**: findings whose fix rounds are spent are kept in `$STATE/open-findings.log`, which the review job
   passes to the reviewer (`open-findings-file`) so repeats are recognised as pre-existing.
 
@@ -37,7 +46,9 @@ dispatcher) splits the reads in two:
   `review-passed.sh`, `merge-branch.sh`, `review-coverage.sh` (`review_verdict`, `review_attestation`, …),
   `review-runs.sh`, and the dispatcher's landing / train / devfix-tests / hotfix-complete / verdict checks
   (`run_verdict`, `review_jobs` → `recheck_reviewed`, the re-check's run record). One such jobs answer is read once
-  per decision and handed to the helpers that need it, instead of being memoised.
+  per decision and handed to the helpers that need it, instead of being memoised. (Only when that answer shows a failed
+  blocking step does `recheck_infra_failed` read the step's log through the memo, to tell a reviewer that never ran from
+  a verdict: a completed job's log never changes, a rerun has new job ids, and the answer can only keep a head open.)
 - **`ghm`, the per-run memo, only for routing and notification reads** of `review-dispatch.sh`: which runs exist and
   what is pending (`review_list`, `all_runs_list`, the dev CI listing) and the text of findings / notes / pre-existing
   findings, plus the range a re-check reviewed (`recheck_base`, attribution). Each dispatcher run gets a private
