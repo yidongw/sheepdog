@@ -10,7 +10,8 @@
 #   (d) review-passed.sh and the dispatcher agree in every case; plus: a failed tests job, a failed gate step, a re-check
 #       title, injected lines before the gate's own "reviewing" line, and REVIEW_MAIN_FINDINGS=0 never approve.
 #   (g) the train asks review-passed.sh over EVERY blocked review of a sha: a newer reviewer failure never hides an older
-#       qualifying run (review of vpn-sub c2cb135f0 #1)
+#       qualifying run (review of vpn-sub c2cb135f0 #1); the approving run's main findings are recorded before it lands
+#       (review of sheepdog dev d9228afe7 #1)
 set -uo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 cd "$(dirname "$0")/../.."
@@ -171,6 +172,7 @@ grep -q "MERGED dev" "$LOG" || fail "(a) no MERGED log line"
 run_train
 landed || fail "(a) the train did not land $H: $(cat "$LOG" 2>/dev/null)"
 ! grep -qE '^(dev_blocked|wake_fixer|notify)' "$T/calls" 2>/dev/null || fail "(a) the train's blocked path routed main's findings: $(cat "$T/calls")"
+grep -q "finding(s) 1 2 — culprit on main" "$STATE/open-findings.log" 2>/dev/null || fail "(a) the train landed without recording main's findings"
 echo "ok - (a) blocked only by main-culprit findings: approved, landed (head loop + train), no fixer, recorded as pre-existing"
 
 # the known-open feed of the next review (review.yml's "Known open findings" step) carries them
@@ -311,6 +313,10 @@ RP || fail "(g) review-passed.sh does not approve H from its older main-only run
 run_train
 landed || fail "(g) the train stranded H behind a newer infrastructure-failed review: $(cat "$LOG" 2>/dev/null)"
 ! grep -qE '^(dev_blocked|wake_fixer|notify)' "$T/calls" 2>/dev/null || fail "(g) the train routed main's findings: $(cat "$T/calls")"
+# … and records the approving (older) run's main findings before landing: later reviews see them as known-open
+# (review of sheepdog dev d9228afe7 #1)
+grep -q "run $RID): finding(s) 1 2 — culprit on main" "$STATE/open-findings.log" 2>/dev/null || fail "(g) the train landed H without recording its main findings: $(cat "$STATE/open-findings.log" 2>/dev/null)"
+[ "$(grep -c '^review-gate: BLOCKED #[12] ' "$STATE/open-findings.log")" = 2 ] || fail "(g) the known-open feed lacks the BLOCKED lines"
 # … and a sha whose every blocked review has a dev finding still does not land through the train
 fixture_log "$T/log" "$C" 1; cp "$T/log" "$FX/log-$JID.txt"
 run_train

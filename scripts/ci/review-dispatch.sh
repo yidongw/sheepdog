@@ -2024,7 +2024,13 @@ Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). You
       rp_main=1
     fi
     : > "$STATE/train.kind"
-    (cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=$rp_main REVIEW_KIND_OUT="$STATE/train.kind" bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" >/dev/null 2>&1) || continue
+    rp_out=$(cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=$rp_main REVIEW_KIND_OUT="$STATE/train.kind" bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" 2>/dev/null) || continue
+    if [ "$rp_main" = 1 ]; then
+      # approved by the run that blocked only on pre-existing main findings: record them (open-findings.log, once per sha)
+      # before the sha lands — later reviews see them as known-open (review of sheepdog dev d9228afe7 #1)
+      rp_run=$(sed -nE 's/^trusted tests \+ review passed for [0-9a-f]+ \(run ([0-9]+)\)$/\1/p' <<<"$rp_out" | tail -1)
+      [ -z "$rp_run" ] || dev_split_main "$tsha" "$rp_run" "$(findings "$rp_run")"
+    fi
     # a tests-only approval never lands review machinery, by fast-forward or Train-Merge (review of dev a171d3396 #1/#2)
     if [ "$(cat "$STATE/train.kind" 2>/dev/null)" != review ]; then
       tmfiles=$(landing_machinery_files "$SRC" "origin/$MAIN" "$tsha")
