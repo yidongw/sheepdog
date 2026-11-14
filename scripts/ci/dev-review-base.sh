@@ -98,7 +98,7 @@ reverts_of() { # reverts_of <commit> <since> <head> [restore]
   # For restoration, also prove that ALL paths changed by the constituent are
   # back at their pre-revert state: conflict resolutions / partial merges must
   # not turn an incomplete undo into evidence of a restored passing review.
-  local c=$1 since=$2 h=$3 restore=${4:-0} r m p body
+  local c=$1 since=$2 h=$3 restore=${4:-0} r m p body merged
   local -a paths=()
   git log --format=%H -F --grep="This reverts commit $c" "$since..$h" 2>/dev/null || return 1
   while read -r r; do
@@ -110,6 +110,15 @@ reverts_of() { # reverts_of <commit> <since> <head> [restore]
     git rev-list --parents -n1 "$m" 2>/dev/null | cut -d' ' -f2- | tr ' ' '\n' | grep -qxF "$p" || continue
     git merge-base --is-ancestor "$c" "$m" 2>/dev/null || continue
     if git merge-base --is-ancestor "$c" "$p" 2>/dev/null; then continue; fi
+    # Reachability only identifies a possible constituent. An equivalent patch
+    # can already live on the retained mainline (e.g. a cherry-pick). If applying
+    # c's delta to the post-revert tree is a clean no-op, its reviewed changes
+    # survived, even with unrelated edits in the same file. A conflict is not
+    # proof of preservation: conservatively require a full review in that case.
+    if [ "$restore" != 1 ]; then
+      if merged=$(git merge-tree --write-tree --merge-base="$c^1" "$c" "$r" 2>/dev/null) &&
+         [ "$merged" = "$(git rev-parse "$r^{tree}")" ]; then continue; fi
+    fi
     if [ "$restore" = 1 ]; then
       git rev-parse --verify "$c^1" >/dev/null 2>&1 || continue
       mapfile -d '' -t paths < <(git diff --no-renames --name-only -z "$c^1" "$c")
@@ -123,24 +132,13 @@ revert_state() { # revert_state <r> <head> [depth] → 0: r stands in r..head ·
   # 2: unknown (a revert chain deeper than 64). Tri-state, so the depth limit never flips a verdict by parity: a caller
   # that needs "undone" to proceed treats 2 as "stands" (review of sheepdog ea594cc26 #1/#2: review-repair.sh reverted()
   # answers "reverted" at its limit — fail-closed for a repair, fail-OPEN when it is asked whether a revert was undone).
-  # Undone by: a revert naming r, or (review of foxhole-backend b96e6e4ef #1/#2) a `git revert -m 1` of a merge M that
-  # brought r in from its second side (r not on M's first parent) — "This reverts commit M, reversing changes made to
-  # M^1" undoes everything M merged, r included. Either undoing commit counts only while it stands itself.
-  local r=$1 h=$2 k=${3:-0} x m p1 msg st unknown=0
+  # Both direct and merge undos use reverts_of's recorded-mainline and complete
+  # restoration checks. An ancestry-only fallback would accept partial undos.
+  local r=$1 h=$2 k=${3:-0} x st unknown=0
   [ "$k" -lt 64 ] || return 2
   for x in $(reverts_of "$r" "$r" "$h" 1); do
     st=0; revert_state "$x" "$h" $((k + 1)) || st=$?
     case "$st" in 0) return 1 ;; 2) unknown=1 ;; esac
-  done
-  for m in $(git rev-list --merges --ancestry-path "$r..$h" 2>/dev/null || true); do
-    p1=$(git rev-parse -q --verify "$m^1") || continue
-    git merge-base --is-ancestor "$r" "$p1" 2>/dev/null && continue   # r was already on M's mainline
-    for x in $(git log --format=%H -F --grep="This reverts commit $m" "$m..$h" 2>/dev/null || true); do
-      msg=$(git show -s --format=%B "$x") || continue   # whole message first: an early grep -q exit is no SIGPIPE here
-      grep -qF "changes made to $p1" <<<"${msg//$'\n'/ }" || continue
-      st=0; revert_state "$x" "$h" $((k + 1)) || st=$?
-      case "$st" in 0) return 1 ;; 2) unknown=1 ;; esac
-    done
   done
   [ "$unknown" = 0 ] || return 2
   return 0
