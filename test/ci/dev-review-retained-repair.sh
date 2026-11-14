@@ -63,7 +63,10 @@ approval() { # <0: allow, 1: reject> <description> [review failure] [later-round
     bad=1
   fi
   # Keep the focused before/after proof short once both consumers disagree.
-  if [ "$focus" = --reviewed-updates ] && [ "$bad" != 0 ]; then fail "$description"; fi
+  case "$focus" in
+    --reviewed-updates|--adopted-sibling-renames)
+      [ "$bad" = 0 ] || fail "$description" ;;
+  esac
   g checkout -q --detach "$b"
 }
 P=$(commit_file production good bug)
@@ -230,6 +233,71 @@ unrelated_rename_cases() {
 if [ "$focus" = --unrelated-renames ]; then
   unrelated_rename_cases
   [ "$bad" = 0 ] || fail 'unrelated rename history contaminated the reviewed contribution'
+  exit 0
+fi
+
+# A sibling can supply the rename that D actually adopts. Refinement on
+# that sibling makes the rename invisible in D's diff against X; its earlier
+# rename edges connected X to the destination in the retired proof. Any
+# revert after D now requires a full review, including restoration of the repair.
+adopted_sibling_rename_cases() {
+  local O X renamed side retained other M mainline mode file removed
+  local old=$'broken\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12'
+  local refined=$'broken\nalpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\ntheta\niota\nkappa'
+  for mode in refined chained; do
+    g checkout -q --detach "$P"
+    O=$(commit_file 'original path before sibling histories' "$old" old)
+    X=$(commit_file 'independent repair before adopted rename' "${old/broken/good}" old)
+    side=$(commit_file 'unreviewed sibling descended from repair' side side)
+    g checkout -q --detach "$O"
+    g mv old 'middle name'
+    g commit -q -m 'sibling renames original path'
+    file='middle name'
+    commit_file 'sibling extensively refines renamed file' "$refined" "$file" >/dev/null
+    if [ "$mode" = chained ]; then
+      g mv "$file" $'new\nname'
+      g commit -q -m 'sibling renames refined file again'
+      file=$'new\nname'
+    fi
+    renamed=$(git rev-parse HEAD)
+    C=$(commit_file 'blocked change after sibling rename and refinement' broken bug)
+    if git merge-base --is-ancestor "$X" "$renamed"; then fail 'adopted sibling must not descend from X'; fi
+    if ! g merge -q --no-ff --no-commit "$X" >"$T/merge.out" 2>&1; then
+      [ -n "$(git ls-files -u)" ] || fail 'unexpected adopted rename merge failure'
+    fi
+    g rm -q -f --ignore-unmatch old
+    printf '%s\n' "${refined/broken/better}" > "$file"
+    printf 'good\n' > bug
+    g add -A; g commit -q -m 'passing merge adopts sibling rename and refines independent repair'
+    D=$(git rev-parse HEAD)
+    [ -z "$(git diff --name-only --diff-filter=R --find-renames=50% "$X" "$D")" ] ||
+      fail 'fixture must require sibling history to recover the adopted rename'
+    for mainline in 1 2; do
+      updates=()
+      g checkout -q --detach "$D"
+      approval 0 "$mode adopted sibling mainline $mainline reviewed merge intact"
+      g checkout -q --detach "$X"
+      g commit -q --allow-empty -m 'retained repair on unreviewed sibling'
+      retained=$(git rev-parse HEAD)
+      if [ "$mainline" = 2 ]; then g checkout -q --detach "$side"; other=$retained; else other=$side; fi
+      g merge -q --no-ff -m 'merge unreviewed sibling descended from repair' "$other"
+      M=$(git rev-parse HEAD)
+      if git merge-base --is-ancestor "$D" "$M"; then fail 'unreviewed sibling merge must not contain D'; fi
+      g checkout -q --detach "$D"
+      g merge -q --no-ff -m 'bring unreviewed sibling beside adopted repair' "$M"
+      g revert --no-edit -m "$mainline" "$M" >/dev/null
+      git diff --exit-code "$D" HEAD || fail 'sibling merge undo must retain exactly D'
+      removed=$(commit_file 'remove repair from adopted sibling destination' "$refined" "$file")
+      approval 1 "$mode adopted sibling mainline $mainline missing repair rejected"
+      g revert --no-edit "$removed" >/dev/null
+      approval 1 "$mode adopted sibling mainline $mainline restored repair still needs full review"
+    done
+  done
+  echo 'exercised: adopted sibling rename lineage through both approval consumers'
+}
+if [ "$focus" = --adopted-sibling-renames ]; then
+  adopted_sibling_rename_cases
+  [ "$bad" = 0 ] || fail 'adopted sibling rename lost the reviewed contribution'
   exit 0
 fi
 
@@ -844,6 +912,7 @@ if [ -z "$focus" ]; then
   shared_contribution_cases
   rename_cases
   unrelated_rename_cases
+  adopted_sibling_rename_cases
   scoped_restoration_cases
   composed_restoration_cases
   blocked_replacement_cases
