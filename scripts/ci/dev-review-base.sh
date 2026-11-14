@@ -33,7 +33,8 @@
 #       exactly the automatic merge of its two parents: no code of its own), and no dev commit in OR BELOW the range
 #       (down to main; merges included) is a blocked, unrepaired review (that one is reviewed again) — a blocked review
 #       whose whole range a later completed review re-reviewed, and that later review passed or is repaired, is
-#       superseded: it needs no repair of its own (superseded()). review.yml does not review such a range
+#       superseded: it needs no repair of its own (superseded(); never once any revert lies after that later review —
+#       review_stands: the conservative rule, no content proofs). review.yml does not review such a range
 #       again (REVIEW_SKIP); review-passed.sh counts the run as passed when its tests pass.
 #       Never when landing <head> would change review machinery on main (review-machinery.sh landing_machinery_files —
 #       the same definition the dispatcher's and merge-branch.sh's landing guard use: a tests-only approval never lands
@@ -92,210 +93,20 @@ verdict_m() { # verdict_m <sha> → sets vm to its verdict, asked once per scrip
   [ -n "${_verdicts[$1]+x}" ] || _verdicts[$1]=$(verdict "$1")
   vm=${_verdicts[$1]}
 }
-preserves_patch() ( # preserves_patch <before> <after> <at commit> [<literal paths>...]
-  # Candidate attributes (notably merge=union) can hide a real conflict and
-  # return the post-revert tree unchanged. Prove preservation in an isolated
-  # bare repository: info/attributes has priority over every tree's attributes,
-  # and forces Git's built-in conflict-detecting text driver on every path.
-  # Borrow objects read-only; temporary merge results stay in the proof repo.
-  local proof merged before=$1 after=$2 at=$3
-  proof=$(mktemp -d) || return 1
-  trap 'rm -rf "$proof"' EXIT
-  git init -q --bare --template= "$proof" || return 1
-  mkdir -p "$proof/info" || return 1
-  git rev-parse --path-format=absolute --git-path objects > "$proof/objects/info/alternates" || return 1
-  printf '%s\n' '* merge=text' > "$proof/info/attributes" || return 1
-  if [ "$#" -gt 3 ]; then
-    # Project the approved result onto the constituent's paths. Other paths
-    # stay at the baseline, so their old deltas impose no obligation at head.
-    # Candidate diff settings must not hide gitlinks or emit display-only
-    # output which apply --allow-empty could mistake for an empty patch.
-    shift 3
-    git --git-dir="$proof" read-tree "$before" || return 1
-    git --literal-pathspecs diff --binary --full-index --no-renames --no-ext-diff --no-textconv \
-      --no-color --ignore-submodules=none --submodule=short "$before" "$after" -- "$@" |
-      git --git-dir="$proof" apply --cached --allow-empty || return 1
-    after=$(git --git-dir="$proof" write-tree) || return 1
-    after=$(git --git-dir="$proof" -c user.name=review-proof -c user.email=review-proof@invalid \
-      commit-tree "$after" -p "$before" --no-gpg-sign -m 'scoped reviewed contribution') || return 1
-  fi
-  merged=$(GIT_ATTR_NOSYSTEM=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-    git --git-dir="$proof" -c core.attributesFile=/dev/null -c merge.renormalize=false \
-    merge-tree --write-tree --merge-base="$before" "$after" "$at" 2>/dev/null) || return 1
-  [ "$merged" = "$(git rev-parse "$at^{tree}")" ]
-)
-restores_patch() { # <reverted commit> <undo> [<contribution before> <after> [<paths>...]]
-  # A containing merge undo may also remove unreviewed changes. Carry the
-  # original contribution through recursion, in the current revert direction,
-  # so restoring it need not restore those unrelated changes too. The undo
-  # must supply a missing part and leave the complete inverse at its endpoint.
-  # Requiring the whole forward delta at its parent rejects composed repairs;
-  # accepting an already-complete inverse would bless unrelated merge undos.
-  if [ "$#" -ge 4 ] && ! git --literal-pathspecs diff --quiet --ignore-submodules=none "$3" "$4" -- "${@:5}" &&
-    preserves_patch "$4" "$3" "$1^1" "${@:5}" && preserves_patch "$3" "$4" "$1" "${@:5}" &&
-    ! preserves_patch "$4" "$3" "$2^1" "${@:5}" && preserves_patch "$4" "$3" "$2" "${@:5}"; then
-    return 0
-  fi
-  # The full revert delta also proves restoration (including partial removals
-  # of a contribution, for which the contextual inverse is not complete).
-  git rev-parse --verify "$1^1" >/dev/null 2>&1 || return 1
-  if git diff --quiet --ignore-submodules=none "$1^1" "$1"; then return 1; fi
-  ! preserves_patch "$1" "$1^1" "$2^1" && preserves_patch "$1" "$1^1" "$2"
-}
-reverts_of() { # <commit> <since> <head> [restore [<contribution before> <after> [<paths>...]]]
-  # Git names the merge, not its constituent commits, in a merge revert. Only
-  # commits introduced relative to the recorded mainline can be undone by it.
-  # For restoration, the undo must complete a still-missing inverse, possibly
-  # after independent partial repairs. Unrelated hunks may differ at either
-  # endpoint. Final contents alone prove nothing when constituents cancel
-  # inside the merge and the inverse was already complete before the undo.
-  # In invalidation mode, mark a merge undo that retained the patch as
-  # "<sha> preserved". Its consumer must verify preservation through head;
-  # the snapshot alone cannot vouch for later reverts of a sibling cherry-pick.
-  local c=$1 since=$2 h=$3 restore=${4:-0} r m p body
-  local -a context=("${@:5}")
-  while read -r r; do
-    if [ "$restore" = 1 ]; then restores_patch "$c" "$r" "${context[@]}" || continue; fi
-    printf '%s\n' "$r"
-  done < <(git log --format=%H -F --grep="This reverts commit $c" "$since..$h" 2>/dev/null)
-  while read -r r; do
-    body=$(git show -s --format=%B "$r")
-    m=$(sed -nE 's/^This reverts commit ([0-9a-f]{40}), reversing$/\1/p' <<<"$body")
-    p=$(sed -nE 's/^changes made to ([0-9a-f]{40})\.$/\1/p' <<<"$body")
-    [[ "$m" =~ ^[0-9a-f]{40}$ && "$p" =~ ^[0-9a-f]{40}$ ]] || continue
-    # The named mainline must be an actual parent, not an arbitrary ancestor.
-    git rev-list --parents -n1 "$m" 2>/dev/null | cut -d' ' -f2- | tr ' ' '\n' | grep -qxF "$p" || continue
-    git merge-base --is-ancestor "$c" "$m" 2>/dev/null || continue
-    if git merge-base --is-ancestor "$c" "$p" 2>/dev/null; then
-      # Shared ancestry is retained, not restored by this merge undo. Keep its
-      # reviewed contribution as a dependency too: a later revert of an
-      # equivalent on that mainline can remove it without naming c.
-      if [ "$restore" != 1 ]; then printf '%s preserved\n' "$r"; fi
-      continue
-    fi
-    # Reachability only identifies a possible constituent. An equivalent patch
-    # can already live on the retained mainline (e.g. a cherry-pick). If applying
-    # c's delta to the post-revert tree is a clean no-op, its reviewed changes
-    # survived at this snapshot, even with unrelated edits in the same file.
-    # Keep that dependency visible to the caller rather than discarding r.
-    if [ "$restore" != 1 ]; then
-      if preserves_patch "$c^1" "$c" "$r"; then
-        printf '%s preserved\n' "$r"
-        continue
-      fi
-    fi
-    if [ "$restore" = 1 ]; then
-      restores_patch "$c" "$r" "${context[@]}" || continue
-    fi
-    printf '%s\n' "$r"
-  done < <(git log --format=%H -F --grep=', reversing' "$since..$h" 2>/dev/null)
-}
-revert_state() { # revert_state <r> <head> [depth] → 0: r stands in r..head · 1: r is undone (a standing revert of it) ·
-  # 2: unknown (a revert chain deeper than 64). Tri-state, so the depth limit never flips a verdict by parity: a caller
-  # that needs "undone" to proceed treats 2 as "stands" (review of sheepdog ea594cc26 #1/#2: review-repair.sh reverted()
-  # answers "reverted" at its limit — fail-closed for a repair, fail-OPEN when it is asked whether a revert was undone).
-  # Both direct and merge undos use reverts_of's recorded-mainline and complete
-  # restoration checks. An ancestry-only fallback would accept partial undos.
-  local r=$1 h=$2 k=${3:-0} x st unknown=0
-  local -a context=("${@:4}") inverse=()
-  if [ "${#context[@]}" -ge 2 ]; then inverse=("${context[1]}" "${context[0]}" "${context[@]:2}"); fi
-  [ "$k" -lt 64 ] || return 2
-  for x in $(reverts_of "$r" "$r" "$h" 1 "${context[@]}"); do
-    st=0; revert_state "$x" "$h" $((k + 1)) "${inverse[@]}" || st=$?
-    case "$st" in 0) return 1 ;; 2) unknown=1 ;; esac
-  done
-  [ "$unknown" = 0 ] || return 2
-  return 0
-}
-contribution_paths() { # <constituent> <reviewed head> -> NUL-delimited path lineage
-  local x=$1 d=$2 path status old new
-  local -A paths=()
-  while IFS= read -r -d '' path; do paths["$path"]=1; done < <(
-    git diff --no-renames --ignore-submodules=none --name-only -z "$x^1" "$x")
-  # Walk reviewed rename edges, rather than comparing only the endpoints:
-  # successive refinements can make the final name too dissimilar to x.
-  # Include both ends so the projection carries the deletion AND destination.
-  # Only descendants of x can carry its contribution through a rename.
-  # A merged sibling's earlier rename of the same path is unrelated history.
-  while IFS= read -r -d '' status && IFS= read -r -d '' old && IFS= read -r -d '' new; do
-    [ -n "${paths[$old]+x}" ] || continue
-    paths["$new"]=1
-  done < <(git log --format= --reverse --topo-order --ancestry-path --diff-merges=separate \
-    --name-status -z --find-renames=50% -l0 --diff-filter=R --no-color \
-    --no-ext-diff --no-textconv --ignore-submodules=none "$x..$d")
-  [ "${#paths[@]}" = 0 ] || printf '%s\0' "${!paths[@]}"
-}
-contribution_stands() { # <constituent> <approved head> <candidate> <depth>
-  local x=$1 d=$2 h=$3 k=$4 l v rb att replacement
-  local -a paths=() replacements=()
-  mapfile -d '' -t paths < <(contribution_paths "$x" "$d")
-  [ "${#paths[@]}" -gt 0 ] || return 0
-  # If D still contains x's original patch, require just that patch. Otherwise
-  # D refined or cancelled x: use D's net result along x's path lineage.
-  if preserves_patch "$x^1" "$x" "$d"; then
-    preserves_patch "$x^1" "$x" "$h" && return 0
-  else
-    preserves_patch "$x^1" "$d" "$h" "${paths[@]}" && return 0
-  fi
-  [ "$k" -lt 40 ] || return 1
-  # Later incremental reviews may replace this contribution. They must cover
-  # every change since D through a usable full-review chain, pass or carry an
-  # effective repair, and their contributions must still stand. A blocked
-  # round vouches for its reviewed range plus its repair, as in review_link;
-  # use that repair's endpoint rather than freezing the pre-repair contents.
-  for l in $(git rev-list "$d..$h" "^$MAINREF" 2>/dev/null); do
-    git merge-base --is-ancestor "$d" "$l" 2>/dev/null || continue
-    verdict_m "$l"; v=$vm
-    case "${v%% *}" in
-      pass) replacements=("$l") ;;
-      blocked) mapfile -t replacements < <(effective_repairs "$l" "$h") ;;
-      *) continue ;;
-    esac
-    [ "${#replacements[@]}" -gt 0 ] || continue
-    att=$(review_attestation "${v##* }" "$l") || continue
-    [ "$(jq -r .kind <<<"$att")" = review ] || continue
-    rb=$(jq -r .base <<<"$att")
-    review_covered "$rb" "$d" "$h" 0 || continue
-    for replacement in "${replacements[@]}"; do
-      if [ "${v%% *}" = blocked ]; then
-        # A repair may refine a standing contribution. An unrelated repair
-        # cannot retroactively vouch for a contribution already lost before
-        # it: prove the state it replaces through the same survival rule.
-        contribution_stands "$x" "$d" "$replacement^1" "$((k + 1))" || continue
-      fi
-      review_stands "$rb" "$replacement" "$h" "$((k + 1))" || continue
-      mapfile -d '' -t paths < <(contribution_paths "$x" "$replacement")
-      preserves_patch "$x^1" "$replacement" "$h" "${paths[@]}" && return 0
-    done
-  done
-  return 1
-}
-review_stands() { # <reviewed range base> <reviewed head> <candidate> <depth>
-  local b=$1 d=$2 h=$3 k=$4 x r preservation st
-  local -a context=() paths=()
-  for x in $(git rev-list "$b..$d" 2>/dev/null); do
-    while read -r r preservation; do
-      if [ "$preservation" = preserved ]; then
-        # Retained equivalents outside the reviewed ancestry must survive at
-        # head, accounting for refinements and subsequent reviewed changes.
-        contribution_stands "$x" "$d" "$h" "$k" || return 1
-        continue
-      fi
-      # Use the reviewed range's net contribution: one containing undo can
-      # remove several successive refinements together. Its unreviewed side
-      # changes impose no restoration obligation, even within the same file.
-      mapfile -d '' -t paths < <(contribution_paths "$x" "$d")
-      context=("$d" "$b" "${paths[@]}")
-      st=0; revert_state "$r" "$h" 0 "${context[@]}" || st=$?
-      [ "$st" = 1 ] || return 1
-      # An undo is evidence at its own snapshot. A later merge resolution can
-      # discard it, or adjacent edits can make a subsequent undo unprovable.
-      # Require the reviewed contribution at the candidate as well, using the
-      # same scoped proof / independently reviewed replacements as retention.
-      contribution_stands "$x" "$d" "$h" "$k" || return 1
-    done < <(reverts_of "$x" "$d" "$h")
-  done
-  return 0
+review_stands() { # review_stands <superseding review's head D> <candidate> → 0 only when NO revert lies in D..candidate
+  # A revert after D may remove what D's review vouched for, and with it bring C's blocked code back. Since 11-13 17:08Z
+  # eleven rounds (ad09c0b50 … 5468630f0) tried to PROVE the reviewed contribution still stands after such reverts —
+  # restoration by revert-of-revert, merge undos, retained equivalents outside the reviewed ancestry, refinements, scoped
+  # path projections — and every re-check found another history the proof got wrong (renames, partial or conflict-resolved
+  # restorations, adjacent edits, later merges discarding a restoration, sibling reverts; supervisor 11-14). The rule is
+  # now the conservative one: any revert in D..candidate → D does not supersede C, and C's range gets a full review again
+  # (always safe; reverts are rare: the dispatcher's own overdue revert is the usual one). A revert is a commit whose message
+  # has git revert's "This reverts commit <sha>" line (a merge revert's "…, reversing" included) or a 'Revert "' subject,
+  # anywhere in D..candidate — dev, a merged side branch or main. git failing → not standing (fail closed). Reverts inside
+  # C..D were reviewed by D itself and do not count (review of sheepdog 87dce4aec #1).
+  local out
+  out=$(git log --format=%H -i -E --grep='^This reverts commit [0-9a-f]{7,40}' --grep='^Revert "' "$1..$2" 2>/dev/null) || return 1
+  [ -z "$out" ]
 }
 superseded() { # superseded <C> <the base C's blocked review used, or -> <head> → 0 when a LATER completed dev review re-reviewed
   # all of C's range and stands: a review of a descendant D of C (C is an ancestor of D; D in C..head, not on main) whose own range started at or
@@ -318,11 +129,10 @@ superseded() { # superseded <C> <the base C's blocked review used, or -> <head> 
     [[ "$rb" =~ ^[0-9a-f]{40}$ ]] || continue
     # D's range began at or below C's, and C is inside it
     git merge-base --is-ancestor "$rb" "$rc" 2>/dev/null && ! git merge-base --is-ancestor "$c" "$rb" 2>/dev/null || continue
-    # and what D's review vouched for still stands: no standing revert AFTER D (in D..head) of D or of any commit D's
-    # review saw above C (review of foxhole-backend b4d18dbbc #1: a passing fix reverted later restored C's blocked code,
-    # and D's pass still superseded C's block). A revert inside C..D was itself reviewed by D: it disqualifies nothing
-    # (review of sheepdog 87dce4aec #1). Only a revert that is itself undone (revert_state 1) is ignored.
-    review_stands "$c" "$d" "$h" 0 || continue
+    # and what D's review vouched for still stands: NO revert at all after D (in D..head) — review_stands (review of
+    # foxhole-backend b4d18dbbc #1: a passing fix reverted later restored C's blocked code, and D's pass still superseded
+    # C's block). A revert inside C..D was itself reviewed by D: it disqualifies nothing (review of sheepdog 87dce4aec #1).
+    review_stands "$d" "$h" || continue
     return 0
   done
   return 1

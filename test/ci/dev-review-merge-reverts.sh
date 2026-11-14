@@ -45,8 +45,10 @@ PIN=source
   g revert --no-edit "$R" >/dev/null
   [ "$(cat bug)" = good ] || fail 'fixture did not restore the passing fix'
   repair_round
-  only_fixes "$E" "$F" || fail 'reverting the revert did not restore valid supersession'
-  echo 'ok: reverting the revert restores the evidence'
+  # supervisor 11-14 (eleven rounds of restoration proofs since 11-13): a revert after D is never analysed — D's exact
+  # tree being back does not restore the supersession; C's range gets a full review (conservative, always safe)
+  if only_fixes "$E" "$F"; then fail 'a revert-of-revert after D still let D supersede the old block'; fi
+  echo 'ok: reverting the revert still requires a full review (no restoration proofs)'
 
   # Unrelated same-file hunks after R do not stop U from undoing R's patch.
   # Check both mainlines and unrelated hunks retained after U as well.
@@ -80,10 +82,10 @@ PIN=source
         git diff --exit-code "$D" HEAD || fail 'metadata fixture did not restore the exact reviewed tree'
       fi
       repair_round "$D"
-      only_fixes "$E" "$F" || fail "mainline $mainline metadata after R invalidated a restored repair (retained=$retained_metadata)"
+      if only_fixes "$E" "$F"; then fail "mainline $mainline merge-undo restoration (retained=$retained_metadata) still approved tests-only"; fi
       run 4 "review $F" success skipped "$E" tests-only-fix
-      RP "$F" o/r "$P" || fail "restored repair lost deployment coverage: $(cat "$T/err")"
-      echo "ok: mainline $mainline restoration tolerates unrelated metadata (retained=$retained_metadata)"
+      if RP "$F" o/r "$P"; then fail "mainline $mainline merge-undo restoration (retained=$retained_metadata) still approved"; fi
+      echo "ok: mainline $mainline merge-undo restoration with metadata (retained=$retained_metadata): full review"
 
       g checkout -q --detach "$restored_metadata"
       g revert --no-edit "$restored_metadata" >/dev/null
@@ -185,8 +187,8 @@ PIN=source
       g revert --no-edit -m "$mainline" "$M" >/dev/null
       git diff --exit-code "$D" HEAD || fail 'equivalent repair did not retain the reviewed tree'
       repair_round
-      only_fixes "$E" "$F" || fail "mainline $mainline $unrelated revert invalidated a retained repair"
-      echo "ok: mainline $mainline $unrelated merge revert preserves equivalent repair"
+      if only_fixes "$E" "$F"; then fail "mainline $mainline $unrelated merge revert after D still approved tests-only"; fi
+      echo "ok: mainline $mainline $unrelated merge revert of a retained equivalent: full review"
     done
   done
 
@@ -207,8 +209,8 @@ PIN=source
   g revert --no-edit -m 1 "$M" >/dev/null
   git diff --exit-code "$Q" HEAD || fail 'same-file fixture did not restore the retained mainline'
   repair_round
-  only_fixes "$E" "$F" || fail 'an unrelated retained hunk invalidated a surviving repair'
-  echo 'ok: patch preservation permits unrelated retained edits in the same file'
+  if only_fixes "$E" "$F"; then fail 'a merge revert with retained same-file hunks still approved tests-only'; fi
+  echo 'ok: a merge revert with retained same-file hunks: full review'
 
   # Preserving only one part of the reviewed patch is insufficient. The merge
   # supplies the other repaired file, so its revert must invalidate the pass.
@@ -237,8 +239,8 @@ PIN=source
   git diff --exit-code "$D" HEAD || fail 'merge revert did not restore the exact passing tree'
   restored=$(git rev-parse HEAD)
   repair_round
-  only_fixes "$E" "$F" || fail 'reverting a merge introducing the revert did not restore supersession'
-  echo 'ok: reverting the merge with mainline 1 restores the evidence'
+  if only_fixes "$E" "$F"; then fail 'reverting a merge introducing the revert still let D supersede'; fi
+  echo 'ok: reverting the merge with mainline 1: still a full review'
 
   # Reverting the restoring commit must invalidate the evidence again.
   g checkout -q --detach "$restored"
@@ -257,8 +259,8 @@ PIN=source
   g revert --no-edit -m 2 "$M2" >/dev/null
   git diff --exit-code "$D" HEAD || fail 'mainline 2 did not restore the passing tree'
   repair_round
-  only_fixes "$E" "$F" || fail 'mainline 2 restoration did not restore supersession'
-  echo 'ok: reverting the merge with mainline 2 restores the evidence'
+  if only_fixes "$E" "$F"; then fail 'mainline 2 restoration still let D supersede'; fi
+  echo 'ok: reverting the merge with mainline 2: still a full review'
 
   # A revert on the retained mainline is not undone by reverting the merge.
   g checkout -q --detach "$D"
@@ -306,9 +308,9 @@ PIN=source
     git diff --quiet "$U^" "$U" -- bug || fail 'cancellation fixture changed the bug in U'
     git diff --exit-code "$D" "$U" || fail 'cancellation fixture did not restore D tree'
     repair_round "$D"
-    only_fixes "$E" "$F" || fail 'cancelled reverts invalidated the standing repair'
+    if only_fixes "$E" "$F"; then fail 'cancelling reverts after D still approved tests-only'; fi
     run 4 "review $F" success skipped "$E" tests-only-fix
-    RP "$F" o/r "$P" || fail "standing repair lost deployment coverage: $(cat "$T/err")"
+    if RP "$F" o/r "$P"; then fail "cancelling reverts after D still approved"; fi
 
     g checkout -q --detach "$U"
     g revert --no-edit "$S" >/dev/null
