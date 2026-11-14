@@ -48,6 +48,67 @@ PIN=source
   only_fixes "$E" "$F" || fail 'reverting the revert did not restore valid supersession'
   echo 'ok: reverting the revert restores the evidence'
 
+  # Candidate merge drivers must not turn a conflicting repair into a no-op.
+  # Q's final assignment disables auth; M resolves it safely, and reverting M
+  # restores Q. Union (including a nested macro) and a custom driver all hide
+  # the conflict in the old merge-tree proof. Check producer and consumer.
+  saved_C=$C; saved_D=$D
+  g checkout -q --detach "$C"
+  mkdir -p config
+  C=$(commit_file 'blocked auth setting' 'REQUIRE_AUTH=0' config/settings.env)
+  D=$(commit_file 'passing auth repair' 'REQUIRE_AUTH=1' config/settings.env)
+  auth_C=$C; auth_D=$D
+  for driver in union nested-macro custom; do
+    for mainline in 1 2; do
+      C=$auth_C; D=$auth_D
+      g checkout -q --detach "$C"
+      case "$driver" in
+        union) printf 'config/settings.env merge=union\n' > .gitattributes; attr=.gitattributes ;;
+        nested-macro)
+          printf '[attr]keep merge=union\n' > .gitattributes
+          printf 'settings.env keep\n' > config/.gitattributes
+          attr=.gitattributes ;;
+        custom)
+          printf 'settings.env merge=take-other\n' > config/.gitattributes
+          git config merge.take-other.driver 'cp %B %A'
+          attr=config/.gitattributes ;;
+      esac
+      g add "$attr" config
+      g commit -q -m "candidate selects $driver merge semantics"
+      Q=$(commit_file 'unsafe trailing auth assignment' $'REQUIRE_AUTH=1\nREQUIRE_AUTH=0' config/settings.env)
+      if [ "$mainline" = 2 ]; then
+        g checkout -q --detach "$D"
+        side=$Q
+      else
+        side=$D
+      fi
+      if ! g merge -q --no-ff --no-commit "$side"; then
+        [ -n "$(git ls-files -u -- config/settings.env)" ] || fail 'driver fixture merge failed'
+      fi
+      printf 'REQUIRE_AUTH=1\n' > config/settings.env
+      g add config/settings.env; g commit -q -m 'resolve merged auth setting safely'
+      M=$(git rev-parse HEAD)
+      g revert --no-edit -m "$mainline" "$M" >/dev/null
+      git diff --exit-code "$Q" HEAD || fail 'driver fixture did not restore unsafe mainline'
+      [ "$(tail -1 config/settings.env)" = REQUIRE_AUTH=0 ] || fail 'auth is not disabled'
+      repair_round "$D"
+      bad=0
+      if only_fixes "$E" "$F"; then
+        echo "FAIL: $driver mainline $mainline hid a reverted auth repair from tests-only gate" >&2
+        bad=1
+      fi
+      run 4 "review $F" success skipped "$E" tests-only-fix
+      if RP "$F" o/r "$P"; then
+        echo "FAIL: $driver mainline $mainline hid a reverted auth repair from deployment coverage" >&2
+        bad=1
+      fi
+      [ "$bad" = 0 ] || fail 'candidate merge driver forged patch preservation'
+      git config --unset-all merge.take-other.driver || true
+      echo "ok: $driver mainline $mainline cannot forge patch preservation"
+    done
+  done
+  C=$saved_C; D=$saved_D
+
   # D is introduced topologically, but its patch already lives on the retained
   # mainline as Q. Reverting M must remove only the unrelated side change.
   saved_C=$C; saved_D=$D
