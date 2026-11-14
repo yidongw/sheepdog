@@ -92,6 +92,24 @@ verdict_m() { # verdict_m <sha> → sets vm to its verdict, asked once per scrip
   [ -n "${_verdicts[$1]+x}" ] || _verdicts[$1]=$(verdict "$1")
   vm=${_verdicts[$1]}
 }
+preserves_patch() ( # preserves_patch <constituent> <post-revert commit>
+  # Candidate attributes (notably merge=union) can hide a real conflict and
+  # return the post-revert tree unchanged. Prove preservation in an isolated
+  # bare repository: info/attributes has priority over every tree's attributes,
+  # and forces Git's built-in conflict-detecting text driver on every path.
+  # Borrow objects read-only; temporary merge results stay in the proof repo.
+  local proof merged
+  proof=$(mktemp -d) || return 1
+  trap 'rm -rf "$proof"' EXIT
+  git init -q --bare --template= "$proof" || return 1
+  mkdir -p "$proof/info" || return 1
+  git rev-parse --path-format=absolute --git-path objects > "$proof/objects/info/alternates" || return 1
+  printf '%s\n' '* merge=text' > "$proof/info/attributes" || return 1
+  merged=$(GIT_ATTR_NOSYSTEM=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+    git --git-dir="$proof" -c core.attributesFile=/dev/null -c merge.renormalize=false \
+    merge-tree --write-tree --merge-base="$1^1" "$1" "$2" 2>/dev/null) || return 1
+  [ "$merged" = "$(git rev-parse "$2^{tree}")" ]
+)
 reverts_of() { # reverts_of <commit> <since> <head> [restore]
   # Git names the merge, not its constituent commits, in a merge revert. Only
   # commits introduced relative to the recorded mainline can be undone by it.
@@ -99,7 +117,7 @@ reverts_of() { # reverts_of <commit> <since> <head> [restore]
   # the undo's parent contains the constituent's result, and the undo restores
   # its previous state. Final contents alone prove nothing when constituents
   # cancel each other and the merge undo changes only unrelated paths.
-  local c=$1 since=$2 h=$3 restore=${4:-0} r m p body merged
+  local c=$1 since=$2 h=$3 restore=${4:-0} r m p body
   local -a paths=()
   git log --format=%H -F --grep="This reverts commit $c" "$since..$h" 2>/dev/null || return 1
   while read -r r; do
@@ -117,8 +135,7 @@ reverts_of() { # reverts_of <commit> <since> <head> [restore]
     # survived, even with unrelated edits in the same file. A conflict is not
     # proof of preservation: conservatively require a full review in that case.
     if [ "$restore" != 1 ]; then
-      if merged=$(git merge-tree --write-tree --merge-base="$c^1" "$c" "$r" 2>/dev/null) &&
-         [ "$merged" = "$(git rev-parse "$r^{tree}")" ]; then continue; fi
+      if preserves_patch "$c" "$r"; then continue; fi
     fi
     if [ "$restore" = 1 ]; then
       git rev-parse --verify "$c^1" >/dev/null 2>&1 || continue
