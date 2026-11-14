@@ -92,6 +92,19 @@ verdict_m() { # verdict_m <sha> → sets vm to its verdict, asked once per scrip
   [ -n "${_verdicts[$1]+x}" ] || _verdicts[$1]=$(verdict "$1")
   vm=${_verdicts[$1]}
 }
+revert_state() { # revert_state <r> <head> [depth] → 0: r stands in r..head · 1: r is undone (a standing revert of it) ·
+  # 2: unknown (a revert chain deeper than 64). Tri-state, so the depth limit never flips a verdict by parity: a caller
+  # that needs "undone" to proceed treats 2 as "stands" (review of sheepdog ea594cc26 #1/#2: review-repair.sh reverted()
+  # answers "reverted" at its limit — fail-closed for a repair, fail-OPEN when it is asked whether a revert was undone).
+  local r=$1 h=$2 k=${3:-0} x st unknown=0
+  [ "$k" -lt 64 ] || return 2
+  for x in $(git log --format=%H -F --grep="This reverts commit $r" "$r..$h" 2>/dev/null || true); do
+    st=0; revert_state "$x" "$h" $((k + 1)) || st=$?
+    case "$st" in 0) return 1 ;; 2) unknown=1 ;; esac
+  done
+  [ "$unknown" = 0 ] || return 2
+  return 0
+}
 superseded() { # superseded <C> <the base C's blocked review used, or -> <head> → 0 when a LATER completed dev review re-reviewed
   # all of C's range and stands: a review of a descendant D of C (C is an ancestor of D; D in C..head, not on main) whose own range started at or
   # below C's (its review-range base is an ancestor of C's base, so every commit C's review saw was in D's) and that passed,
@@ -99,7 +112,7 @@ superseded() { # superseded <C> <the base C's blocked review used, or -> <head> 
   # in D's round, and D's findings — C's still-open ones among them — are what the repairs answer (owner 11-13: dev gets one
   # review; tralyx 11-13/14: dev heads blocked and superseded at once by a main→dev merge — 4b6671346, bc1f40bd3,
   # f54379cfd — were never repaired by trailer, so no range above them could ever be a tests-only round again).
-  local c=$1 rc=$2 h=$3 d v rb x r undone
+  local c=$1 rc=$2 h=$3 d v rb x r st undone
   [[ "$rc" =~ ^[0-9a-f]{40}$ ]] || return 1
   for d in $(git rev-list "$c..$h" "^$MAINREF" 2>/dev/null); do
     # one containment rule (as repaired()): D's head contains C — a review on a side branch merged in later never saw C
@@ -116,11 +129,12 @@ superseded() { # superseded <C> <the base C's blocked review used, or -> <head> 
     # and what D's review vouched for still stands: no standing revert AFTER D (in D..head) of D or of any commit D's
     # review saw above C (review of foxhole-backend b4d18dbbc #1: a passing fix reverted later restored C's blocked code,
     # and D's pass still superseded C's block). A revert inside C..D was itself reviewed by D: it disqualifies nothing
-    # (review of sheepdog 87dce4aec #1). "Standing" = review-repair.sh's reverted() on the revert (a revert of it restores).
+    # (review of sheepdog 87dce4aec #1). Only a revert that is itself undone (revert_state 1) is ignored.
     undone=0
     for x in $(git rev-list "$c..$d" 2>/dev/null); do
       for r in $(git log --format=%H -F --grep="This reverts commit $x" "$d..$h" 2>/dev/null || true); do
-        reverted "$r" "$h" || { undone=1; break 2; }
+        st=0; revert_state "$r" "$h" || st=$?
+        [ "$st" = 1 ] || { undone=1; break 2; }   # the revert stands, or the chain is too deep to tell: D does not count
       done
     done
     [ "$undone" = 0 ] || continue
