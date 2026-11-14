@@ -1088,6 +1088,11 @@ dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> 
   local s=$1 f=$2 cul=$3 url=$4 why att task=$5
   att=$(attribution "$s" "$f")
   if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$s.findings" ]; then printf '%s\n' "$f" > "$STATE/sent/$s.findings"; fi   # for the FYI when its fix lands
+  if dev_carries_fix "$s" "$(named_files "$f")"; then
+    if [ -n "${DRY:-}" ]; then echo "DRY blocked ${s:0:9}: $DEV already carries a fix for ${s:0:9} ($dupfix_why) — no fixer"
+    elif [ ! -e "$STATE/sent/$s.dupfix" ]; then log "blocked ${s:0:9}: $DEV already carries a fix for ${s:0:9} ($dupfix_why) — no fixer"; touch "$STATE/sent/$s.dupfix"; fi
+    return 0
+  fi
   # Every blocking finding pinned on a culprit commit C that $DEV already repairs (an effective Review-Fix-Of: C beyond C):
   # this head is an older copy of an already-fixed bug — no fixer, no author, no budget (supervisor 11-12: fc8381277's
   # findings, fixed by ca1de4505, re-blocked every later head without it, each spending a full fix budget).
@@ -1122,11 +1127,6 @@ dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> 
   if [ -n "$att" ]; then task="$task
 Whose code each finding is (culprit commit → its Thread:):
 $(culprit_lines "$att")"; fi
-  if dev_carries_fix "$s" "$(named_files "$f")"; then
-    if [ -n "${DRY:-}" ]; then echo "DRY blocked ${s:0:9}: $DEV already carries a fix for ${s:0:9} ($dupfix_why) — no fixer"
-    elif [ ! -e "$STATE/sent/$s.dupfix" ]; then log "blocked ${s:0:9}: $DEV already carries a fix for ${s:0:9} ($dupfix_why) — no fixer"; touch "$STATE/sent/$s.dupfix"; fi
-    return 0
-  fi
   if dev_fixer_free "$s" && fix_budget_ok "$s" blocked "$f"; then
     if wake_fixer "$s" blocked "dev: fix review findings on ${s:0:9}" "$task" "$DEV" "$cul" && [ -z "${DRY:-}" ]; then dev_fixer_claim "$s"; fi
   fi
