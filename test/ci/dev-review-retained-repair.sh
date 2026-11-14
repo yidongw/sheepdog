@@ -611,7 +611,7 @@ restoration_cases() {
     printf '%s\n' "$fixed" > bug
     g add bug; g revert --continue >/dev/null
     git diff --exit-code "$D" HEAD || fail 'resolved undo must restore exact approved tree'
-    approval 1 "mainline $mainline conflict resolved complete restoration"
+    approval 0 "mainline $mainline conflict resolved complete restoration"
 
 
     # Restore U by undoing a merge which introduced it from the other parent.

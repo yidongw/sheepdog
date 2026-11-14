@@ -136,10 +136,6 @@ t3() { echo "Thread $3 is no longer available."; }
 dev_fixer_free "$NS"; dev_fixer_free "$NS"; dev_fixer_free "$NS"
 test "$(grep -c 'slot freed' "$STATE/log")" = 1
 t3() { printf '%s %s\n' "$3" "$t3_status"; }
-# re-check of 0cd95ca42 #3: the split "rest" fixer of a partly repaired block holds the slot too, and frees it when it ends
-rm -f "$STATE"/sent/* "$STATE/log"; echo "$AS" > "$STATE/dev-fixer.active"; echo "mcp:rest" > "$STATE/sent/$AS.fixer-rest"
-t3_status=running; ! dev_fixer_free "$NS" || { echo "negative check failed: rest fixer running must hold the slot" >&2; exit 1; }
-t3_status=completed; dev_fixer_free "$NS"; grep -q 'slot freed' "$STATE/log"
 echo 'dev fixer slot: every fixer of the round counts'
 # 11-12 22:37Z: a commit the dispatcher made (Loop: review-dispatch) has no author thread
 TD=$(mktemp -d); git -C "$TD" init -q; git -C "$TD" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "revert on dev" -m "Loop: review-dispatch

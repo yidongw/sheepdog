@@ -17,7 +17,7 @@ DEV_REVERT_AFTER_SEC=3600 DEV_REVERT_WARN_SEC=900 key_prefix="" merged_one=1 SUP
 mkdir -p "$STATE/sent" "$TRUSTED/scripts/ci" "$OUTBOX"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$TRUSTED/scripts/ci/review-passed.sh"   # no round here passed
 LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
-eval "$(sed -n '/^dev_round_noop() {/,/^}/p; /^dev_merge_only() {/,/^}/p; /^review_infra_reason() {/,/^}/p; /^run_verdict() {/,/^}/p; /^dev_verdict_run() {/,/^}/p; /^named_files() {/p; /^dev_split_main() {/,/^}/p; /^main_culprit_hint() {/,/^}/p; /^findings_subset() {/,/^}/p' "$D")"
+eval "$(sed -n '/^dev_round_noop() {/,/^}/p; /^dev_merge_only() {/,/^}/p; /^review_infra_reason() {/,/^}/p; /^run_verdict() {/,/^}/p; /^dev_verdict_run() {/,/^}/p; /^named_files() {/p' "$D")"
 review_list() { gh run list -R "$REPO" -w review.yml -L "$1" --json "$2" -q "$3"; }   # this fake gh answers lists pre-filtered
 loop=$(python3 - "$D" <<'PY'
 import sys

@@ -32,12 +32,6 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   The supervisor is told once per failed review attempt (notice key `infra.dev.<run>.<review job id>`: a rerun is a new
   job; repeated scans never repeat it; an undelivered alert is retried, a gone supervisor falls back to the CI owner),
   with the `gh run rerun <id> --failed` command; the next push to dev re-triggers the review too.
-- **Pre-existing main findings in a dev review** (contract, Findings): a blocking finding whose culprit commit is already
-  on main is recorded once in `$STATE/open-findings.log` (so the next reviews see it as known-open / pre-existing) and
-  never routed on dev — no fixer, no fix round, no author notice, no `fixfailed`, no revert clock; only the head's other
-  findings are routed (`dev_split_main`). Blocked only by such findings, the head lands like a passing review (the train
-  and the head loop ask `review-passed.sh`, which decides from the trusted run with the same rule), and its tests are not
-  cancelled when the review fails. There is no cross-chain "same problem" matching: main's own chain owns the finding.
 - **Open findings**: findings whose fix rounds are spent are kept in `$STATE/open-findings.log`, which the review job
   passes to the reviewer (`open-findings-file`) so repeats are recognised as pre-existing.
 

@@ -21,13 +21,7 @@ review_api() { gh api "repos/$repo/$1"; }
 REVIEW_DEFAULT_BRANCH=$BR
 . "$(dirname "${BASH_SOURCE[0]}")/review-runs.sh"   # review_runs: the one provenance rule, every page (not only the newest 100)
 list_runs() { review_runs "$1"; }
-ids=$(list_runs success | jq -r --arg a "review $sha" --arg b "recheck $sha" 'select(.display_title == $a or .display_title == $b) | "\(.id):pass"')
-# A DEV review ("review <sha>", never a re-check) that blocked ONLY on findings whose culprit commit is already on main
-# (review-main-culprits.sh, supervisor 11-14: dev 0cd95ca42 blocked by main's 341cca4e9) stands as a passing review —
-# decided from the trusted run alone. Tried only after no successful run approved (its listing is read only then).
-# REVIEW_MAIN_FINDINGS=0 (the dispatcher, for a blocked head whose findings name no main commit: it saves the reads)
-# skips it — that can only refuse, never approve.
-. "$(dirname "${BASH_SOURCE[0]}")/review-main-culprits.sh"
+ids=$(list_runs success | jq -r --arg a "review $sha" --arg b "recheck $sha" 'select(.display_title == $a or .display_title == $b) | .id')
 # A workflow whose jobs were all skipped (CI failed, or not a push) still concludes
 # "success": require the review job itself to have run its blocking step successfully.
 attest_of_kind() { # attest_of_kind <run id> → "<head> <base> <main at review time, or -> <kind>" (kind "review" when the artifact has none); 1 when no usable artifact
@@ -58,34 +52,17 @@ covered() { review_covered "$1" "$2" "$sha" "${3:-0}"; }
 #     review time, so the answer holds after main advanced onto the fix). Main then reviews the fix: its head carries
 #     Review-Fix-Of:, which starts a main re-check when it lands (review.yml), over all commits since the last completed
 #     main review.
-#   · it is a DEV review that blocked only on pre-existing MAIN findings (review-main-culprits.sh): every blocking
-#     finding's culprit commit (the reviewer's full-sha commit=) is on main as the attestation recorded it, the tests
-#     passed and only the blocking step failed. Never a re-check, never a finding without a culprit or with one off main.
 # A run whose review never ran for any other reason (cancelled, setup / gate failure) never passes.
 # REVIEW_KIND_OUT=<file>: the kind of the approving run ("review" | "tests-only-fix") is written there (merge-branch.sh).
-for round in pass main; do
-if [ "$round" = main ]; then
-  [ "${REVIEW_MAIN_FINDINGS:-1}" != 0 ] || break
-  ids=$(list_runs failure | jq -r --arg a "review $sha" 'select(.display_title == $a and .conclusion == "failure") | "\(.id):main"')
-fi
-for entry in $ids; do
-  id=${entry%%:*}; how=${entry#*:}
+for id in $ids; do
   jobs=$(gh api "repos/$repo/actions/runs/$id/jobs")
   tests=$(jq '[.jobs[] | select((.name | sub("^.* / "; "")) == "tests" and .conclusion == "success")] | length' <<<"$jobs")
   [ "${tests:-0}" -gt 0 ] || continue
-  if [ "$how" = main ]; then
-    if mc=$(review_main_culprits review_api "$id" "$sha" "$jobs"); then
-      st=main-findings
-      echo "run $id: blocked only by finding(s) whose culprit is on $BR ($(awk '{printf "#%s %s ", $1, substr($3, 1, 9)}' <<<"$mc")) — pre-existing, main's own re-check owns them" >&2
-    else continue; fi
-  else
   [ "$(jq '[.jobs[] | select((.name | sub("^.* / "; "")) == "review" and .conclusion == "success")] | length' <<<"$jobs")" -gt 0 ] || continue
   st=$(jq -r '[.jobs[] | select((.name | sub("^.* / "; "")) == "review") | .steps[] | select(.name | startswith("Review (blocking")) | .conclusion][0] // ""' <<<"$jobs")
-  fi
   hb=$(attest_of_kind "$id") || hb=""
   kind=${hb##* }
   case "$st" in
-    main-findings) [ "$kind" = review ] || continue ;;
     success) [ "$kind" = tests-only-fix ] && { echo "run $id: a tests-only-fix attestation on a reviewed step" >&2; continue; } ;;
     skipped)
       [ "$kind" = tests-only-fix ] || continue
@@ -126,7 +103,6 @@ for entry in $ids; do
   fi
   [ -z "${REVIEW_KIND_OUT:-}" ] || { [ "$st" = skipped ] && echo tests-only-fix || echo review; } > "$REVIEW_KIND_OUT"
   echo "trusted tests + review passed for ${sha:0:12} (run $id)"; exit 0
-done
 done
 echo "no successful trusted review for ${sha:0:12}" >&2
 exit 1

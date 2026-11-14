@@ -17,7 +17,7 @@ eval "$(fns repair_effective fix_reverted thread_of fixer_receipt_thread range_t
   dev_round_pending dev_carries_fix hotfix_fix_pushed named_files blocked_author_reason dev_blocked \
   or_supervisor norm_tid finding_blocks finding_meta finding_route review_round_route route_reason attribute_finding \
   attribution findings_subset att_of culprit_lines notify_attributed author_fixed author_turn split_fixer_failed \
-  split_fixer dev_blocked_split revert_after_for own_findings fyi_author culprits_repaired finding_norm finding_text repair_declares)"
+  split_fixer dev_blocked_split revert_after_for own_findings fyi_author culprits_repaired)"
 eval "$(sed -n '/^digest_file() {/p; /^digest_add() {/,/^}/p' scripts/ci/review-notify.sh)"   # fyi_author → the authors' digest
 SUPERVISOR_THREAD=import:claudeAgent:supervisor DISPATCH_THREAD=00000000-0000-4000-8000-0000000000c1 AUTHOR_FIX_WINDOW_SEC=3600
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
