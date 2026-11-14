@@ -1060,29 +1060,19 @@ blocked_author_reason() { # blocked_author_reason <S> → why the authors must a
   if launch_failed "$s" blocked; then echo "the fixer agent failed to start (t3 thread start failed repeatedly)"; fi
   return 0
 }
-culprits_repaired() { # culprits_repaired <S> <attribution> → per finding (supervisor 11-14, tralyx 26b73ac1b / 33b2b479b: one
-  # unrepaired culprit re-routed the whole set, so authors got findings dev had already repaired again): sets
-  #   repaired_nums — the findings whose culprit commit has an effective repair on origin/$DEV that S does NOT already contain
-  #                   (repair_effective; re-check of b06fcbb80 #1: a repair already in the reviewed head that still fails
-  #                   review fixed nothing — fresh findings)
-  #   open_nums     — every other blocking finding (no culprit commit, or one with no such repair)
-  #   dupfix_why    — which repair answers which culprit
-  # → 0 when at least one finding is repaired, 1 when none is (or there is no attribution)
-  local s=$1 n route c t r why=""; shift
+culprits_repaired() { # Commit-level repair ancestry cannot prove a finding was repaired.
+  # Finding numbers belong to a particular review, and Fixes-Finding trailers do
+  # not bind them to that review or its text. Keep every finding open until a
+  # fresh review verifies it; Review-Fix-Of alone is never suppression evidence.
+  local n route c t
   repaired_nums="" open_nums="" dupfix_why=""
-  [ -n "$1" ] || return 1
-  declare -A rep=()
   while read -r n route c t; do
-    [ -n "$n" ] || continue
-    if [ -z "$c" ] || [ "$c" = "-" ]; then open_nums="$open_nums $n"; continue; fi
-    if [ -z "${rep[$c]+x}" ]; then rep[$c]=$(repair_effective "$c" "" "origin/$DEV" "^$s" || true); fi
-    r=${rep[$c]}
-    if [ -n "$r" ]; then repaired_nums="$repaired_nums $n"; why="$why #$n: ${r:0:9} repairs ${c:0:9};"
-    else open_nums="$open_nums $n"; fi
-  done <<<"$1"
-  repaired_nums=${repaired_nums# } open_nums=${open_nums# } dupfix_why=${why# }
-  [ -n "$repaired_nums" ]
+    [ -n "$n" ] && open_nums="$open_nums $n"
+  done <<<"$2"
+  open_nums=${open_nums# }
+  return 1
 }
+
 dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> <run url> <fixer task> → the reviewer's route per
   # finding (author groups, see dev_blocked_split); otherwise fixer first, authors only when it failed
   local s=$1 f=$2 cul=$3 url=$4 why att task=$5
