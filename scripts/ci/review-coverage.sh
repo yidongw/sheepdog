@@ -44,12 +44,17 @@ review_clean_merge() {
   t=$(git merge-tree --write-tree "$1^1" "$1^2" 2>/dev/null) || return 1
   [ "${t%%$'\n'*}" = "$(git rev-parse "$1^{tree}")" ]
 }
-review_link() { # <run id> <link head> <anchor> <candidate head> <depth>
+. "$(dirname "${BASH_SOURCE[0]}")/review-main-culprits.sh"   # review_main_culprits: THE rule review-passed.sh approves by
+review_link() { # <run id> <link head> <anchor> <candidate head> <depth> [<title verb: review|recheck>]
   local att v
   att=$(review_attestation "$1" "$2") || return 1
   [ "$(jq -r .kind <<<"$att")" = review ] || return 1
   v=$(review_verdict "$1") || return 1
-  [ "$v" = pass ] || repaired "$2" "$4" || return 1
+  # a link when it passed, or is repaired, or — a DEV review only — it blocked solely on pre-existing main findings: the
+  # same rule review-passed.sh approves such a head by, so a head the train landed that way stays a link of later chains
+  # (review of dev 5061f8b91 #1/#2). Never for a re-check (all of its culprits are on main by definition).
+  [ "$v" = pass ] || repaired "$2" "$4" \
+    || { [ "${6:-}" = review ] && review_main_culprits review_api "$1" "$2" >/dev/null 2>&1; } || return 1
   review_covered "$(jq -r .base <<<"$att")" "$3" "$4" "$5"
 }
 review_covered() { # <base> <anchor (deployed or review-time main)> <candidate head> [depth]
@@ -57,10 +62,12 @@ review_covered() { # <base> <anchor (deployed or review-time main)> <candidate h
   git merge-base --is-ancestor "$b" "$d" 2>/dev/null && return 0
   [ "$n" -lt 40 ] || return 1
   [ -n "${review_completed_runs:-}" ] || review_completed_runs=$(review_runs completed)
-  for id in $(jq -r --arg a "review $b" --arg r "recheck $b" '
-    select(.display_title == $a or .display_title == $r) | .id' <<<"$review_completed_runs"); do
-    review_link "$id" "$b" "$d" "$h" "$((n + 1))" && return 0
-  done
+  local verb
+  while read -r id verb; do
+    [ -n "$id" ] || continue
+    review_link "$id" "$b" "$d" "$h" "$((n + 1))" "$verb" && return 0
+  done < <(jq -r --arg a "review $b" --arg r "recheck $b" '
+    select(.display_title == $a or .display_title == $r) | "\(.id) \(.display_title | split(" ")[0])"' <<<"$review_completed_runs")
   if review_clean_merge "$b"; then
     review_covered "$(git rev-parse "$b^1")" "$d" "$h" "$((n + 1))" \
       && review_covered "$(git rev-parse "$b^2")" "$d" "$h" "$((n + 1))" && return 0

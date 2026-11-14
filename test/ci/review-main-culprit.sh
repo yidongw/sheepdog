@@ -124,7 +124,7 @@ for f in review_list findings findings_subset main_culprit_hint dev_split_main m
   declare -F "$f" >/dev/null || fail "helper $f not extracted"
 done
 fixer_receipt_thread() { :; }
-dev_blocked() { echo "dev_blocked $1" >> "$T/calls"; printf '%s\n' "$2" > "$T/routed"; }
+dev_blocked() { echo "dev_blocked $1" >> "$T/calls"; printf '%s\n' "$2" > "$T/routed"; printf '%s\n' "${6:-}" > "$T/routed-all"; }
 wake_fixer() { echo "wake_fixer $1 $2" >> "$T/calls"; }
 notify() { echo "notify $2" >> "$T/calls"; }; notify_best_effort() { notify "$@"; }; notify_attributed() { echo "notify_attributed $2" >> "$T/calls"; }
 culprit_threads() { :; }; attribution() { :; }; fixer_phrase() { :; }; own_findings() { :; }; revert_after_for() { echo 3600; }
@@ -264,4 +264,34 @@ fixture_log "$T/log" "$C" 0; scenario "review $H" success "$STEPS_OK" "$MAINSHA"
 (cd "$TRUSTED" && bash "$ROOT/scripts/ci/merge-branch.sh" dev "$H" >/dev/null 2>&1) || fail "merge-branch.sh refused (a)"
 g fetch -q origin; landed || fail "merge-branch.sh did not land (a)"
 echo "ok - merge-branch.sh lands (a)"
+
+# ── review of dev 5061f8b91 #1/#2: a head approved this way stays a link of later coverage chains (review-coverage.sh uses
+#    the same rule) — K reviewed H..K and passing, deployed P = B0: review-passed.sh K o/r B0 approves; with H blocked by a
+#    dev culprit it does not; a blocked RE-CHECK of H is never such a link ──
+coverage_case() { # <culprit for #1/#2> <title verb of H's run> → review-passed.sh K o/r B0 exit code
+  fixture_log "$T/log" "$1" 0
+  scenario "$2 $H" success "$STEPS_OK" "$MAINSHA"
+  echo "{\"jobs\":[{\"name\":\"sheepdog / tests\",\"conclusion\":\"success\"},{\"name\":\"sheepdog / review\",\"id\":1601,\"conclusion\":\"success\",\"steps\":[{\"name\":\"Review (blocking; x)\",\"conclusion\":\"success\"}]}]}" > "$FX/jobs-601.json"
+  echo "{\"head\":\"$K\",\"base\":\"$H\",\"kind\":\"review\",\"main\":\"$H\"}" > "$FX/attest-601.json"
+  echo "[{\"id\":601,\"display_title\":\"review $K\",\"status\":\"completed\",\"conclusion\":\"success\"},{\"id\":$RID,\"display_title\":\"$2 $H\",\"status\":\"completed\",\"conclusion\":\"failure\"}]" > "$FX/runs.json"
+  local rc=0; (cd "$SRC" && bash "$ROOT/scripts/ci/review-passed.sh" "$K" o/r "$B0" >/dev/null 2>"$T/rp.err") || rc=$?
+  echo "$rc"
+}
+g checkout -q --detach "$H"; K=$(c later.sh "ordinary K after H" 22222222-2222-2222-2222-222222222222)
+[ "$(coverage_case "$C" review)" = 0 ] || fail "(e) K's chain through the main-only-approved H does not reach the deployed sha: $(cat "$T/rp.err")"
+[ "$(coverage_case "$D1" review)" = 1 ] || fail "(e) a dev-culprit block of H linked K's chain"
+[ "$(coverage_case "$C" recheck)" = 1 ] || fail "(e) a blocked re-check counted as a main-only link"
+echo "ok - (e) coverage: a main-only-approved dev review is a chain link, exactly when review-passed.sh approves it"
+
+# ── review of dev 5061f8b91 #3: the dupfix shortcut decides on the FULL finding set. Mixed round: #1/#2 main (C), #3 on dev
+#    culprit D1; dev carries an unrelated repair of D1. dev_blocked gets the full set as its 6th argument, and on it the
+#    shortcut does not fire (C has no repair), while on the filtered set alone it would ──
+fixture_log "$T/log" "$C" 1 "$D1"
+scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+run_train
+grep -q "^dev_blocked $H" "$T/calls" || fail "(f) the dev finding was not routed"
+grep -q "BLOCKED #1 " "$T/routed-all" && grep -q "BLOCKED #3 " "$T/routed-all" || fail "(f) dev_blocked did not get the full finding set"
+! grep -q "BLOCKED #1 " "$T/routed" || fail "(f) the main finding was routed"
+grep -q 'culprits_repaired "$s" "$(if \[ "$all" = "$f" \]' "$D" || fail "(f) dev_blocked's dupfix shortcut does not decide on the full set"
+echo "ok - (f) the dupfix shortcut decides on the full finding set; main findings only leave the routing"
 echo "main-culprit checks passed"

@@ -90,9 +90,10 @@ blocks the dev train. When every blocking finding is such a main finding, the tr
 only in its blocking step (with a well-formed verdict printed by the gate after its `review-gate: reviewing …` line),
 `review-passed.sh` approves the dev head as a passing review (kind `review`), so `merge-branch.sh`, the train and the
 deployers agree. Never for a re-check, nor when any finding has no culprit, `-`, an abbreviated sha or a commit off main;
-everything is read from the trusted run (jobs, review job log, attestation), nothing from the candidate. Such a round is
-no link of a coverage chain (`review_verdict` still says blocked): the next dev range re-reviews it — conservative, and
-the range producers and approvers agree.
+everything is read from the trusted run (jobs, review job log, attestation), nothing from the candidate. Such a round is also a link of coverage chains (`review_link`
+uses the same rule, dev reviews only), so a later head reviewed on top of it is covered back to the deployed sha. The
+dispatcher's dupfix shortcut still decides on the round's FULL finding set: removing main findings never makes a dev
+finding disappear.
 
 `review-gate.ts` prints `review-gate: ROUTE …`, then per finding `review-gate: FINDING #n route=… commit=…`,
 `review-gate: BLOCKED #n …` and `evidence: …`; the dispatcher reads those lines from the job log, together with the

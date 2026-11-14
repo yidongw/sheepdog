@@ -1129,15 +1129,18 @@ dev_split_main() { # dev_split_main <S> <run id> <findings> → sets dev_f (the 
   fi
   return 0
 }
-dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> <run url> <fixer task> → the reviewer's route per
-  # finding (author groups, see dev_blocked_split); otherwise fixer first, authors only when it failed
-  local s=$1 f=$2 cul=$3 url=$4 why att task=$5
+dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> <run url> <fixer task> [<ALL findings>] → the
+  # reviewer's route per finding (author groups, see dev_blocked_split); otherwise fixer first, authors only when it failed.
+  # <ALL findings>: the round's findings before the pre-existing main ones were removed (dev_split_main) — the dupfix
+  # shortcut below decides on the full set, so removing main findings can never make a dev finding disappear (review of dev
+  # 5061f8b91 #3: with the main finding gone, a dev finding whose culprit had an unrelated repair was skipped).
+  local s=$1 f=$2 cul=$3 url=$4 why att task=$5 all=${6:-$2}
   att=$(attribution "$s" "$f")
   if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$s.findings" ]; then printf '%s\n' "$f" > "$STATE/sent/$s.findings"; fi   # for the FYI when its fix lands
   # Every blocking finding pinned on a culprit commit C that $DEV already repairs (an effective Review-Fix-Of: C beyond C):
   # this head is an older copy of an already-fixed bug — no fixer, no author, no budget (supervisor 11-12: fc8381277's
   # findings, fixed by ca1de4505, re-blocked every later head without it, each spending a full fix budget).
-  if culprits_repaired "$s" "$att"; then
+  if culprits_repaired "$s" "$(if [ "$all" = "$f" ]; then printf '%s\n' "$att"; else attribution "$s" "$all"; fi)"; then
     if [ -n "${DRY:-}" ]; then echo "DRY blocked ${s:0:9}: $DEV already repairs its culprit commit(s) ($dupfix_why) — no fixer"
     elif [ ! -e "$STATE/sent/$s.dupfix" ]; then log "blocked ${s:0:9}: $DEV already repairs its culprit commit(s) ($dupfix_why) — no fixer"; touch "$STATE/sent/$s.dupfix"; fi
     return 0
@@ -1996,14 +1999,14 @@ if [ -z "${DRY:-}" ] && git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/
       bf=$(findings "$brid")
       if binfra=$(review_infra_reason "$bf"); then dev_infra "$bsha" "$brid" "$binfra"; else
       # findings whose culprit is already on main are main's (dev_split_main): recorded, never routed on $DEV
-      dev_split_main "$bsha" "$brid" "$bf"; bf=$dev_f
+      ball=$bf; dev_split_main "$bsha" "$brid" "$bf"; bf=$dev_f
       if [ -n "$(tr -d '[:space:]' <<<"$bf")" ]; then
       bcul=$(culprit_threads "$bsha" "$bf")
       # reviewer → fixer → author: the fixer gets it; the authors only when it failed (dev_blocked)
       dev_blocked "$bsha" "$bf" "$bcul" "https://github.com/$REPO/actions/runs/$brid" "Task: the blocking review stopped $DEV at ${bsha:0:9}. Findings:
 ${bf:-(none parsed; read the run)}
 Run: https://github.com/$REPO/actions/runs/$brid
-Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). Your worktree starts at origin/$DEV; first git reset --hard ${bsha} so the fix sits directly on the reviewed commit (later dev commits are NOT part of this fix). ONE commit with trailers Review-Fix-Of: ${bsha} and Hotfix: review fix of ${bsha:0:9}; push it with git push origin HEAD:refs/heads/devfix/${bsha:0:12} (NOT to $DEV, not to main). Once the trusted tests pass there, ${bsha:0:9} plus your fix land on main without a second review."
+Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). Your worktree starts at origin/$DEV; first git reset --hard ${bsha} so the fix sits directly on the reviewed commit (later dev commits are NOT part of this fix). ONE commit with trailers Review-Fix-Of: ${bsha} and Hotfix: review fix of ${bsha:0:9}; push it with git push origin HEAD:refs/heads/devfix/${bsha:0:12} (NOT to $DEV, not to main). Once the trusted tests pass there, ${bsha:0:9} plus your fix land on main without a second review." "$ball"
       fi
       fi
     fi
@@ -2304,7 +2307,7 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
     # the reviewer itself did not run: nothing was reviewed — no block, no fixer, no author notice, no revert clock
     if dinfra=$(review_infra_reason "$f"); then dev_infra "$sha" "$rid" "$dinfra"; continue; fi
     # findings whose culprit is on main are main's: recorded, never routed on $DEV (no fixer, round, notice or revert clock)
-    f=$dev_f
+    fall=$f; f=$dev_f
     if [ -z "$(tr -d '[:space:]' <<<"$f")" ]; then
       if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$sha.mainonly-wait.$rid" ]; then
         log "$DEV ${sha:0:9}: run $rid blocked only by pre-existing main finding(s) ($main_nums) but not approved (yet) — nothing of $DEV's to route; no fixer, no revert clock"
@@ -2320,7 +2323,7 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
 ${f:-(none parsed; read the run)}
 Run: $url
 Fix every finding at its source on $DEV (the commits not yet on main: git log origin/$MAIN..origin/$DEV). If a finding is wrong, dispute it (Review-Disputed: trailer, see below) instead of working around it.
-Your worktree starts at origin/$DEV; first git reset --hard ${sha} so the fix sits directly on the reviewed commit (later dev commits are NOT part of this fix). Change only what the findings name. Make it ONE commit carrying both trailers Review-Fix-Of: ${sha} and Hotfix: review fix of ${sha:0:9}. Push it with git push origin HEAD:refs/heads/devfix/${sha:0:12} (NOT to $DEV, not to main). Owner 11-10: once the trusted tests pass there, ${sha:0:9} plus your fix land on main without a second review (your fix is re-checked on main afterwards), so keep it tight and tested."
+Your worktree starts at origin/$DEV; first git reset --hard ${sha} so the fix sits directly on the reviewed commit (later dev commits are NOT part of this fix). Change only what the findings name. Make it ONE commit carrying both trailers Review-Fix-Of: ${sha} and Hotfix: review fix of ${sha:0:9}. Push it with git push origin HEAD:refs/heads/devfix/${sha:0:12} (NOT to $DEV, not to main). Owner 11-10: once the trusted tests pass there, ${sha:0:9} plus your fix land on main without a second review (your fix is re-checked on main afterwards), so keep it tight and tested." "$fall"
     # the revert is about to hit the culprits' commits: they hear it ahead (once per block episode). Findings the reviewer
     # routed to an author: author window (60 min) → fixer → revert DEV_REVERT_AFTER_SEC after the fixer's turn began.
     revert_after=$(revert_after_for "$sha" "$since")
