@@ -62,6 +62,137 @@ P=$(commit_file production good bug)
 git update-ref refs/remotes/origin/main "$P"
 C=$(commit_file 'blocked bug' $'broken\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12' bug)
 
+# A reviewed rename/refinement remains the same contribution. Shared ancestry
+# must still be checked when only an unrelated descendant is merged and undone.
+rename_cases() {
+  local X side other M retained mainline mode L file old=$'old\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12'
+  for mode in plain refined chained; do
+    g checkout -q --detach "$P"
+    C=$(commit_file 'blocked old filename' "$old" old)
+    X=$(commit_file 'initial repair on old filename' "${old/old/good}" old)
+    g mv old 'middle name'
+    if [ "$mode" != plain ]; then printf '%s\n' "${old/old/better}" > 'middle name'; fi
+    g add -A; g commit -q -m 'reviewed rename and refinement'
+    if [ "$mode" = chained ]; then
+      g mv 'middle name' $'new\nname'
+      printf '%s\n' "${old/old/best}" > $'new\nname'
+      g add -A; g commit -q -m 'second reviewed rename and refinement'
+      file=$'new\nname'
+    else file='middle name'; fi
+    D=$(git rev-parse HEAD)
+    side=$(commit_file 'unrelated descendant side file' side side)
+    for mainline in 1 2; do
+      updates=()
+      g checkout -q --detach "$D"
+      g commit -q --allow-empty -m 'retained reviewed ancestry'
+      retained=$(git rev-parse HEAD)
+      if [ "$mainline" = 2 ]; then g checkout -q --detach "$side"; other=$retained; else other=$side; fi
+      g merge -q --no-ff -m 'merge unrelated descendant with shared review' "$other"
+      M=$(git rev-parse HEAD)
+      g revert --no-edit -m "$mainline" "$M" >/dev/null
+      git diff --exit-code "$D" HEAD || fail 'shared rename undo must retain exactly D'
+      approval 0 "$mode rename mainline $mainline complete reviewed tree retained"
+
+      L=$(commit_file 'separately reviewed renamed repair update' "${old/old/newer}" "$file")
+      g mv "$file" replacement
+      g commit -q -m 'later separately reviewed rename'; L=$(git rev-parse HEAD)
+      approval 1 "$mode rename mainline $mainline unreviewed replacement"
+      updates=("$L")
+      approval 1 "$mode rename mainline $mainline replacement lacks proof" missing-proof
+      approval 0 "$mode rename mainline $mainline reviewed replacement follows rename"
+      updates=()
+
+      g checkout -q --detach "$D"
+      g commit -q --allow-empty -m 'another retained reviewed ancestry'
+      retained=$(git rev-parse HEAD)
+      if [ "$mainline" = 2 ]; then g checkout -q --detach "$side"; other=$retained; else other=$side; fi
+      g merge -q --no-ff -m 'merge unrelated descendant before repair removal' "$other"
+      g revert --no-edit -m "$mainline" HEAD >/dev/null
+      commit_file 'remove repair at renamed destination' "$old" "$file" >/dev/null
+      approval 1 "$mode rename mainline $mainline removed renamed contribution"
+      # Keeping the old patch at its historical name cannot replace D's
+      # refined destination (the plain rename still preserves the same patch).
+      if [ "$mode" != plain ]; then
+        commit_file 'obsolete repair at original name' "${old/old/good}" old >/dev/null
+        approval 1 "$mode rename mainline $mainline obsolete original cannot hide removal"
+      fi
+    done
+  done
+  echo 'ok: reviewed contributions follow rename lineage at both approval consumers'
+}
+
+# A merge undo removes the reviewed repair and an unreviewed side change. A
+# conflict-resolved direct undo may restore only the approved contribution.
+scoped_restoration_cases() {
+  local mainline unrelated repair file side retained other M R V broken=$'broken\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12'
+  for repair in plain renamed; do
+    for unrelated in separate-file same-file; do
+      if [ "$repair" = renamed ] && [ "$unrelated" = same-file ]; then continue; fi
+      file=bug
+      g checkout -q --detach "$P"
+      C=$(commit_file 'blocked contextual repair' "$broken" bug)
+      D=$(commit_file 'passing contextual repair' "${broken/broken/good}" bug)
+      if [ "$repair" = renamed ]; then
+        g mv bug reviewed
+        file=reviewed
+        printf '%s\n' "${broken/broken/better}" > "$file"
+        g add -A; g commit -q -m 'reviewed contextual rename and refinement'
+        D=$(git rev-parse HEAD)
+      fi
+      if [ "$unrelated" = separate-file ]; then
+        side=$(commit_file 'unreviewed descendant side change' side side)
+      else
+        side=$(commit_file 'unreviewed descendant side hunk' "${broken/broken/good}"$'\nside' bug)
+      fi
+      for mainline in 1 2; do
+        updates=()
+        g checkout -q --detach "$C"
+        g commit -q --allow-empty -m 'independent blocked mainline'
+        retained=$(git rev-parse HEAD)
+        if [ "$mainline" = 2 ]; then g checkout -q --detach "$side"; other=$retained; else other=$side; fi
+        g merge -q --no-ff -m 'merge repair and unreviewed descendant' "$other"
+        M=$(git rev-parse HEAD)
+        g revert --no-edit -m "$mainline" "$M" >/dev/null
+        R=$(git rev-parse HEAD)
+        approval 1 "$repair $unrelated mainline $mainline contextual repair removed"
+        if [ "$unrelated" = separate-file ]; then
+          commit_file 'divergent unreviewed side change' diverged side >/dev/null
+        else
+          commit_file 'divergent unreviewed side hunk' "$broken"$'\ndiverged' bug >/dev/null
+        fi
+        if g revert --no-edit "$R" >"$T/revert.out" 2>&1; then fail 'expected contextual direct undo conflict'; fi
+        [ -n "$(git ls-files -u)" ] || fail 'contextual undo did not conflict'
+        if [ "$repair" = renamed ]; then
+          g rm -q --ignore-unmatch bug
+          printf '%s\n' "${broken/broken/better}" > "$file"
+        else
+          printf '%s\n' "${broken/broken/good}" > "$file"
+        fi
+        if [ "$unrelated" = separate-file ]; then g rm -q -f side; fi
+        g add "$file"; g revert --continue >/dev/null
+        V=$(git rev-parse HEAD)
+        git diff --exit-code "$D" HEAD || fail 'contextual undo must restore exactly D'
+        approval 0 "$repair $unrelated mainline $mainline only approved contribution restored"
+        g revert --no-edit "$V" >/dev/null
+        approval 1 "$repair $unrelated mainline $mainline scoped restoration removed again"
+        g revert --no-edit HEAD >/dev/null
+        git diff --exit-code "$D" HEAD || fail 'second contextual undo must restore D'
+        approval 0 "$repair $unrelated mainline $mainline scoped restoration restored again"
+      done
+    done
+  done
+  echo 'ok: restoration requires the reviewed contribution without unreviewed side changes'
+}
+case "$focus" in
+  --renames) rename_cases ;;
+  --scoped-restoration) scoped_restoration_cases ;;
+esac
+case "$focus" in
+  --renames|--scoped-restoration)
+    [ "$bad" = 0 ] || fail 'reviewed contribution context was lost'
+    exit 0 ;;
+esac
+
 # Machine-consumed diffs must retain gitlinks and contain an applicable patch
 # even when the candidate selects ignored submodules or forced diff coloring.
 scoped_proof() (
@@ -554,5 +685,7 @@ if [ -z "$focus" ]; then
   proof_input_cases submodule
   proof_input_cases color
   shared_contribution_cases
+  rename_cases
+  scoped_restoration_cases
 fi
 [ "$bad" = 0 ] || fail 'merge-undo preservation disagrees with the approved net state'
