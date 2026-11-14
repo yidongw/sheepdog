@@ -92,13 +92,40 @@ verdict_m() { # verdict_m <sha> → sets vm to its verdict, asked once per scrip
   [ -n "${_verdicts[$1]+x}" ] || _verdicts[$1]=$(verdict "$1")
   vm=${_verdicts[$1]}
 }
+reverts_of() { # reverts_of <commit> <since> <head> [restore]
+  # Git names the merge, not its constituent commits, in a merge revert. Only
+  # commits introduced relative to the recorded mainline can be undone by it.
+  # For restoration, also prove that ALL paths changed by the constituent are
+  # back at their pre-revert state: conflict resolutions / partial merges must
+  # not turn an incomplete undo into evidence of a restored passing review.
+  local c=$1 since=$2 h=$3 restore=${4:-0} r m p body
+  local -a paths=()
+  git log --format=%H -F --grep="This reverts commit $c" "$since..$h" 2>/dev/null || return 1
+  while read -r r; do
+    body=$(git show -s --format=%B "$r")
+    m=$(sed -nE 's/^This reverts commit ([0-9a-f]{40}), reversing$/\1/p' <<<"$body")
+    p=$(sed -nE 's/^changes made to ([0-9a-f]{40})\.$/\1/p' <<<"$body")
+    [[ "$m" =~ ^[0-9a-f]{40}$ && "$p" =~ ^[0-9a-f]{40}$ ]] || continue
+    # The named mainline must be an actual parent, not an arbitrary ancestor.
+    git rev-list --parents -n1 "$m" 2>/dev/null | cut -d' ' -f2- | tr ' ' '\n' | grep -qxF "$p" || continue
+    git merge-base --is-ancestor "$c" "$m" 2>/dev/null || continue
+    if git merge-base --is-ancestor "$c" "$p" 2>/dev/null; then continue; fi
+    if [ "$restore" = 1 ]; then
+      git rev-parse --verify "$c^1" >/dev/null 2>&1 || continue
+      mapfile -d '' -t paths < <(git diff --no-renames --name-only -z "$c^1" "$c")
+      [ "${#paths[@]}" -gt 0 ] || continue
+      git --literal-pathspecs diff --quiet "$c^1" "$r" -- "${paths[@]}" || continue
+    fi
+    printf '%s\n' "$r"
+  done < <(git log --format=%H -F --grep=', reversing' "$since..$h" 2>/dev/null)
+}
 revert_state() { # revert_state <r> <head> [depth] → 0: r stands in r..head · 1: r is undone (a standing revert of it) ·
   # 2: unknown (a revert chain deeper than 64). Tri-state, so the depth limit never flips a verdict by parity: a caller
   # that needs "undone" to proceed treats 2 as "stands" (review of sheepdog ea594cc26 #1/#2: review-repair.sh reverted()
   # answers "reverted" at its limit — fail-closed for a repair, fail-OPEN when it is asked whether a revert was undone).
   local r=$1 h=$2 k=${3:-0} x st unknown=0
   [ "$k" -lt 64 ] || return 2
-  for x in $(git log --format=%H -F --grep="This reverts commit $r" "$r..$h" 2>/dev/null || true); do
+  for x in $(reverts_of "$r" "$r" "$h" 1); do
     st=0; revert_state "$x" "$h" $((k + 1)) || st=$?
     case "$st" in 0) return 1 ;; 2) unknown=1 ;; esac
   done
@@ -132,7 +159,7 @@ superseded() { # superseded <C> <the base C's blocked review used, or -> <head> 
     # (review of sheepdog 87dce4aec #1). Only a revert that is itself undone (revert_state 1) is ignored.
     undone=0
     for x in $(git rev-list "$c..$d" 2>/dev/null); do
-      for r in $(git log --format=%H -F --grep="This reverts commit $x" "$d..$h" 2>/dev/null || true); do
+      for r in $(reverts_of "$x" "$d" "$h"); do
         st=0; revert_state "$r" "$h" || st=$?
         [ "$st" = 1 ] || { undone=1; break 2; }   # the revert stands, or the chain is too deep to tell: D does not count
       done
