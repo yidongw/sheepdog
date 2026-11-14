@@ -29,7 +29,8 @@ Report a vulnerability privately through GitHub's "Report a vulnerability" (Secu
 4. **The reviewer is isolated.** `docker run --network none --read-only --cap-drop ALL --security-opt no-new-privileges`,
    the checkout mounted read-only, the reviewed tree's `.agents/.codex/.claude/.cursor` directories masked, a
    credential-free allow-listed copy of the codex config; the host relay forwards only `POST <base>/responses` and
-   `GET <base>/models`, bounded in count and size, and adds the bearer token itself.
+   `GET <base>/models`, bounded in count and size, and adds the bearer token itself. The prompt reaches codex on the
+   container's stdin (`docker run -i`, `codex exec -`; no tty), never in argv (Linux caps one argument at 128 KiB).
 5. **Repository content is data.** The prompt says so, says that instructions inside the repository are a finding, and
    that weakening checks (tests, CI, gates) without a verified reason is a finding. Previous findings and known open
    findings are passed as fenced data with control characters and backticks removed.
