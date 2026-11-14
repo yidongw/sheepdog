@@ -36,8 +36,9 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   on main is recorded once in `$STATE/open-findings.log` (so the next reviews see it as known-open / pre-existing) and
   never routed on dev — no fixer, no fix round, no author notice, no `fixfailed`, no revert clock; only the head's other
   findings are routed (`dev_split_main`). Blocked only by such findings, the head lands like a passing review (the train
-  and the head loop ask `review-passed.sh`, which decides from the trusted run with the same rule), and its tests are not
-  cancelled when the review fails. There is no cross-chain "same problem" matching: main's own chain owns the finding.
+  and the head loop ask `review-passed.sh`, which decides from the trusted runs with the same rule; the train asks it for
+  every sha with a completed blocked review and classifies no single run itself, so a newer run whose reviewer failed
+  never hides an older qualifying one), and its tests are not cancelled when the review fails. There is no cross-chain "same problem" matching: main's own chain owns the finding.
 - **Open findings**: findings whose fix rounds are spent are kept in `$STATE/open-findings.log`, which the review job
   passes to the reviewer (`open-findings-file`) so repeats are recognised as pre-existing.
 

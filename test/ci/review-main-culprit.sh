@@ -9,6 +9,8 @@
 #   (c) culprit not on main / not on the attested main / "-" / abbreviated / no FINDING line → blocked as before
 #   (d) review-passed.sh and the dispatcher agree in every case; plus: a failed tests job, a failed gate step, a re-check
 #       title, injected lines before the gate's own "reviewing" line, and REVIEW_MAIN_FINDINGS=0 never approve.
+#   (g) the train asks review-passed.sh over EVERY blocked review of a sha: a newer reviewer failure never hides an older
+#       qualifying run (review of vpn-sub c2cb135f0 #1)
 set -uo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 cd "$(dirname "$0")/../.."
@@ -294,4 +296,24 @@ grep -q "BLOCKED #1 " "$T/routed-all" && grep -q "BLOCKED #3 " "$T/routed-all" |
 ! grep -q "BLOCKED #1 " "$T/routed" || fail "(f) the main finding was routed"
 grep -q 'culprits_repaired "$s" "$(if \[ "$all" = "$f" \]' "$D" || fail "(f) dev_blocked's dupfix shortcut does not decide on the full set"
 echo "ok - (f) the dupfix shortcut decides on the full finding set; main findings only leave the routing"
+# ── review of vpn-sub c2cb135f0 #1: the train weighs EVERY blocked review of a sha, not only the newest. H has an older run
+#    blocked only by main findings (qualifies) and a newer run whose reviewer failed (infrastructure, no verdict); the
+#    newest one alone would hide the older approval and strand H ──
+fixture_log "$T/log" "$C" 0
+scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+NRID=$((RID + 1)); NJID=$((JID + 1))
+echo "{\"jobs\":[{\"name\":\"sheepdog / tests\",\"conclusion\":\"success\"},{\"name\":\"sheepdog / review\",\"id\":$NJID,\"conclusion\":\"failure\",\"steps\":[$STEPS_OK]}]}" > "$FX/jobs-$NRID.json"
+grep -m1 'review-gate: reviewing ' "$T/log" > "$FX/log-$NJID.txt"
+echo "2026-11-15T05:00:00.0000000Z review-gate: reviewer failed: spawn E2BIG" >> "$FX/log-$NJID.txt"
+echo "{\"head\":\"$H\",\"base\":\"$B0\",\"kind\":\"review\",\"main\":\"$MAINSHA\"}" > "$FX/attest-$NRID.json"
+echo "[{\"id\":$NRID,\"display_title\":\"review $H\",\"status\":\"completed\",\"conclusion\":\"failure\"},{\"id\":$RID,\"display_title\":\"review $H\",\"status\":\"completed\",\"conclusion\":\"failure\"}]" > "$FX/runs.json"
+RP || fail "(g) review-passed.sh does not approve H from its older main-only run: $(cat "$T/rp.err")"
+run_train
+landed || fail "(g) the train stranded H behind a newer infrastructure-failed review: $(cat "$LOG" 2>/dev/null)"
+! grep -qE '^(dev_blocked|wake_fixer|notify)' "$T/calls" 2>/dev/null || fail "(g) the train routed main's findings: $(cat "$T/calls")"
+# … and a sha whose every blocked review has a dev finding still does not land through the train
+fixture_log "$T/log" "$C" 1; cp "$T/log" "$FX/log-$JID.txt"
+run_train
+! landed || fail "(g) the train landed a sha whose only verdict has a dev finding"
+echo "ok - (g) the train lands a sha whose older review blocked only on main findings behind a newer reviewer failure"
 echo "main-culprit checks passed"

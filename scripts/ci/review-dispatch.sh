@@ -1987,6 +1987,8 @@ if [ -z "${DRY:-}" ] && git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/
    && ! git -C "$SRC" merge-base --is-ancestor "origin/$DEV" origin/$MAIN; then
   done_titles=$(review_list 100 displayTitle,status,conclusion \
     '.[] | select(.status == "completed" and .conclusion == "success") | .displayTitle' || true)
+  failed_titles=$(review_list 100 displayTitle,status,conclusion \
+    '.[] | select(.status == "completed" and .conclusion == "failure") | .displayTitle' || true)
   # The newest completed dev review that blocked (any dev sha, not only the head — the train
   # reviews older shas): tell the authors and wake a fixer once.
   bl=$(review_list 100 databaseId,displayTitle,status,conclusion \
@@ -2012,16 +2014,13 @@ Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). You
     fi
   fi
   for tsha in $(git -C "$SRC" rev-list origin/$MAIN.."origin/$DEV" | head -60); do
-    rp_main=0   # review-passed.sh's main-findings path only for a sha blocked by nothing but main findings (it saves the reads)
+    rp_main=0   # review-passed.sh's main-findings path only for a sha with a completed blocked review (it saves the reads)
     if ! grep -qx "review $tsha" <<<"$done_titles"; then
-      # blocked only by pre-existing main findings (dev_split_main) → a candidate like a passing review
-      trid=$(review_list 100 databaseId,displayTitle,status,conclusion \
-             ".[] | select(.status == \"completed\" and .conclusion == \"failure\" and .displayTitle == \"review $tsha\") | .databaseId" | head -1)
-      [ -n "$trid" ] || continue
-      # classified afresh every run: unavailable evidence or a rerun must never leave a lasting negative (review of dev
-      # cbc167191 #4; the reads are routing reads through the memo, completed logs kept by job id)
-      dev_split_main "$tsha" "$trid" "$(findings "$trid")"
-      if [ "$main_only" != 1 ]; then continue; fi
+      # No passing run, but a completed blocked one: it may have blocked only on pre-existing main findings. No
+      # single-run classification here — review-passed.sh's main-findings path weighs EVERY trusted failed review of the
+      # sha (one source of truth): a newer run whose reviewer failed (infrastructure) or that the dispatcher cannot
+      # classify must not hide an older run that qualifies (review of vpn-sub c2cb135f0 #1).
+      grep -qx "review $tsha" <<<"$failed_titles" || continue
       rp_main=1
     fi
     : > "$STATE/train.kind"
