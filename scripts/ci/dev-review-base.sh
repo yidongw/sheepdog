@@ -108,9 +108,12 @@ preserves_patch() ( # preserves_patch <before> <after> <at commit> [<literal pat
   if [ "$#" -gt 3 ]; then
     # Project the approved result onto the constituent's paths. Other paths
     # stay at the baseline, so their old deltas impose no obligation at head.
+    # Candidate diff settings must not hide gitlinks or emit display-only
+    # output which apply --allow-empty could mistake for an empty patch.
     shift 3
     git --git-dir="$proof" read-tree "$before" || return 1
-    git --literal-pathspecs diff --binary --full-index --no-renames --no-ext-diff --no-textconv "$before" "$after" -- "$@" |
+    git --literal-pathspecs diff --binary --full-index --no-renames --no-ext-diff --no-textconv \
+      --no-color --ignore-submodules=none --submodule=short "$before" "$after" -- "$@" |
       git --git-dir="$proof" apply --cached --allow-empty || return 1
     after=$(git --git-dir="$proof" write-tree) || return 1
     after=$(git --git-dir="$proof" -c user.name=review-proof -c user.email=review-proof@invalid \
@@ -123,7 +126,7 @@ preserves_patch() ( # preserves_patch <before> <after> <at commit> [<literal pat
 )
 restores_patch() { # <reverted commit> <undo>: complete causal restoration at both endpoints
   git rev-parse --verify "$1^1" >/dev/null 2>&1 || return 1
-  if git diff --quiet "$1^1" "$1"; then return 1; fi
+  if git diff --quiet --ignore-submodules=none "$1^1" "$1"; then return 1; fi
   preserves_patch "$1^1" "$1" "$2^1" && preserves_patch "$1" "$1^1" "$2"
 }
 reverts_of() { # reverts_of <commit> <since> <head> [restore]
@@ -149,7 +152,13 @@ reverts_of() { # reverts_of <commit> <since> <head> [restore]
     # The named mainline must be an actual parent, not an arbitrary ancestor.
     git rev-list --parents -n1 "$m" 2>/dev/null | cut -d' ' -f2- | tr ' ' '\n' | grep -qxF "$p" || continue
     git merge-base --is-ancestor "$c" "$m" 2>/dev/null || continue
-    if git merge-base --is-ancestor "$c" "$p" 2>/dev/null; then continue; fi
+    if git merge-base --is-ancestor "$c" "$p" 2>/dev/null; then
+      # Shared ancestry is retained, not restored by this merge undo. Keep its
+      # reviewed contribution as a dependency too: a later revert of an
+      # equivalent on that mainline can remove it without naming c.
+      if [ "$restore" != 1 ]; then printf '%s preserved\n' "$r"; fi
+      continue
+    fi
     # Reachability only identifies a possible constituent. An equivalent patch
     # can already live on the retained mainline (e.g. a cherry-pick). If applying
     # c's delta to the post-revert tree is a clean no-op, its reviewed changes
@@ -185,7 +194,7 @@ revert_state() { # revert_state <r> <head> [depth] → 0: r stands in r..head ·
 contribution_stands() { # <constituent> <approved head> <candidate> <depth>
   local x=$1 d=$2 h=$3 k=$4 l v rb att
   local -a paths=()
-  mapfile -d '' -t paths < <(git diff --no-renames --name-only -z "$x^1" "$x")
+  mapfile -d '' -t paths < <(git diff --no-renames --ignore-submodules=none --name-only -z "$x^1" "$x")
   [ "${#paths[@]}" -gt 0 ] || return 0
   # If D still contains x's original patch, require just that patch. Otherwise
   # D refined or cancelled x: use D's net result on x's paths, not all of x^..D.
