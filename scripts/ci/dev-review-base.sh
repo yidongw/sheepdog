@@ -99,7 +99,7 @@ superseded() { # superseded <C> <the base C's blocked review used, or -> <head> 
   # in D's round, and D's findings — C's still-open ones among them — are what the repairs answer (owner 11-13: dev gets one
   # review; tralyx 11-13/14: dev heads blocked and superseded at once by a main→dev merge — 4b6671346, bc1f40bd3,
   # f54379cfd — were never repaired by trailer, so no range above them could ever be a tests-only round again).
-  local c=$1 rc=$2 h=$3 d v rb
+  local c=$1 rc=$2 h=$3 d v rb x undone
   [[ "$rc" =~ ^[0-9a-f]{40}$ ]] || return 1
   for d in $(git rev-list "$c..$h" "^$MAINREF" 2>/dev/null); do
     # one containment rule (as repaired()): D's head contains C — a review on a side branch merged in later never saw C
@@ -113,6 +113,12 @@ superseded() { # superseded <C> <the base C's blocked review used, or -> <head> 
     [[ "$rb" =~ ^[0-9a-f]{40}$ ]] || continue
     # D's range began at or below C's, and C is inside it
     git merge-base --is-ancestor "$rb" "$rc" 2>/dev/null && ! git merge-base --is-ancestor "$c" "$rb" 2>/dev/null || continue
+    # and what D's review vouched for still stands: no standing revert (review-repair.sh reverted) in D..head of D or of
+    # any commit D's review saw above C (review of foxhole-backend b4d18dbbc #1: a passing fix reverted later restored
+    # C's blocked code, and D's pass still superseded C's block)
+    undone=0
+    for x in $(git rev-list "$c..$d" 2>/dev/null); do reverted "$x" "$h" && { undone=1; break; }; done
+    [ "$undone" = 0 ] || continue
     return 0
   done
   return 1
