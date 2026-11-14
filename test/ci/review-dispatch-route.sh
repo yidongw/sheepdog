@@ -467,6 +467,12 @@ g checkout -q -B devw "$S"; commit src/a.ts "$A" "Review-Fix-Of: $CA
 Review-Disputed: 1 something unrelated" >/dev/null
 g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
 if culprits_repaired "$S" "$(attribution "$S" "$F5")" "$F5"; then echo "FAIL: an unrelated dispute dropped broken-two" >&2; exit 1; fi
+# Mentioning another finding in evidence must not dispute that finding.
+reset
+g checkout -q -B devw "$S"; commit src/a.ts "$A" "Review-Fix-Of: $CA
+Review-Disputed: 1 another finding: broken-two still drops the row remains unfixed and is outside this dispute" >/dev/null
+g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
+if culprits_repaired "$S" "$(attribution "$S" "$F5")" "$F5"; then echo "FAIL: evidence mentioning broken-two suppressed it" >&2; exit 1; fi
 # the older of two repairs declares it: still found (every effective repair is asked, not only the newest)
 reset
 g checkout -q -B devw "$S"; commit src/a.ts "$A" "Review-Fix-Of: $CA

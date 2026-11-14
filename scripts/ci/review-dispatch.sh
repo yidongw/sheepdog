@@ -1080,12 +1080,13 @@ finding_text() { # finding_text <findings> <n> → the normalised text of BLOCKE
 repair_declares() { # repair_declares <repair commit> <normalised finding text> → 0 when its message declares THAT finding fixed
   # (or disputed): a "Fixes-Finding: #<k> <text>" or "Review-Disputed: <k> <text>" line whose text is the finding's (numbers
   # differ between rounds, so the text decides — review of dev 973b53dd8 #1/#2)
+  # Dispute evidence follows a colon; only the declared target before it can match.
   local line t
   [ -n "$2" ] || return 1
   while IFS= read -r line; do
     t=$(sed -E 's/^(Fixes-Finding|Review-Disputed):[[:space:]]*#?[0-9]+[[:space:]]+//' <<<"$line" | finding_norm)
     [ "$t" = "$2" ] && return 0
-    case "$line" in Review-Disputed:*) [[ "$t" == *"$2"* ]] && return 0 ;; esac
+    case "$line" in Review-Disputed:*) [[ "$t" == "$2:"* ]] && return 0 ;; esac
   done < <(git -C "$SRC" show -s --format=%B "$1" 2>/dev/null | grep -E '^(Fixes-Finding|Review-Disputed):' || true)
   return 1
 }
