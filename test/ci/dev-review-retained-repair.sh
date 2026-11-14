@@ -62,6 +62,158 @@ P=$(commit_file production good bug)
 git update-ref refs/remotes/origin/main "$P"
 C=$(commit_file 'blocked bug' $'broken\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12' bug)
 
+# Machine-consumed diffs must retain gitlinks and contain an applicable patch
+# even when the candidate selects ignored submodules or forced diff coloring.
+scoped_proof() (
+  source <(sed -n '/^preserves_patch()/,/^restores_patch()/ { /^restores_patch()/!p; }' "$CI/dev-review-base.sh")
+  preserves_patch "$@"
+)
+proof_input_cases() {
+  local kind=$1 mainline A Q side other M U removed s0 s1 s2 mode path
+  for mode in tracked configured; do
+    g checkout -q --detach "$P"
+    if [ "$kind" = submodule ]; then
+      s0=$P
+      printf '[submodule "module"]\n\tpath = module\n\turl = ./unused\n' > .gitmodules
+      if [ "$mode" = tracked ]; then
+        printf '\tignore = all\n' >> .gitmodules
+      else
+        git config submodule.module.ignore all
+      fi
+      # Real gitlink tree entries; no clone, transport, or initialized checkout.
+      git update-index --add --cacheinfo "160000,$s0,module"
+      g add .gitmodules; g commit -q -m 'blocked submodule baseline'
+      C=$(git rev-parse HEAD); s1=$C
+      git update-index --cacheinfo "160000,$s1,module"
+      g commit -q -m 'initial submodule repair'; A=$(git rev-parse HEAD); s2=$A
+      git update-index --cacheinfo "160000,$s2,module"
+      g commit -q -m 'reviewed submodule refinement'; D=$(git rev-parse HEAD)
+      git config diff.submodule log
+    else
+      C=$(commit_file 'blocked colored proof baseline' broken bug)
+      A=$(commit_file 'initial repair for colored proof' fixed bug)
+      D=$(commit_file 'reviewed refinement for colored proof' better bug)
+      git config color.ui always
+    fi
+    # Check the scoped primitive as well as the consumers. Other constituent
+    # guards can reject the same endpoint while this projection silently
+    # drops its patch (color prefixes or diff.submodule=log display output).
+    path=bug
+    [ "$kind" != submodule ] || path=module
+    scoped_proof "$C" "$D" "$D" "$path" || fail 'scoped proof rejected its approved result'
+    if scoped_proof "$C" "$D" "$C" "$path"; then
+      echo "FAIL: $kind $mode scoped proof accepted the blocked baseline" >&2
+      bad=1
+    fi
+    side=$(commit_file 'unrelated file beside refinement' side side)
+    for mainline in 1 2; do
+      g checkout -q --detach "$C"
+      g cherry-pick "$A" >/dev/null
+      g commit -q --amend -m 'independent initial repair for proof input'
+      Q=$(git rev-parse HEAD)
+      if [ "$mainline" = 2 ]; then g checkout -q --detach "$side"; other=$Q; else other=$side; fi
+      if ! g merge -q --no-ff --no-commit "$other" >"$T/merge.out" 2>&1; then
+        [ -n "$(git ls-files -u)" ] || fail 'expected only a refinement conflict'
+      fi
+      g read-tree --reset -u "$side"
+      g commit -q -m 'resolve to reviewed refinement with unrelated file'
+      M=$(git rev-parse HEAD)
+      g revert --no-edit -m "$mainline" "$M" >/dev/null
+      U=$(git rev-parse HEAD)
+      approval 1 "$kind $mode mainline $mainline obsolete initial repair"
+      g revert --no-edit "$U" >/dev/null
+      approval 0 "$kind $mode mainline $mainline reviewed refinement restored"
+      # The removal of Q conflicts with D's refinement. Resolve to the blocked
+      # state, retaining Git's genuine revert message for the equivalent repair.
+      if g revert --no-edit "$Q" >"$T/revert.out" 2>&1; then fail 'expected refinement removal conflict'; fi
+      if [ "$kind" = submodule ]; then
+        git update-index --cacheinfo "160000,$s0,module"
+      else
+        printf 'broken\n' > bug; g add bug
+      fi
+      g revert --continue >/dev/null
+      removed=$(git rev-parse HEAD)
+      git diff --quiet --ignore-submodules=none "$C" HEAD -- bug module || fail 'candidate must contain the blocked state'
+      approval 1 "$kind $mode mainline $mainline removed equivalent repair"
+      g revert --no-edit "$removed" >/dev/null
+      approval 0 "$kind $mode mainline $mainline equivalent repair restored again"
+
+      if [ "$kind" = submodule ]; then
+        # A direct undo must recognize a nonempty gitlink delta despite ignore.
+        g checkout -q --detach "$D"
+        g revert --no-edit "$D" >/dev/null
+        U=$(git rev-parse HEAD)
+        approval 1 "$kind $mode direct revert of refinement"
+        g revert --no-edit "$U" >/dev/null
+        approval 0 "$kind $mode direct restoration of refinement"
+      fi
+    done
+    git config --unset-all color.ui || true
+    git config --unset-all diff.submodule || true
+    git config --unset-all submodule.module.ignore || true
+    echo "exercised: $kind $mode proof inputs"
+    [ "$kind" = submodule ] || break
+  done
+}
+
+# Y is shared with the retained merge mainline. The merge's first-parent
+# patch contains only A, so proving introduced constituents misses Y entirely.
+shared_contribution_cases() {
+  local A Y Z Q side other M removed mainline sharing
+  g checkout -q --detach "$P"
+  printf 'broken\n' > bug; printf 'broken\n' > extra
+  g add bug extra; g commit -q -m 'blocked two independent defects'
+  C=$(git rev-parse HEAD)
+  A=$(commit_file 'independent bug repair' good bug)
+  g checkout -q --detach "$C"
+  Y=$(commit_file 'independent extra repair' good extra)
+  g merge -q --no-ff -m 'passing review merges both repairs' "$A"
+  D=$(git rev-parse HEAD)
+  side=$(commit_file 'unrelated descendant of passing review' side side)
+  for sharing in one all; do
+    for mainline in 1 2; do
+      updates=()
+      g checkout -q --detach "$C"
+      g cherry-pick "$Y" >/dev/null
+      g commit -q --amend -m 'equivalent extra repair on retained mainline'
+      Z=$(git rev-parse HEAD)
+      g merge -q --no-ff -m 'share original extra repair ancestry' "$Y"
+      if [ "$sharing" = all ]; then
+        g merge -q --no-ff -m 'share the complete passing review ancestry' "$D"
+      else
+        g cherry-pick "$A" >/dev/null
+        g commit -q --amend -m 'equivalent bug repair on retained mainline'
+      fi
+      Q=$(git rev-parse HEAD)
+      if [ "$mainline" = 2 ]; then g checkout -q --detach "$side"; other=$Q; else other=$side; fi
+      g merge -q --no-ff -m 'merge reviewed descendant beside shared repair' "$other"
+      M=$(git rev-parse HEAD)
+      g revert --no-edit -m "$mainline" "$M" >/dev/null
+      git diff --quiet --ignore-submodules=none "$D" HEAD || fail 'merge undo must retain exactly the reviewed tree'
+      approval 0 "shared $sharing mainline $mainline complete reviewed tree retained"
+      g revert --no-edit "$Z" >/dev/null
+      removed=$(git rev-parse HEAD)
+      [ "$(cat bug)" = good ] && [ "$(cat extra)" = broken ] || fail 'shared repair removal fixture is wrong'
+      approval 1 "shared $sharing mainline $mainline equivalent of shared repair removed"
+      g revert --no-edit "$removed" >/dev/null
+      approval 0 "shared $sharing mainline $mainline shared repair restored"
+      updates=("$(commit_file 'later reviewed shared repair refinement' better extra)")
+      approval 0 "shared $sharing mainline $mainline independently reviewed replacement"
+    done
+  done
+  echo 'exercised: shared reviewed contributions through candidate head'
+}
+case "$focus" in
+  --submodules) proof_input_cases submodule ;;
+  --color) proof_input_cases color ;;
+  --shared-contributions) shared_contribution_cases ;;
+esac
+case "$focus" in
+  --submodules|--color|--shared-contributions)
+    [ "$bad" = 0 ] || fail 'retained-contribution proof bypassed by candidate inputs or shared ancestry'
+    exit 0 ;;
+esac
+
 # Keep a retained feature distinct from the repair: its survival cannot vouch
 # for a partial undo, a restoration discarded by a merge, or a missed undo.
 restoration_cases() {
@@ -397,5 +549,10 @@ for mainline in 1 2; do
     echo "ok: feature mainline $mainline accepts the independently reviewed unrelated update"
   fi
 done
-if [ -z "$focus" ]; then restoration_cases; fi
+if [ -z "$focus" ]; then
+  restoration_cases
+  proof_input_cases submodule
+  proof_input_cases color
+  shared_contribution_cases
+fi
 [ "$bad" = 0 ] || fail 'merge-undo preservation disagrees with the approved net state'
