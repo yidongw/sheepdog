@@ -129,4 +129,43 @@ for cancellation in full partial; do
     echo "ok: mainline $mainline preserves the approved cancellation through restoration"
   done
 done
+
+# The reviewed result can refine a constituent rather than cancel it. U keeps
+# A's obsolete patch on its sibling mainline; V restores D's approved result.
+# Requiring A at V would reject even the exact tree that passed the review.
+g checkout -q --detach "$C"
+A=$(commit_file 'initial repair before review' $'fixed\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12' bug)
+D=$(commit_file 'reviewed refinement of the initial repair' $'fixed-and-validated\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12' bug)
+for mainline in 1 2; do
+  g checkout -q --detach "$C"
+  g cherry-pick "$A" >/dev/null
+  g commit -q --amend -m 'independent initial repair on retained mainline'
+  Q=$(git rev-parse HEAD)
+  if git merge-base --is-ancestor "$Q" "$D"; then fail 'Q must be outside the reviewed ancestry'; fi
+  if [ "$mainline" = 2 ]; then g checkout -q --detach "$D"; side=$Q; else side=$D; fi
+  # Both branches changed the same line. Resolve the merge to D's exact tree.
+  if g merge -q --no-ff --no-commit "$side"; then fail 'expected competing repair refinements'; fi
+  g read-tree --reset -u "$D"
+  g commit -q -m 'resolve merge to the reviewed refinement'
+  M=$(git rev-parse HEAD)
+  git diff --exit-code "$D" "$M" || fail 'merge did not resolve to the reviewed refinement'
+  g revert --no-edit -m "$mainline" "$M" >/dev/null
+  U=$(git rev-parse HEAD)
+  git diff --exit-code "$A" "$U" || fail 'merge undo did not retain the obsolete initial repair'
+  approval 1 "refinement, mainline $mainline obsolete initial repair alone"
+
+  g revert --no-edit "$U" >/dev/null
+  V=$(git rev-parse HEAD)
+  git diff --exit-code "$D" "$V" || fail 'undoing the undo did not restore the reviewed refinement'
+  approval 0 "refinement, mainline $mainline approved result restored exactly"
+
+  printf 'candidate metadata\n' >> bug
+  g add bug; g commit -q -m 'unrelated metadata after restoring the reviewed refinement'
+  approval 0 "refinement, mainline $mainline approved result restored with metadata"
+
+  g revert --no-edit "$V" >/dev/null
+  [ "$(head -1 bug)" = fixed ] || fail 'reverting restoration did not remove the reviewed refinement'
+  approval 1 "refinement, mainline $mainline restoration reverted again"
+  echo "ok: mainline $mainline preserves the reviewed refinement through restoration"
+done
 [ "$bad" = 0 ] || fail 'merge-undo preservation disagrees with the approved net state'
