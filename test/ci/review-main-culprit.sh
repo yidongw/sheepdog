@@ -12,6 +12,8 @@
 #   (g) the train asks review-passed.sh over EVERY blocked review of a sha: a newer reviewer failure never hides an older
 #       qualifying run (review of vpn-sub c2cb135f0 #1); the approving run's main findings are recorded before it lands
 #       (review of sheepdog dev d9228afe7 #1)
+#   (h) … and only once that record is confirmed written: an unavailable routing read → not landed, retried next run
+#       (review of sheepdog main 625246776 #1)
 set -uo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 cd "$(dirname "$0")/../.."
@@ -115,15 +117,18 @@ scenario() {
 RP() { (cd "$SRC" && bash "$ROOT/scripts/ci/review-passed.sh" "$H" o/r >/dev/null 2>"$T/rp.err"); }
 
 # ── the dispatcher's head loop and merge train, as in review-dispatch-merge-only.sh: the real code, stubbed effects ──
-ghm() { gh "$@"; }; ghc_note_jobs() { cat > /dev/null; }
+ghm() { # the routing memo: the real (fake) gh; with $T/ghm-logs-fail present, job-log reads fail (an unavailable read)
+  if [ -e "$T/ghm-logs-fail" ] && [[ "$*" == *"/logs"* ]]; then return 1; fi
+  gh "$@"; }
+ghc_note_jobs() { cat > /dev/null; }
 STATE=$T/state MAIN=main DEV=dev TRUSTED=$T/trusted WORK=$T/work OUTBOX=$T/state/outbox CI_SCRIPTS=$ROOT/scripts/ci
 DEV_REVERT_AFTER_SEC=3600 DEV_REVERT_WARN_SEC=900 key_prefix="" SUPERVISOR_THREAD=sup DISPATCH_THREAD=disp
 mkdir -p "$STATE/sent" "$OUTBOX"; LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 git -C "$SRC" worktree add -q --detach "$TRUSTED" origin/main
-eval "$(sed -n '/^review_list() {/,/^}/p; /^dev_round_noop() {/,/^}/p; /^dev_merge_only() {/,/^}/p; /^review_infra_reason() {/,/^}/p; /^run_verdict() {/,/^}/p; /^dev_verdict_run() {/,/^}/p; /^named_files() {/p; /^findings_cap() {/,/^}/p; /^findings() {/,/^}/p; /^notes_of() {/,/^}/p; /^findings_subset() {/,/^}/p; /^main_culprits_api() /p; /^main_culprit_hint() {/,/^}/p; /^dev_split_main() {/,/^}/p; /^thread_of() /p; /^range_threads() {/,/^}/p' "$D")"
+eval "$(sed -n '/^review_list() {/,/^}/p; /^dev_round_noop() {/,/^}/p; /^dev_merge_only() {/,/^}/p; /^review_infra_reason() {/,/^}/p; /^run_verdict() {/,/^}/p; /^dev_verdict_run() {/,/^}/p; /^named_files() {/p; /^findings_cap() {/,/^}/p; /^findings() {/,/^}/p; /^notes_of() {/,/^}/p; /^findings_subset() {/,/^}/p; /^main_culprits_api() /p; /^main_culprit_hint() {/,/^}/p; /^dev_split_main() {/,/^}/p; /^train_record_main() {/,/^}/p; /^thread_of() /p; /^range_threads() {/,/^}/p' "$D")"
 source "$ROOT/scripts/ci/review-main-culprits.sh"
 source "$ROOT/scripts/ci/review-machinery.sh"
-for f in review_list findings findings_subset main_culprit_hint dev_split_main main_culprits_api review_main_culprits dev_verdict_run; do
+for f in review_list findings findings_subset main_culprit_hint dev_split_main train_record_main main_culprits_api review_main_culprits dev_verdict_run; do
   declare -F "$f" >/dev/null || fail "helper $f not extracted"
 done
 fixer_receipt_thread() { :; }
@@ -323,4 +328,20 @@ fixture_log "$T/log" "$C" 1; cp "$T/log" "$FX/log-$JID.txt"
 run_train
 ! landed || fail "(g) the train landed a sha whose only verdict has a dev finding"
 echo "ok - (g) the train lands a sha whose older review blocked only on main findings behind a newer reviewer failure"
+# ── review of sheepdog main 625246776 #1: the train lands a main-only approval only once its findings are RECORDED. The
+#    routing read of the approving job's log fails (ghm; review-passed.sh's own reads succeed) → approved but not landed,
+#    nothing recorded, logged; the next run with a good read records, then lands ──
+fixture_log "$T/log" "$C" 0
+scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+RP || fail "(h) review-passed.sh does not approve (a)"
+reset_dev; touch "$T/ghm-logs-fail"
+( cd "$ROOT" && DRY="" && eval "$train" ) || fail "(h) train failed"; g fetch -q origin
+! landed || fail "(h) the train landed H although its main findings could not be recorded"
+test ! -s "$STATE/open-findings.log" || fail "(h) recorded something from an unavailable read"
+grep -q "could not be recorded in open-findings.log — not landed this run" "$LOG" || fail "(h) no log line for the unrecorded approval: $(cat "$LOG" 2>/dev/null)"
+rm -f "$T/ghm-logs-fail"
+( cd "$ROOT" && DRY="" && eval "$train" ) || fail "(h) train failed"; g fetch -q origin   # next run, state kept
+grep -q "run $RID): finding(s) 1 2 — culprit on main" "$STATE/open-findings.log" 2>/dev/null || fail "(h) the retry did not record the findings"
+landed || fail "(h) the retry did not land H: $(cat "$LOG" 2>/dev/null)"
+echo "ok - (h) a main-only approval lands only after its findings are recorded; an unavailable read retries next run"
 echo "main-culprit checks passed"

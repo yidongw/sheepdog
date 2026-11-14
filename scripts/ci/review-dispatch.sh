@@ -1123,11 +1123,17 @@ dev_split_main() { # dev_split_main <S> <run id> <findings> → sets dev_f (the 
   if [ ! -e "$STATE/sent/$s.mainfindings" ]; then
     # shellcheck disable=SC2086
     { echo "[$(date -u +%FT%TZ)] ${s:0:9} ($DEV review, run $run): finding(s) $main_nums — culprit on $MAIN ($(for n in $main_nums; do awk -v n="$n" '$1 == n {printf "#%s %s ", $1, substr($3, 1, 9)}' <<<"$cls"; done | sed 's/ $//')); pre-existing main finding(s), owned by main's own re-check chain, not routed on $DEV:"
-      findings_subset "$f" 0 $main_nums; echo; } >> "$STATE/open-findings.log"
+      findings_subset "$f" 0 $main_nums; echo; } >> "$STATE/open-findings.log" || { log "$DEV ${s:0:9}: could not write open-findings.log"; return 0; }
     log "$DEV ${s:0:9}: finding(s) $main_nums of run $run name a culprit already on $MAIN — recorded as pre-existing main finding(s) (open-findings.log); no $DEV fixer, no fix round${dev_nums:+; routing only $dev_nums}"
-    touch "$STATE/sent/$s.mainfindings"
+    touch "$STATE/sent/$s.mainfindings"   # only after the record is written (train_record_main relies on it)
   fi
   return 0
+}
+train_record_main() { # train_record_main <S> <run id> → 0 only when S's main findings from <run id> are in open-findings.log
+  # (recorded now or by an earlier run: the sent marker is written after the record). Unreadable evidence → 1.
+  [ -e "$STATE/sent/$1.mainfindings" ] && return 0
+  dev_split_main "$1" "$2" "$(findings "$2")"
+  [ "$main_only" = 1 ] && [ -e "$STATE/sent/$1.mainfindings" ]
 }
 dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> <run url> <fixer task> [<ALL findings>] → the
   # reviewer's route per finding (author groups, see dev_blocked_split); otherwise fixer first, authors only when it failed.
@@ -2029,12 +2035,21 @@ Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). You
       dev_split_main "$tsha" "$trid" "$(findings "$trid")"
     done
     : > "$STATE/train.kind"
-    rp_out=$(cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=$rp_main REVIEW_KIND_OUT="$STATE/train.kind" bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" 2>/dev/null) || continue
+    rp_out=$(cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=$rp_main REVIEW_KIND_OUT="$STATE/train.kind" bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" 2>"$STATE/train.rp-err") || continue
     if [ "$rp_main" = 1 ]; then
-      # approved by the run that blocked only on pre-existing main findings: record them (open-findings.log, once per sha)
-      # before the sha lands — later reviews see them as known-open (review of sheepdog dev d9228afe7 #1)
+      # Approved by a run that blocked only on pre-existing main findings: those findings are recorded (open-findings.log)
+      # BEFORE the sha lands — later reviews see them as known-open (review of sheepdog dev d9228afe7 #1). The record must
+      # be confirmed written; when the routing reads fail (ghm) or the approving run cannot be named, this run does not
+      # land the sha and the next dispatcher run tries again (review of sheepdog main 625246776 #1).
       rp_run=$(sed -nE 's/^trusted tests \+ review passed for [0-9a-f]+ \(run ([0-9]+)\)$/\1/p' <<<"$rp_out" | tail -1)
-      [ -z "$rp_run" ] || dev_split_main "$tsha" "$rp_run" "$(findings "$rp_run")"
+      if [ -z "$rp_run" ]; then
+        log "train: $DEV@${tsha:0:9} approved, but the approving run could not be named — not landed this run"; continue
+      fi
+      if grep -q "^run $rp_run: blocked only by finding(s) whose culprit is on " "$STATE/train.rp-err" \
+         && ! train_record_main "$tsha" "$rp_run"; then
+        log "train: $DEV@${tsha:0:9} approved by run $rp_run (pre-existing main findings), but its findings could not be recorded in open-findings.log — not landed this run, retried next run"
+        continue
+      fi
     fi
     # a tests-only approval never lands review machinery, by fast-forward or Train-Merge (review of dev a171d3396 #1/#2)
     if [ "$(cat "$STATE/train.kind" 2>/dev/null)" != review ]; then
