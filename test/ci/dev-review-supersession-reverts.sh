@@ -115,6 +115,92 @@ if [ "${1:-}" = --adopted-sibling-renames ]; then
   exit 0
 fi
 
+# Exercise the workflow's real cover -> kind -> diff sequence, then feed its
+# range into trusted run fixtures. A manually widened review would hide the
+# recovery bug. Keep origin/main at P throughout both blocked/repair rounds.
+range_recovery_cases() {
+  local topology verdict W e f cover diff next h i
+  local original_C=$C original_D=$D
+  for topology in linear merged-block; do
+    C=$original_C; D=$original_D
+    if [ "$topology" = merged-block ]; then
+      g checkout -q --detach "$P"
+      commit_file 'independent first-parent work' side side >/dev/null
+      g merge -q --no-ff -m 'passing merge contains the blocked side branch' "$D"
+      D=$(git rev-parse HEAD)
+      if git rev-list --first-parent "$D" | grep -qxF "$C"; then fail 'C must be off the first-parent walk'; fi
+    fi
+    for verdict in success failure; do
+      g checkout -q --detach "$D"
+      W=$(commit_file 'unrelated work' w unrelated)
+      g revert --no-edit "$W" >/dev/null
+      e=$(commit_file 'later blocked change' broken later)
+      f=$(c 'repair later change' "Review-Fix-Of: $e" later)
+      reset
+      run 1 "review $C" success failure "$P" '' blocked
+      run 2 "review $D" success success "$P"
+      printf 'review-range: %s %s\n' "$P" "$D" > "$FX/log-1002.txt"
+      run 3 "review $e" success failure "$D" '' blocked
+      cover=$(bash "$CI/dev-review-base.sh" "$f")
+      [ "$cover" = "$P" ] || { echo "FAIL: $topology $verdict fallback cover excludes C: $cover, expected $P" >&2; bad=1; }
+      if bash "$CI/dev-review-base.sh" --only-fixes "$cover" "$f"; then fail 'fallback unexpectedly tests-only'; fi
+      diff=$(bash "$CI/dev-review-base.sh" --diff "$cover" "$f")
+      [ "$diff" = "$P" ] || { echo "FAIL: fallback diff excludes C: $diff" >&2; bad=1; }
+      # A full review that blocks and is repaired must recover as well as a
+      # passing one. Its base comes from the producer above, never a constant.
+      run 4 "review $f" success "$verdict" "$diff" review "$([ "$verdict" = failure ] && echo blocked)"
+      if [ "$verdict" = failure ]; then
+        i=$(c 'repair the full-range review' "Review-Fix-Of: $f" later)
+        cover=$(bash "$CI/dev-review-base.sh" "$i")
+        bash "$CI/dev-review-base.sh" --only-fixes "$cover" "$i" || { echo 'FAIL: repaired full-range review did not recover' >&2; bad=1; }
+        run 5 "review $i" success skipped "$cover" tests-only-fix
+        RP "$i" o/r "$P" || { echo "FAIL: repaired recovery approval: $(cat "$T/err")" >&2; bad=1; }
+      else
+        printf 'review-range: %s %s\n' "$diff" "$f" > "$FX/log-1004.txt"
+        RP "$f" o/r "$P" || fail "full-range review did not pass: $(cat "$T/err")"
+      fi
+      next=$(c 'subsequent blocked change' '' next)
+      run 6 "review $next" success failure "$f" '' blocked
+      h=$(c 'repair subsequent change' "Review-Fix-Of: $next" next)
+      cover=$(bash "$CI/dev-review-base.sh" "$h")
+      [ "$cover" = "$next" ] || { echo 'FAIL: recovery needlessly widened the next round' >&2; bad=1; }
+      bash "$CI/dev-review-base.sh" --only-fixes "$cover" "$h" || { echo 'FAIL: later round still ineligible after full-range recovery' >&2; bad=1; }
+      run 7 "review $h" success skipped "$cover" tests-only-fix
+      RP "$h" o/r "$P" || { echo "FAIL: later approval still ineligible: $(cat "$T/err")" >&2; bad=1; }
+    done
+  done
+  C=$original_C; D=$original_D
+  echo 'exercised: automatic full-range recovery and subsequent tests-only eligibility with unchanged main'
+}
+
+revert_message_cases() {
+  local subject body expected
+  while IFS='|' read -r expected subject body; do
+    g checkout -q --detach "$D"
+    g commit -q --allow-empty -m "$subject" -m "$body"
+    approval "$expected" "$subject / $body"
+  done <<EOF
+0|docs: describe rollback command|Revert "fix a bug"
+0|docs: quote a lowercase title|revert "fix a bug"
+0|docs: mention a title inline|Example: Revert "fix a bug"
+1|Revert "fix a bug"|No Git marker (a manually titled revert).
+1|rEvErT "fix a bug"|Case-insensitive subject check.
+1|custom rollback title|This reverts commit $D.
+1|custom merge rollback title|This reverts commit $D, reversing
+EOF
+  echo 'exercised: revert titles only in subjects; Git markers anywhere in the message'
+}
+
+case "${1:-}" in
+  --range-recovery) range_recovery_cases ;;
+  --revert-messages) revert_message_cases ;;
+esac
+case "${1:-}" in
+  --range-recovery|--revert-messages)
+    [ "$bad" = 0 ] || fail 'supersession range/message regression'
+    exit 0 ;;
+esac
+
 transform() { # transform <kind> → one commit on HEAD that moves / copies / re-modes D's repaired file
   case $1 in
     rename100) g mv old new; g commit -q -m 'rename old to new (R100)' ;;
@@ -187,6 +273,8 @@ D=$(commit_file 'passing repair after an inner revert' $'good-a\nrepaired' old)
 approval 0 "a revert inside C..D (reviewed by D)"
 g commit -q --allow-empty -m 'docs: explain reverts' -m "Note: the dispatcher text says This reverts commit abcdef1 when it reverts."
 approval 0 "a message that only mentions a revert mid-line"
+range_recovery_cases
+revert_message_cases
 adopted_rename_cases
 [ "$bad" = 0 ] || fail 'supersession after reverts'
 echo "dev supersession-after-reverts matrix passed"
