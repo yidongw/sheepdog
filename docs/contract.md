@@ -46,6 +46,10 @@ what gets deployed. The workflow is [.github/workflows/review.yml](../.github/wo
   blocks that are neither repaired nor superseded before choosing a newer review as its base. This widens the next
   full review to include those blocked ranges; a passing or repaired full review then restores tests-only eligibility
   while the main boundary stays unchanged. A quoted `Revert "` title in a commit body is not a revert subject.
+  Direct trailer repairs also lose eligibility after any later merge revert (Git's `This reverts commit …, reversing`
+  marker), which names the merge rather than its constituent repairs. This conservative rule applies to range bases,
+  coverage links and dispatcher completion, even after the merge revert is undone; a new repair or full review is
+  required. Direct non-merge revert chains still recognize a reverted revert as restoring the repair.
   Main then reviews the fix under (a).
 - **(c) Coverage is a chain of completed reviews.** Each review uploads an attestation `{head, base, kind, main}`.
   `review-passed.sh <sha> [repo] [deployed sha]` approves a sha only when its trusted tests passed, its review step

@@ -716,16 +716,24 @@ dev_carries_fix() { # dev_carries_fix <S> <files (newline separated)> [<exclude 
   dupfix_why="the author's ${c:0:9} changed the named files after ${s:0:9} and a newer $DEV round is in review"
   return 0
 }
-fix_reverted() { # fix_reverted <R> <ref>... → 0 when a commit after R on a ref containing R says "This reverts commit <R>" (git revert's
-  # own line; kept that narrow on purpose — review of d250a92a0: a reverted fix still counted as the fix)
+fix_reverted() { # <R> <ref>... → 0 for a standing direct revert or ANY later merge revert on a ref containing R
   # A revert X of R counts only while X itself stands: a revert of X restores R (re-check of e3aca30fd #8), so each X is
   # checked the same way, recursively. Past 64 levels the answer is unknown: _fix_reverted_unsure=1 and repair_effective
   # treats the repair as absent (fail closed; re-check of 0b463b6c0 #8: a 6-level cut answered "not reverted").
-  local r=$1 ref x d=${_fix_reverted_depth:-0}; shift
+  local r=$1 ref x undos d=${_fix_reverted_depth:-0}; shift
   if [ "$d" -ge 64 ]; then _fix_reverted_unsure=1; return 1; fi
   for ref in "$@"; do
     case "$ref" in ^*) continue ;; esac   # an excluded ref (repair_effective's "^<sha>")
     git -C "$SRC" merge-base --is-ancestor "$r" "$ref" 2>/dev/null || continue
+    # Same conservative merge-revert rule as review-repair.sh reverted():
+    # the marker names a containing merge, so a direct-R lookup misses its
+    # removed repair. No retained-contribution/restoration proofs here either.
+    # Check the whole range before direct-revert recursion to avoid parity
+    # turning an uncertain undo into a standing repair.
+    if ! undos=$(git -C "$SRC" log --format=%H -i -E --grep='^This reverts commit [0-9a-f]{7,40}, reversing' "$r..$ref" 2>/dev/null); then
+      _fix_reverted_unsure=1; return 1
+    fi
+    [ -z "$undos" ] || return 0
     for x in $(git -C "$SRC" log --format=%H -F --grep="This reverts commit $r" "$r..$ref" 2>/dev/null || true); do
       _fix_reverted_depth=$((d + 1)) fix_reverted "$x" "$ref" || return 0   # X stands → R is reverted
     done
