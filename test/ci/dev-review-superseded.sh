@@ -86,6 +86,17 @@ if of "$E10" "$F10"; then fail "a revert after D of a commit D saw did not disqu
 g checkout -q dev
 echo 'a revert inside the covering range keeps the supersession; one after it does not'
 
+# 9. (review of sheepdog ea594cc26 #1/#2) 65 successive reverts after D (odd: D's change is undone, C's code is back) —
+#    deeper than the revert walk looks: unknown, so D does not supersede C (the depth limit never counts as "undone")
+g checkout -q -b deep "$D"; prev=$D
+for i in $(seq 1 65); do prev=$(c "Revert $i" "This reverts commit $prev." devfile2); done
+E11=$(c "E11 (blocked)" '' devfile3); F11=$(c "fix of E11" "Review-Fix-Of: $E11" devfile3)
+reset; run 1 "review $C" success failure "$P" '' blocked; run 2 "review $D" success success "$P"; pass_log 2 "$P" "$D"
+run 3 "review $E11" success failure "$prev" '' blocked
+if of "$E11" "$F11"; then fail "a revert chain past the walk's depth counted as undoing the revert of D"; fi
+g checkout -q dev
+echo 'a revert chain deeper than the walk: not superseded (fail closed)'
+
 # 6. a crash (no verdict) of D never supersedes
 reset; run 1 "review $C" success failure "$P" '' blocked; run 2 "review $D" success failure "$P"   # no BLOCKED line: crash
 if of "$D" "$F"; then fail "a crashed review of D superseded C"; fi
