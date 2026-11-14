@@ -405,9 +405,13 @@ evidence: src/b.ts:4 four"
 reset
 g checkout -q -B devw "$S"; RA4=$(commit src/a.ts "$A" "Review-Fix-Of: $CA")
 g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
-dev_blocked "$S" "$F4" "" run-url task
+# a production-shaped task (dev scan): every finding + the devfix reset — none of it may reach the fixer of the rest
+dev_blocked "$S" "$F4" "" run-url "Task: the blocking review stopped dev at ${S:0:9}. Findings:
+$F4
+Your worktree starts at origin/dev; first git reset --hard ${S} so the fix sits directly on the reviewed commit."
 grep -q "dropped finding(s) 1 2 3 — dev already repairs their culprit commit(s) (#1: ${RA4:0:9} repairs ${CA:0:9}; #2: ${RA4:0:9} repairs ${CA:0:9}; #3: ${RA4:0:9} repairs ${CA:0:9};); routing only 4" "$LOG"
-test ! -e "$T/msg-${A##*:}"; test -s "$woken"
-grep -q "^#4 → commit ${CB:0:12}" "$T/task-blocked"; ! grep -qE '^#[123] →' "$T/task-blocked" || { echo "negative check failed: the fixer got repaired findings" >&2; exit 1; }
+test ! -e "$T/msg-${A##*:}"; test "$(cat "$woken")" = "$S rest"
+grep -q 'retired keys stay' "$T/task-rest"; grep -q "^#4 → commit ${CB:0:12}" "$T/task-rest"; grep -q 'stay there (do NOT reset' "$T/task-rest"
+! grep -qE 'singleton valuation|batched settlement|^#[123] →|git reset --hard' "$T/task-rest" || { echo "negative check failed: the fixer got repaired findings or the devfix reset" >&2; exit 1; }
 g push -q -f origin "$S:refs/heads/dev"; g fetch -q origin
 echo 'tralyx 26b73ac1b shape: repaired findings dropped, the unrepaired one routed alone'

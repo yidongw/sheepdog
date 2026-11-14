@@ -1105,6 +1105,15 @@ dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> 
     fi
     # shellcheck disable=SC2086 # finding numbers, one word each
     { f=$(findings_subset "$f" 1 $open_nums); att=$(att_of "$att" $open_nums); }
+    # The caller's fixer task lists EVERY finding and resets to S (the devfix fast path) — that would hand the fixer the
+    # dropped findings and discard the dev state that repairs them (review of dev 8dbbecc94 #1). The rest goes the split
+    # way instead: author groups (dev_blocked_split, below), or a $DEV-pushing fixer for exactly the open findings that
+    # stays on origin/$DEV (split_fixer: its own task, built from the filtered findings).
+    if [ -z "$(awk '$2 == "author" && $4 != "-"' <<<"$att")" ]; then
+      # shellcheck disable=SC2086
+      if fix_budget_ok "$s" blocked "$f"; then split_fixer "$s" rest "$f" "$url" "$att" 1 $open_nums; fi
+      return 0
+    fi
   fi
   if [ -n "$(awk '$2 == "author" && $4 != "-"' <<<"$att")" ] && fix_budget_ok "$s" blocked "$f"; then
     dev_blocked_split "$s" "$f" "$url" "$att"
