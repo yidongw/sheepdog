@@ -95,9 +95,10 @@ verdict_m() { # verdict_m <sha> → sets vm to its verdict, asked once per scrip
 reverts_of() { # reverts_of <commit> <since> <head> [restore]
   # Git names the merge, not its constituent commits, in a merge revert. Only
   # commits introduced relative to the recorded mainline can be undone by it.
-  # For restoration, also prove that ALL paths changed by the constituent are
-  # back at their pre-revert state: conflict resolutions / partial merges must
-  # not turn an incomplete undo into evidence of a restored passing review.
+  # For restoration, prove both ends of the inverse on ALL constituent paths:
+  # the undo's parent contains the constituent's result, and the undo restores
+  # its previous state. Final contents alone prove nothing when constituents
+  # cancel each other and the merge undo changes only unrelated paths.
   local c=$1 since=$2 h=$3 restore=${4:-0} r m p body merged
   local -a paths=()
   git log --format=%H -F --grep="This reverts commit $c" "$since..$h" 2>/dev/null || return 1
@@ -123,6 +124,7 @@ reverts_of() { # reverts_of <commit> <since> <head> [restore]
       git rev-parse --verify "$c^1" >/dev/null 2>&1 || continue
       mapfile -d '' -t paths < <(git diff --no-renames --name-only -z "$c^1" "$c")
       [ "${#paths[@]}" -gt 0 ] || continue
+      git --literal-pathspecs diff --quiet "$c" "$r^1" -- "${paths[@]}" || continue
       git --literal-pathspecs diff --quiet "$c^1" "$r" -- "${paths[@]}" || continue
     fi
     printf '%s\n' "$r"

@@ -15,7 +15,7 @@ PIN=source
     run 1 "review $C" success failure "$P" '' blocked
     run 2 "review $D" success success "$P"
     printf 'review-range: %s %s\n' "$P" "$D" > "$FX/log-1002.txt"
-    run 3 "review $E" success failure "$B" '' blocked
+    run 3 "review $E" success failure "${1:-$B}" '' blocked
   }
   repair_round() {
     B=$(git rev-parse HEAD)
@@ -23,7 +23,7 @@ PIN=source
     F=$(commit_file 'repair later change' fixed later)
     g commit -q --amend -m 'repair later change' -m "Review-Fix-Of: $E"
     F=$(git rev-parse HEAD)
-    verdicts
+    verdicts "${1:-$B}"
   }
   P=$(commit_file production good bug)
   git update-ref refs/remotes/origin/main "$P"
@@ -172,6 +172,52 @@ PIN=source
   repair_round
   if only_fixes "$E" "$F"; then fail 'a merge revert removing the passing fix retained supersession'; fi
   echo 'ok: reverting a merge introducing the passing repair requires a full review'
+
+  # R and S cancel inside the merge, so U reverses only an unrelated file.
+  # U's final bug contents match R's parent, but U never undid R. Reverting S
+  # afterwards must invalidate D, at both the producer and coverage consumer.
+  # Exercise either recorded mainline: no ancestry-only bypass may accept U.
+  g checkout -q --detach "$R"
+  g revert --no-edit "$R" >/dev/null
+  S=$(git rev-parse HEAD)
+  cancel_side=$(commit_file 'unrelated change beside cancelling reverts' side cancel-side)
+  for mainline in 1 2; do
+    g checkout -q --detach "$D"
+    g commit -q --allow-empty -m "retained mainline $mainline"
+    retained=$(git rev-parse HEAD)
+    if [ "$mainline" = 1 ]; then
+      g merge -q --no-ff -m 'merge cancelling reverts and unrelated change' "$cancel_side"
+    else
+      g checkout -q --detach "$cancel_side"
+      g merge -q --no-ff -m 'merge with cancelling reverts on parent 1' "$retained"
+    fi
+    cancelled_merge=$(git rev-parse HEAD)
+    g revert --no-edit -m "$mainline" "$cancelled_merge" >/dev/null
+    U=$(git rev-parse HEAD)
+    git diff --quiet "$U^" "$U" -- bug || fail 'cancellation fixture changed the bug in U'
+    git diff --exit-code "$D" "$U" || fail 'cancellation fixture did not restore D tree'
+    repair_round "$D"
+    only_fixes "$E" "$F" || fail 'cancelled reverts invalidated the standing repair'
+    run 4 "review $F" success skipped "$E" tests-only-fix
+    RP "$F" o/r "$P" || fail "standing repair lost deployment coverage: $(cat "$T/err")"
+
+    g checkout -q --detach "$U"
+    g revert --no-edit "$S" >/dev/null
+    [ "$(cat bug)" = broken ] || fail 'cancellation fixture did not restore the blocked bug'
+    repair_round "$D"
+    bad=0
+    if only_fixes "$E" "$F"; then
+      echo "FAIL: mainline $mainline unrelated merge undo cancelled R and approved tests-only" >&2
+      bad=1
+    fi
+    run 4 "review $F" success skipped "$E" tests-only-fix
+    if RP "$F" o/r "$P"; then
+      echo "FAIL: mainline $mainline unrelated merge undo allowed deployment coverage back to production" >&2
+      bad=1
+    fi
+    [ "$bad" = 0 ] || fail 'cancelling constituents forged restoration of a passing repair'
+    echo "ok: cancelled constituents cannot forge restoration (mainline $mainline)"
+  done
 
   # Conflicts can retain part of a constituent revert. Its mere membership in
   # the merge is not proof that reverting that merge fully restored the fix.
