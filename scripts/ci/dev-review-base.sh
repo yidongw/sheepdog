@@ -127,30 +127,28 @@ preserves_patch() ( # preserves_patch <before> <after> <at commit> [<literal pat
 restores_patch() { # <reverted commit> <undo> [<contribution before> <after> [<paths>...]]
   # A containing merge undo may also remove unreviewed changes. Carry the
   # original contribution through recursion, in the current revert direction,
-  # so restoring it need not restore those unrelated changes too. Both ends
-  # must prove the complete delta; a matching final snapshot alone is unsafe.
+  # so restoring it need not restore those unrelated changes too. The undo
+  # must supply a missing part and leave the complete inverse at its endpoint.
+  # Requiring the whole forward delta at its parent rejects composed repairs;
+  # accepting an already-complete inverse would bless unrelated merge undos.
   if [ "$#" -ge 4 ] && ! git --literal-pathspecs diff --quiet --ignore-submodules=none "$3" "$4" -- "${@:5}" &&
     preserves_patch "$4" "$3" "$1^1" "${@:5}" && preserves_patch "$3" "$4" "$1" "${@:5}" &&
-    preserves_patch "$3" "$4" "$2^1" "${@:5}" && preserves_patch "$4" "$3" "$2" "${@:5}"; then
+    ! preserves_patch "$4" "$3" "$2^1" "${@:5}" && preserves_patch "$4" "$3" "$2" "${@:5}"; then
     return 0
   fi
   # The full revert delta also proves restoration (including partial removals
   # of a contribution, for which the contextual inverse is not complete).
   git rev-parse --verify "$1^1" >/dev/null 2>&1 || return 1
   if git diff --quiet --ignore-submodules=none "$1^1" "$1"; then return 1; fi
-  # An exact restoration of the whole pre-revert tree is complete even
-  # when intervening conflicts erased the reverted patch from the parent.
-  # Retain the contextual proof above for selective restoration.
-  if git diff --quiet --ignore-submodules=none "$1^1" "$2"; then return 0; fi
-  preserves_patch "$1^1" "$1" "$2^1" && preserves_patch "$1" "$1^1" "$2"
+  ! preserves_patch "$1" "$1^1" "$2^1" && preserves_patch "$1" "$1^1" "$2"
 }
 reverts_of() { # <commit> <since> <head> [restore [<contribution before> <after> [<paths>...]]]
   # Git names the merge, not its constituent commits, in a merge revert. Only
   # commits introduced relative to the recorded mainline can be undone by it.
-  # For restoration, prove both patch directions: the constituent's complete
-  # delta survives in the undo's parent, and its inverse survives after the
-  # undo. Unrelated hunks may differ at either endpoint. Final contents alone
-  # prove nothing when constituents cancel inside the merge.
+  # For restoration, the undo must complete a still-missing inverse, possibly
+  # after independent partial repairs. Unrelated hunks may differ at either
+  # endpoint. Final contents alone prove nothing when constituents cancel
+  # inside the merge and the inverse was already complete before the undo.
   # In invalidation mode, mark a merge undo that retained the patch as
   # "<sha> preserved". Its consumer must verify preservation through head;
   # the snapshot alone cannot vouch for later reverts of a sibling cherry-pick.
@@ -217,17 +215,19 @@ contribution_paths() { # <constituent> <reviewed head> -> NUL-delimited path lin
   # Walk reviewed rename edges, rather than comparing only the endpoints:
   # successive refinements can make the final name too dissimilar to x.
   # Include both ends so the projection carries the deletion AND destination.
+  # Only descendants of x can carry its contribution through a rename.
+  # A merged sibling's earlier rename of the same path is unrelated history.
   while IFS= read -r -d '' status && IFS= read -r -d '' old && IFS= read -r -d '' new; do
     [ -n "${paths[$old]+x}" ] || continue
     paths["$new"]=1
-  done < <(git log --format= --reverse --topo-order --diff-merges=separate \
+  done < <(git log --format= --reverse --topo-order --ancestry-path --diff-merges=separate \
     --name-status -z --find-renames=50% -l0 --diff-filter=R --no-color \
     --no-ext-diff --no-textconv --ignore-submodules=none "$x..$d")
   [ "${#paths[@]}" = 0 ] || printf '%s\0' "${!paths[@]}"
 }
 contribution_stands() { # <constituent> <approved head> <candidate> <depth>
-  local x=$1 d=$2 h=$3 k=$4 l v rb att
-  local -a paths=()
+  local x=$1 d=$2 h=$3 k=$4 l v rb att replacement
+  local -a paths=() replacements=()
   mapfile -d '' -t paths < <(contribution_paths "$x" "$d")
   [ "${#paths[@]}" -gt 0 ] || return 0
   # If D still contains x's original patch, require just that patch. Otherwise
@@ -239,20 +239,34 @@ contribution_stands() { # <constituent> <approved head> <candidate> <depth>
   fi
   [ "$k" -lt 40 ] || return 1
   # Later incremental reviews may replace this contribution. They must cover
-  # every change since D through a usable full-review chain, pass, and their own
-  # reviewed contributions must still stand. A skipped, gapped, side-branch,
-  # blocked or reverted review cannot bless an arbitrary new endpoint.
+  # every change since D through a usable full-review chain, pass or carry an
+  # effective repair, and their contributions must still stand. A blocked
+  # round vouches for its reviewed range plus its repair, as in review_link;
+  # use that repair's endpoint rather than freezing the pre-repair contents.
   for l in $(git rev-list "$d..$h" "^$MAINREF" 2>/dev/null); do
     git merge-base --is-ancestor "$d" "$l" 2>/dev/null || continue
     verdict_m "$l"; v=$vm
-    [ "${v%% *}" = pass ] || continue
+    case "${v%% *}" in
+      pass) replacements=("$l") ;;
+      blocked) mapfile -t replacements < <(effective_repairs "$l" "$h") ;;
+      *) continue ;;
+    esac
+    [ "${#replacements[@]}" -gt 0 ] || continue
     att=$(review_attestation "${v##* }" "$l") || continue
     [ "$(jq -r .kind <<<"$att")" = review ] || continue
     rb=$(jq -r .base <<<"$att")
     review_covered "$rb" "$d" "$h" 0 || continue
-    review_stands "$rb" "$l" "$h" "$((k + 1))" || continue
-    mapfile -d '' -t paths < <(contribution_paths "$x" "$l")
-    preserves_patch "$x^1" "$l" "$h" "${paths[@]}" && return 0
+    for replacement in "${replacements[@]}"; do
+      if [ "${v%% *}" = blocked ]; then
+        # A repair may refine a standing contribution. An unrelated repair
+        # cannot retroactively vouch for a contribution already lost before
+        # it: prove the state it replaces through the same survival rule.
+        contribution_stands "$x" "$d" "$replacement^1" "$((k + 1))" || continue
+      fi
+      review_stands "$rb" "$replacement" "$h" "$((k + 1))" || continue
+      mapfile -d '' -t paths < <(contribution_paths "$x" "$replacement")
+      preserves_patch "$x^1" "$replacement" "$h" "${paths[@]}" && return 0
+    done
   done
   return 1
 }
