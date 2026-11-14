@@ -138,6 +138,10 @@ restores_patch() { # <reverted commit> <undo> [<contribution before> <after> [<p
   # of a contribution, for which the contextual inverse is not complete).
   git rev-parse --verify "$1^1" >/dev/null 2>&1 || return 1
   if git diff --quiet --ignore-submodules=none "$1^1" "$1"; then return 1; fi
+  # An exact restoration of the whole pre-revert tree is complete even
+  # when intervening conflicts erased the reverted patch from the parent.
+  # Retain the contextual proof above for selective restoration.
+  if git diff --quiet --ignore-submodules=none "$1^1" "$2"; then return 0; fi
   preserves_patch "$1^1" "$1" "$2^1" && preserves_patch "$1" "$1^1" "$2"
 }
 reverts_of() { # <commit> <since> <head> [restore [<contribution before> <after> [<paths>...]]]

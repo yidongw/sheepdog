@@ -379,6 +379,16 @@ restoration_cases() {
     g revert --no-edit "$U" >/dev/null
     approval 0 "mainline $mainline complete direct restoration"
 
+    g checkout -q --detach "$U"
+    commit_file 'conflict before complete restoration' $'diverged-b\nbroken-c' bug >/dev/null
+    if g revert --no-edit "$U" >"$T/revert.out" 2>&1; then fail 'expected complete restoration conflict'; fi
+    [ -n "$(git ls-files -u -- bug)" ] || fail 'complete restoration did not conflict'
+    printf '%s\n' "$fixed" > bug
+    g add bug; g revert --continue >/dev/null
+    git diff --exit-code "$D" HEAD || fail 'resolved undo must restore exact approved tree'
+    approval 0 "mainline $mainline conflict resolved complete restoration"
+
+
     # Restore U by undoing a merge which introduced it from the other parent.
     g checkout -q --detach "$D"
     retained=$(commit_file 'retained restoration branch' present restoration-side)
