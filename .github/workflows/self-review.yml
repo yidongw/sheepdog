@@ -12,8 +12,8 @@ name: Review
 # reviewed with the sheepdog diff it ships (docs/self-review.md): on dev by the pinned (old) reviewer, as a Hotfix: on
 # main by the new pin (main's file). The pinned snapshot must pass this tree's review-flow suites
 # (test/ci/self-review-pin.sh — review of ad09c0b50 #1/#2: a pin that lacks the current protections is the reviewer that
-# actually runs). Pin: 5f7c3ce04 (machinery repair classification from 43c8601; a non-ancestor Review-Fix-Of: is a
-# warning, never a range abort, and gets no repair privilege; superseded dev blocks need no repair of their own).
+# actually runs). Pin: 5f54f10b5 (the review prompt goes to codex on stdin, never argv — spawn E2BIG past 128 KiB; plus
+# 5f7c3ce04's machinery repair classification and non-ancestor Review-Fix-Of: handling).
 # Runners: `tests` on GitHub-hosted ubuntu (this repository is public: free minutes, read-only token, no secrets);
 # `review` + `status` on the self-hosted cx43 runner cx43-sheepdog-review (labels cx43, sheepdog-review), whose
 # job-started hook admits only workflow_run jobs of main's self-review.yml — a fork's pull request runs its own workflow
