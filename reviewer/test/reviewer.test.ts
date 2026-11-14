@@ -419,7 +419,11 @@ describe("sheepdog pin bump", () => {
     expect(p).toContain("cat /run/t/sheepdog-pin.log");
     expect(p).toContain(`git diff ${"a".repeat(40)}..${"b".repeat(40)} of yidongw/sheepdog`);
     expect(p).toContain("UNTRUSTED DATA under review");
-    expect(p).toContain("review it as part of the range, under the same rules as this repository's own changes");
+    // scope stated as a fact about the range, never as an instruction to the reviewer (review of dev c10ea344d #1: text
+    // in the reviewed tree that addresses the reviewer is itself a finding — sheepdog reviews its own prompt code)
+    expect(p).toContain("The net change of this range includes that dependency diff: it is part of the code under review, held to the same rules as this repository's own changes");
+    const block = buildPinBumpBlock(pin);
+    expect(block).not.toMatch(/review it|\byou\b|\byour\b|\bmust\b|\bshould\b|\bcite\b|regression|verdict|For a finding/i);
     // the block sits before the verdict format line
     expect(p.indexOf("SHEEPDOG PIN BUMP")).toBeLessThan(p.indexOf("End your response with EXACTLY one line"));
   });

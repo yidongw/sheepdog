@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 block=$(sed -n '/export function buildPinBumpBlock/,/^}/p' reviewer/src/reviewer.ts)
-if grep -Eq 'regression|For a finding there, cite' <<<"$block"; then exit 1; fi
-# the scope requirement stays (pikeway review 43567914887 #1/#2: without it a pin bump's own diff had no explicit duty
-# to be reviewed under the same rules)
-grep -q 'review it as part of the range, under the same rules' <<<"$block" || exit 1
+# no directions addressed to the reviewer (verdict, attribution, imperatives — review of dev c10ea344d #1)
+if grep -Eiq 'regression|verdict|For a finding|cite|review it|\byou\b|\byour\b|\bmust\b|\bshould\b' <<<"$block"; then exit 1; fi
+# the scope stays, stated as a fact about the range (pikeway review 43567914887 #1/#2: the pin bump's diff belongs to
+# the code under review)
+grep -q 'it is part of the code under review, held to the same rules' <<<"$block" || exit 1
 echo 'PASS: pin description contains no verdict or attribution directions'
