@@ -84,7 +84,7 @@ verdict() { # verdict <sha> → "pass <run id>" | "blocked <run id>" | "fixes <r
     st=$(jq -r '[.steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] // ""' <<<"$j" 2>/dev/null || true)
     case "$st" in
       success) echo "pass $id"; return ;;
-      skipped) [ "$(jq -r '.conclusion // ""' <<<"$j")" = success ] || continue; echo "fixes $id"; return ;;
+      skipped) review_fix_round "$id" || continue; [ "$(jq -r '.conclusion // ""' <<<"$j")" = success ] || continue; echo "fixes $id"; return ;;
       failure)
         jid=$(jq -r '.id // empty' <<<"$j" 2>/dev/null || true)
         [ -n "$jid" ] || continue

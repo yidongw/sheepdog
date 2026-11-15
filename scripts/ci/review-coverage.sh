@@ -61,10 +61,17 @@ review_fix_links=""
 review_fix_round() { # <run id> -> 0 when it is a completed tests-only fix round: review job succeeded, blocking step skipped
   local jobs
   jobs=$(review_api "actions/runs/$1/jobs") || return 1
-  jq -e '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] | select(.conclusion == "success")
+  jq -e 'select(any(.jobs[]?; (.name | sub("^.* / "; "")) == "tests" and .conclusion == "success"))
+    | [.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] | select(.conclusion == "success")
     | [.steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] == "skipped"' <<<"$jobs" >/dev/null 2>&1
 }
-review_link() { # <run id> <link head> <anchor> <candidate head> <depth>
+review_link() {
+  local saved_links=$review_fix_links
+  if _review_link "$@"; then return 0; fi
+  review_fix_links=$saved_links
+  return 1
+}
+_review_link() { # <run id> <link head> <anchor> <candidate head> <depth>
   local att v m k am
   att=$(review_attestation "$1" "$2") || return 1
   k=$(jq -r .kind <<<"$att")
@@ -92,7 +99,13 @@ review_link() { # <run id> <link head> <anchor> <candidate head> <depth>
   if [ "$k" = tests-only-fix ] && [ "${REVIEW_LINK_PRODUCER:-0}" != 1 ]; then review_fix_links+="$2 "; fi
   return 0
 }
-review_covered() { # <base> <anchor (deployed or review-time main)> <candidate head> [depth]
+review_covered() {
+  local saved_links=$review_fix_links
+  if _review_covered "$@"; then return 0; fi
+  review_fix_links=$saved_links
+  return 1
+}
+_review_covered() { # <base> <anchor (deployed or review-time main)> <candidate head> [depth]
   local b=$1 d=$2 h=$3 n=${4:-0} id
   git merge-base --is-ancestor "$b" "$d" 2>/dev/null && return 0
   [ "$n" -lt 40 ] || return 1

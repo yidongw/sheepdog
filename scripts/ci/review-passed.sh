@@ -59,6 +59,7 @@ covered() { review_covered "$1" "$2" "$sha" "${3:-0}"; }
 # A run whose review never ran for any other reason (cancelled, setup / gate failure) never passes.
 # REVIEW_KIND_OUT=<file>: the kind of the approving run ("review" | "tests-only-fix") is written there (merge-branch.sh).
 for id in $ids; do
+  review_fix_links=""
   jobs=$(gh api "repos/$repo/actions/runs/$id/jobs")
   tests=$(jq '[.jobs[] | select((.name | sub("^.* / "; "")) == "tests" and .conclusion == "success")] | length' <<<"$jobs")
   [ "${tests:-0}" -gt 0 ] || continue
