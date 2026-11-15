@@ -13,6 +13,7 @@ D=scripts/ci/review-dispatch.sh
 fail() { echo "FAIL: $*" >&2; exit 1; }
 fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh"; done; }
 declare -F review_list >/dev/null || eval "$(fns review_list)"; eval "$(fns review_first_verdict review_attempt_verdict review_attested_kind review_verdict_load review_blocked_verdict review_log_lines gate_section review_step_ran)"; eval "$(fns review_api review_verdict_list)"   # THE verdict reader the dispatcher's helpers call (review_first_verdict)
+source "${D%/*}/review-runs.sh"
 hotfix_pass_confirmed() { :; }   # the completion gate (review-passed.sh REVIEW_PASSED_MODE=recheck): review-first-verdict.sh / the API budget run test it
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 SRC=$T/src STATE=$T/state MAIN=main DEV=dev REPO=test/repo FIXER_GATE=$T/state/fixer-gate SUPERVISOR_THREAD=import:claudeAgent:sup key_prefix=""
@@ -61,6 +62,7 @@ blocked='{"jobs":[{"name":"tests","id":60,"conclusion":"success"},{"name":"revie
 passed='{"jobs":[{"name":"tests","id":60,"conclusion":"success"},{"name":"review","id":61,"conclusion":"success","steps":[{"name":"Review (blocking; x)","conclusion":"success"}]}]}'
 gh_raw() { case "$*" in
   "run list"*) cat "$T/runs.json" ;;
+  *actions/workflows/*/runs*) jq '{workflow_runs: map({id:.databaseId,display_title:.displayTitle,status,conclusion,event,head_branch:.headBranch,path:".github/workflows/review.yml"})}' "$T/runs.json" ;;
   *runs/6/jobs*|*runs/8/jobs*) if [ -e "$T/f-passed" ]; then echo "$passed"; else echo "$blocked"; fi ;;
   *runs/7/jobs*) echo '{"jobs":[{"name":"tests","id":70,"conclusion":"success"},{"name":"review","id":71,"conclusion":"skipped","steps":[]}]}' ;;
   *jobs/61/logs*) [ ! -e "$T/f-nolog" ] || return 1; printf '2026-11-13T00:00:00Z review-range: %s %s\n2026-11-13T00:00:00Z review-gate: reviewing a..b\n2026-11-13T00:00:00Z review-gate: FINDING #1 route=fixer commit=- — x\n2026-11-13T00:00:00Z review-gate: BLOCKED #1 regression [should]: s drops rows\n2026-11-13T00:00:00Z evidence: src/s.ts:1 x\n' "$X" "$F" ;;

@@ -19,6 +19,7 @@ printf '#!/usr/bin/env bash\nexit 1\n' > "$TRUSTED/scripts/ci/review-passed.sh" 
 LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 eval "$(sed -n '/^finding_jobs() {/p; /^dev_round_noop() {/,/^}/p; /^dev_merge_only() {/,/^}/p; /^dev_main_hold() {/,/^}/p; /^review_infra_reason() {/,/^}/p; /^run_verdict() {/,/^}/p; /^dev_verdict_run() {/,/^}/p; /^named_files() {/p' "$D")"
 eval "$(for n in review_first_verdict review_attempt_verdict review_attested_kind review_verdict_load review_blocked_verdict review_log_lines gate_section review_step_ran review_api review_verdict_list; do sed -n "/^$n() {/,/^}/p" "$D" "${D%/*}/review-evidence.sh"; done)"   # THE verdict reader (dev_verdict_run)
+source "${D%/*}/review-runs.sh"
 review_list() { gh run list -R "$REPO" -w review.yml -L "$1" --json "$2" -q "$3"; }   # this fake gh answers lists pre-filtered
 loop=$(python3 - "$D" <<'PY'
 import sys

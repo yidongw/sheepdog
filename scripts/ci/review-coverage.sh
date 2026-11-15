@@ -158,8 +158,9 @@ _review_covered() {
   case "$rc" in
     0)
       review_link "$vid" "$b" "$d" "$h" "$((n + 1))" "$vk" "$vatt" && return 0
-      # a blocked, unrepaired verdict: no structural coverage either (review of 1b2f4484e #1/#2)
-      if [ "$vk" = blocked ] && [ "${REVIEW_LINK_PRODUCER:-0}" != 1 ] && ! repaired "$b" "$h"; then return 1; fi ;;
+      # Its own proof failed: even producers cannot skip an unrepaired block through merge parents
+      # (review of 1b2f4484e #1/#2, 746d20fe0 #6). Readable producer links above still accept blocked reviews.
+      if [ "$vk" = blocked ] && ! repaired "$b" "$h"; then return 1; fi ;;
     2) return 1 ;;
   esac
   # structural coverage of a clean merge through its parents — never for a merge whose own verdict is blocked and not

@@ -18,6 +18,7 @@ D=scripts/ci/review-dispatch.sh
 fail() { echo "FAIL: $*" >&2; exit 1; }
 fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh"; done; }
 declare -F review_list >/dev/null || eval "$(fns review_list)"; eval "$(fns review_first_verdict review_attempt_verdict review_attested_kind review_verdict_load review_blocked_verdict review_log_lines gate_section review_step_ran)"; eval "$(fns review_api review_verdict_list)"   # THE verdict reader the dispatcher's helpers call (review_first_verdict)
+source "${D%/*}/review-runs.sh"
 hotfix_pass_confirmed() { :; }   # the completion gate (review-passed.sh REVIEW_PASSED_MODE=recheck): review-first-verdict.sh / the API budget run test it
 eval "$(fns findings findings_cap gate_section review_step_ran thread_of fixer_receipt_thread norm_tid finding_blocks finding_meta finding_route review_round_route route_reason \
   attribute_finding attribution findings_subset att_of culprit_lines named_files repair_effective fix_reverted reverted hotfix_fix_pushed \
@@ -93,6 +94,7 @@ gh_raw() {
   local a="$*" id
   case "$a" in
     "run list"*) cat "$T/runs.json" ;;
+  *actions/workflows/*/runs*) jq '{workflow_runs: map({id:.databaseId,display_title:.displayTitle,status,conclusion,event,head_branch:.headBranch,path:".github/workflows/review.yml"})}' "$T/runs.json" ;;
     *actions/runs/*/jobs*) id=${a##*actions/runs/}; id=${id%%/*}; cat "$T/jobs-$id" ;;
     *actions/jobs/*/logs*) id=${a##*actions/jobs/}; id=${id%%/*}; cat "$T/log-${id%1}" 2>/dev/null ;;
     *actions/runs/*) id=${a##*actions/runs/}; id=${id%% *}; printf '{"conclusion":"%s"}\n' "$(cat "$T/concl-$id")" ;;

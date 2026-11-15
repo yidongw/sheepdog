@@ -99,9 +99,10 @@ git -C "$TRUSTED" checkout -q --detach origin/$MAIN
 CI_SCRIPTS=$SHEEPDOG_CI
 
 source "$(dirname "${BASH_SOURCE[0]}")/review-notify.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/review-runs.sh"   # complete trusted listing for verdict decisions
 source "$(dirname "${BASH_SOURCE[0]}")/review-evidence.sh"   # gate_section / review_step_ran / review_first_verdict: the one evidence reader
 # THE verdict of a commit (review_first_verdict: its FIRST completed, attested verdict, run id / run_attempt order; owner
-# 11-16) — read from the routing listing (review_list) with the real gh: what it decides (which run's findings a head is
+# 11-16) — read from the complete trusted paginated listing with the real gh: what it decides (which run's findings a head is
 # judged by) is the same answer review-passed.sh / the range producers get
 # (a completed job's log never changes: read through the memo's log store, gh-cache.sh — the jobs answers, read with the
 # real gh, mark which logs are final; everything else the real gh. gh
@@ -115,7 +116,7 @@ review_api() {
   esac
 }
 review_verdict_list() {
-  review_list 100 databaseId,displayTitle,status,conclusion '.[] | {id: .databaseId, display_title: .displayTitle, status, conclusion}' | jq -c . 2>/dev/null
+  review_runs_strict   # review_list stays bounded for informational routing only
 }
 REVIEW_GIT_DIR=$SRC
 REVIEW_VERDICT_RANGES=0   # routing only: a block's attested range is never read here (not exported: approval children read it)
@@ -1213,24 +1214,27 @@ dev_merge_only() { # dev_merge_only <sha> → 0 when <sha> adds nothing to main:
 run_verdict() { # run_verdict <run id> → 0 when a job of that run failed / timed out (the run carries a verdict)
   [ "$(gh api "repos/$REPO/actions/runs/$1/jobs" -q '[.jobs[]? | select(.conclusion == "failure" or .conclusion == "timed_out")] | length' 2>/dev/null)" != 0 ]
 }
-dev_verdict_run() { # dev_verdict_run <sha> <run id> <conclusion> → "<run id> <conclusion> <attempt|->": the run AND attempt of
+dev_verdict_run() { # <sha> <run id> <conclusion> → dev_verdict="<run id> <conclusion> <attempt|->", dev_verdict_jobs: the run AND attempt of
   # THE dev verdict of <sha> (review_first_verdict "review": its FIRST completed, attested verdict — a later rerun,
   # cancelled or passing, never hides or replaces it; re-check of 379550c9a #1, review of 9ce09a6e2 #6), else the given run
+  # Call without a subshell: both routing paths reuse this attempt's jobs without reconstructing them from a run id.
+  dev_verdict="" dev_verdict_jobs=""
   if review_first_verdict "$1" review; then
     # the verdict's own attempt decides: a block is failure, a pass / tests-only round success (whatever a later attempt concluded)
-    case "$rfv_kind" in blocked) echo "$rfv_id failure $rfv_attempt" ;; *) echo "$rfv_id success $rfv_attempt" ;; esac
+    case "$rfv_kind" in blocked) dev_verdict="$rfv_id failure $rfv_attempt" ;; *) dev_verdict="$rfv_id success $rfv_attempt" ;; esac
+    dev_verdict_jobs=$rfv_jobs
     return 0
   fi
   # no verdict readable yet: the given run — or, when it is a cancel without a verdict, the newest older completed run of
   # the same sha that has one (its findings are routed; approval is review-passed.sh's own reading)
   local id st c
-  if [ "$3" != cancelled ] || run_verdict "$2"; then echo "$2 $3 -"; return 0; fi
+  if [ "$3" != cancelled ] || run_verdict "$2"; then dev_verdict="$2 $3 -"; return 0; fi
   while read -r id st c; do
     [ "$st" = completed ] && [ "$id" != "$2" ] || continue
-    if [ "$c" != cancelled ] || run_verdict "$id"; then echo "$id $c -"; return 0; fi
+    if [ "$c" != cancelled ] || run_verdict "$id"; then dev_verdict="$id $c -"; return 0; fi
   done < <(review_list 60 databaseId,displayTitle,status,conclusion \
              ".[] | select(.displayTitle==\"review $1\") | \"\(.databaseId) \(.status) \(.conclusion)\"")
-  echo "$2 $3 -"
+  dev_verdict="$2 $3 -"
 }
 dev_round_noop() { # dev_round_noop <sha> <run id> <run conclusion> [clear] → 0 when this round decides no block
   #  · merge-only (dev_merge_only): nothing can be blocked; with "clear" and the current dev HEAD, the dev-wide block
@@ -2040,17 +2044,22 @@ if [ -z "${DRY:-}" ] && git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/
     if [[ "$bsha" =~ ^[0-9a-f]{40}$ ]] && git -C "$SRC" merge-base --is-ancestor "$bsha" "origin/$DEV" 2>/dev/null \
        && ! git -C "$SRC" merge-base --is-ancestor "$bsha" origin/$MAIN 2>/dev/null \
        && ! dev_round_noop "$bsha" "$brid" failure; then   # a merge-only round is never blocked
-      bjobs=$(finding_jobs "$brid") || bjobs=""
-      bf=$(findings "$brid" "$bjobs")
-      if binfra=$(review_infra_reason "$bf"); then dev_infra "$bsha" "$brid" "$binfra"
-      elif dev_main_hold "$bsha" "$brid" "$bf" "$bjobs"; then :
-      else
-      bcul=$(culprit_threads "$bsha" "$bf")
-      # reviewer → fixer → author: the fixer gets it; the authors only when it failed (dev_blocked)
-      dev_blocked "$bsha" "$bf" "$bcul" "https://github.com/$REPO/actions/runs/$brid" "Task: the blocking review stopped $DEV at ${bsha:0:9}. Findings:
+      dev_verdict_run "$bsha" "$brid" failure
+      read -r brid bconcl _ <<<"$dev_verdict"
+      if [ "$bconcl" = failure ]; then
+        bjobs=$dev_verdict_jobs
+        [ -n "$bjobs" ] || bjobs=$(finding_jobs "$brid") || bjobs=""
+        bf=$(findings "$brid" "$bjobs")
+        if binfra=$(review_infra_reason "$bf"); then dev_infra "$bsha" "$brid" "$binfra"
+        elif dev_main_hold "$bsha" "$brid" "$bf" "$bjobs"; then :
+        else
+        bcul=$(culprit_threads "$bsha" "$bf")
+        # reviewer → fixer → author: the fixer gets it; the authors only when it failed (dev_blocked)
+        dev_blocked "$bsha" "$bf" "$bcul" "https://github.com/$REPO/actions/runs/$brid" "Task: the blocking review stopped $DEV at ${bsha:0:9}. Findings:
 ${bf:-(none parsed; read the run)}
 Run: https://github.com/$REPO/actions/runs/$brid
 Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). Your worktree starts at origin/$DEV; first git reset --hard ${bsha} so the fix sits directly on the reviewed commit (later dev commits are NOT part of this fix). ONE commit with trailers Review-Fix-Of: ${bsha} and Hotfix: review fix of ${bsha:0:9}; push it with git push origin HEAD:refs/heads/devfix/${bsha:0:12} (NOT to $DEV, not to main). Once the trusted tests pass there, ${bsha:0:9} plus your fix land on main without a second review."
+        fi
       fi
     fi
   fi
@@ -2307,7 +2316,8 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
   thread=$(git -C "$SRC" show -s --format=%B "$sha" | grep -iE '^Thread:' | tail -1 | sed -E 's/^[Tt]hread:[[:space:]]*//' | tr -d '[:space:]' || true)
   url="https://github.com/$REPO/actions/runs/$rid"
   if [ "$ref" = "$DEV" ]; then
-    read -r rid concl vattempt <<<"$(dev_verdict_run "$sha" "$rid" "$concl")"; url="https://github.com/$REPO/actions/runs/$rid"
+    dev_verdict_run "$sha" "$rid" "$concl"
+    read -r rid concl vattempt <<<"$dev_verdict"; url="https://github.com/$REPO/actions/runs/$rid"
     if dev_round_noop "$sha" "$rid" "$concl" clear; then continue; fi   # before any blocked / fixer / overdue decision
   fi   # before any blocked / fixer / overdue decision
   if (cd "$TRUSTED" && bash "$CI_SCRIPTS/review-passed.sh" "$sha" "$REPO" >/dev/null 2>&1); then
@@ -2346,8 +2356,8 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
     fi
   elif [ "$ref" = "$DEV" ]; then
     # the verdict's own attempt: its findings, not a later rerun's (review of 9ce09a6e2 #6)
-    if [ "${vattempt:--}" != - ]; then djobs=$(gh api "repos/$REPO/actions/runs/$rid/attempts/$vattempt/jobs" 2>/dev/null) || djobs=""
-    else djobs=$(finding_jobs "$rid") || djobs=""; fi
+    djobs=$dev_verdict_jobs
+    [ -n "$djobs" ] || djobs=$(finding_jobs "$rid") || djobs=""
     f=$(findings "$rid" "$djobs")
     # the reviewer itself did not run: nothing was reviewed — no block, no fixer, no author notice, no revert clock
     if dinfra=$(review_infra_reason "$f"); then dev_infra "$sha" "$rid" "$dinfra"; continue; fi
