@@ -14,7 +14,9 @@
 #       (review of sheepdog dev d9228afe7 #1)
 #   (h) … and only once that record is confirmed written: an unavailable routing read → not landed, retried next run
 #       (review of sheepdog main 625246776 #1); (i) an unwritable record never yields a main-only approval (train or head
-#       loop; review of main 725a2adc1 #1); (j) receipts are per run (review of dev 8ba5aaa38 #1/#2)
+#       loop; review of main 725a2adc1 #1); (j) receipts are per run (review of dev 8ba5aaa38 #1/#2); (k) the head loop
+#       is bound to the approving review, (k2) also when its log cannot be read (review of dev 8a8373271 #1); (l) receipts
+#       name the review attempt (review of pawx 7f0dbbc8f #1/#2)
 set -uo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 cd "$(dirname "$0")/../.."
@@ -119,17 +121,18 @@ RP() { (cd "$SRC" && bash "$ROOT/scripts/ci/review-passed.sh" "$H" o/r >/dev/nul
 
 # ── the dispatcher's head loop and merge train, as in review-dispatch-merge-only.sh: the real code, stubbed effects ──
 ghm() { # the routing memo: the real (fake) gh; with $T/ghm-logs-fail present, job-log reads fail (an unavailable read)
-  if [ -e "$T/ghm-logs-fail" ] && [[ "$*" == *"/logs"* ]]; then return 1; fi
+  # (its content, if any: only that job's log fails)
+  if [ -e "$T/ghm-logs-fail" ] && [[ "$*" == *"/jobs/$(cat "$T/ghm-logs-fail")"*"/logs"* ]]; then return 1; fi
   gh "$@"; }
 ghc_note_jobs() { cat > /dev/null; }
 STATE=$T/state MAIN=main DEV=dev TRUSTED=$T/trusted WORK=$T/work OUTBOX=$T/state/outbox CI_SCRIPTS=$ROOT/scripts/ci
 DEV_REVERT_AFTER_SEC=3600 DEV_REVERT_WARN_SEC=900 key_prefix="" SUPERVISOR_THREAD=sup DISPATCH_THREAD=disp
 mkdir -p "$STATE/sent" "$OUTBOX"; LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 git -C "$SRC" worktree add -q --detach "$TRUSTED" origin/main
-eval "$(sed -n '/^review_list() {/,/^}/p; /^dev_round_noop() {/,/^}/p; /^dev_merge_only() {/,/^}/p; /^review_infra_reason() {/,/^}/p; /^run_verdict() {/,/^}/p; /^dev_verdict_run() {/,/^}/p; /^named_files() {/p; /^findings_cap() {/,/^}/p; /^findings() {/,/^}/p; /^notes_of() {/,/^}/p; /^findings_subset() {/,/^}/p; /^main_culprits_api() /p; /^main_culprit_hint() {/,/^}/p; /^dev_split_main() {/,/^}/p; /^train_record_main() {/,/^}/p; /^thread_of() /p; /^range_threads() {/,/^}/p' "$D")"
+eval "$(sed -n '/^review_list() {/,/^}/p; /^dev_round_noop() {/,/^}/p; /^dev_merge_only() {/,/^}/p; /^review_infra_reason() {/,/^}/p; /^run_verdict() {/,/^}/p; /^dev_verdict_run() {/,/^}/p; /^named_files() {/p; /^findings_cap() {/,/^}/p; /^findings() {/,/^}/p; /^notes_of() {/,/^}/p; /^findings_subset() {/,/^}/p; /^main_culprits_api() /p; /^main_culprit_hint() {/,/^}/p; /^dev_split_main() {/,/^}/p; /^record_approving_main() {/,/^}/p; /^thread_of() /p; /^range_threads() {/,/^}/p' "$D")"
 source "$ROOT/scripts/ci/review-main-culprits.sh"
 source "$ROOT/scripts/ci/review-machinery.sh"
-for f in review_list findings findings_subset main_culprit_hint dev_split_main train_record_main main_culprits_api review_main_culprits dev_verdict_run; do
+for f in review_list findings findings_subset main_culprit_hint dev_split_main record_approving_main main_culprits_api review_main_culprits dev_verdict_run; do
   declare -F "$f" >/dev/null || fail "helper $f not extracted"
 done
 fixer_receipt_thread() { :; }
@@ -384,17 +387,54 @@ grep -q "run $NRID): finding(s) 1 — culprit on main" "$STATE/open-findings.log
 landed || fail "(j) the train did not land H: $(cat "$LOG")"
 grep -q "run $RID): finding(s) 1 2 — culprit on main" "$STATE/open-findings.log" || fail "(j) the approving run $RID's findings were not recorded (another run's receipt counted)"
 echo "ok - (j) receipts are per run: the approving run's own findings are recorded before landing"
-
-# A rerun keeps the run id but replaces the review job and adds finding #2.
+# ── review of pawx-twitter-poller 7f0dbbc8f #1: the BRANCH-HEAD loop is bound to the approving review too. The head loop
+#    selects H's newest run 501 (main finding #1 only, failed tests, already recorded); review-passed.sh approves through
+#    the older run 500 (#1/#2) — its findings are recorded before the head loop lands H ──
+fixture_log "$T/log" "$C" 0
+scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+NRID=$((RID + 1)); NJID=$((JID + 1))
+echo "{\"jobs\":[{\"name\":\"sheepdog / tests\",\"conclusion\":\"failure\"},{\"name\":\"sheepdog / review\",\"id\":$NJID,\"conclusion\":\"failure\",\"steps\":[$STEPS_OK]}]}" > "$FX/jobs-$NRID.json"
+awk '/review-gate: (FINDING|BLOCKED) #2 /{skip = 1; next} skip && /^[^ ]+ evidence:/{skip = 0; next} {skip = 0; print}' "$T/log" > "$FX/log-$NJID.txt"
+echo "{\"head\":\"$H\",\"base\":\"$B0\",\"kind\":\"review\",\"main\":\"$MAINSHA\"}" > "$FX/attest-$NRID.json"
+echo "[{\"id\":$NRID,\"display_title\":\"review $H\",\"status\":\"completed\",\"conclusion\":\"failure\"},{\"id\":$RID,\"display_title\":\"review $H\",\"status\":\"completed\",\"conclusion\":\"failure\"}]" > "$FX/runs.json"
 reset_dev
-cp "$FX/log-$NJID.txt" "$FX/log-$JID.txt"
-( DRY=""; dev_split_main "$H" "$RID" "$(findings "$RID")"; [ "$main_only" = 1 ] ) || fail "(k) first attempt"
-! grep -q 'BLOCKED #2' "$STATE/open-findings.log" || fail "(k) fixture already recorded #2"
-cp "$T/log" "$FX/log-$NJID.txt"
-sed "s/\"id\":$JID/\"id\":$NJID/" "$FX/jobs-$RID.json" > "$T/rerun-jobs"
-cp "$T/rerun-jobs" "$FX/jobs-$RID.json"
-( DRY=""; dev_split_main "$H" "$RID" "$(findings "$RID")"; [ "$main_only" = 1 ] ) || fail "(k) rerun"
-grep -q 'BLOCKED #2' "$STATE/open-findings.log" || fail "(k) rerun finding #2 omitted"
-echo "ok - (k) rerun records the replacement review job's findings"
-echo "main-culprit checks passed"
+( DRY=""; dev_split_main "$H" "$NRID" "$(findings "$NRID")" ) >/dev/null
+( cd "$ROOT" && merged_one=0 && DRY="" && eval "$loop" ) || fail "(k) head loop failed"; g fetch -q origin
+if landed; then
+  grep -q "run $RID): finding(s) 1 2 — culprit on main" "$STATE/open-findings.log" || fail "(k) the head loop landed H without the approving run $RID's findings: $(cat "$STATE/open-findings.log")"
+fi
+( cd "$ROOT" && merged_one=0 && DRY="" && eval "$loop" ) >/dev/null 2>&1; g fetch -q origin
+landed || fail "(k) the head loop never landed H: $(cat "$LOG")"
+grep -q "run $RID): finding(s) 1 2 — culprit on main" "$STATE/open-findings.log" || fail "(k) run $RID's findings missing after landing"
+echo "ok - (k) the branch-head loop lands a main-only approval only with the APPROVING run's findings recorded"
+# (k2) review of sheepdog dev 8a8373271 #1: the same, with the routing read of run 500's review log failing — the head loop
+#     must not land H on run 501's record; once the read works, run 500's findings are recorded, then H lands
+reset_dev
+( DRY=""; dev_split_main "$H" "$NRID" "$(findings "$NRID")" ) >/dev/null
+echo "$JID" > "$T/ghm-logs-fail"
+( cd "$ROOT" && merged_one=0 && DRY="" && eval "$loop" ) >/dev/null 2>&1; g fetch -q origin
+! landed || fail "(k2) the head loop landed H via run $RID with only run $NRID's findings recorded"
+( cd "$ROOT" && DRY="" && eval "$train" ) >/dev/null 2>&1; g fetch -q origin
+! landed || fail "(k2) the train landed H via run $RID with only run $NRID's findings recorded"
+rm -f "$T/ghm-logs-fail"
+( cd "$ROOT" && merged_one=0 && DRY="" && eval "$loop" ) >/dev/null 2>&1; g fetch -q origin
+landed && grep -q "run $RID): finding(s) 1 2 — culprit on main" "$STATE/open-findings.log" || fail "(k2) after the read recovered: landed=$(landed && echo 1 || echo 0), log: $(cat "$STATE/open-findings.log")"
+echo "ok - (k2) an unreadable approving-run log keeps H unlanded (head loop and train); recorded and landed once readable"
 
+# ── review of pawx-twitter-poller 7f0dbbc8f #2: receipts name the review attempt. Run 500's first attempt (job $JID)
+#    reported only #1 and was recorded; its rerun (attempt 2, a new review job) reports #1/#2 → recorded again before H lands ──
+fixture_log "$T/log" "$C" 0
+scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+awk '/review-gate: (FINDING|BLOCKED) #2 /{skip = 1; next} skip && /^[^ ]+ evidence:/{skip = 0; next} {skip = 0; print}' "$T/log" > "$FX/log-$JID.txt"
+reset_dev
+( DRY=""; dev_split_main "$H" "$RID" "$(findings "$RID")"; [ "$main_only" = 1 ] ) || fail "(l) fixture: attempt 1 not main-only"
+grep -q "run $RID): finding(s) 1 — culprit on main" "$STATE/open-findings.log" || fail "(l) fixture: attempt 1 not recorded"
+RJID=$((JID + 7))
+echo "{\"jobs\":[{\"name\":\"sheepdog / tests\",\"conclusion\":\"success\",\"run_attempt\":2},{\"name\":\"sheepdog / review\",\"id\":$RJID,\"run_attempt\":2,\"conclusion\":\"failure\",\"steps\":[$STEPS_OK]}]}" > "$FX/jobs-$RID.json"
+cp "$T/log" "$FX/log-$RJID.txt"
+( cd "$ROOT" && DRY="" && eval "$train" ) || fail "(l) train failed"; g fetch -q origin
+landed || fail "(l) the train did not land H: $(cat "$LOG")"
+grep -q "run $RID): finding(s) 1 2 — culprit on main" "$STATE/open-findings.log" || fail "(l) the rerun's findings #1/#2 were not recorded (the first attempt's receipt counted)"
+test -e "$STATE/sent/$H.$RID.2.$RJID.mainfindings" || fail "(l) no receipt for attempt 2 / job $RJID"
+echo "ok - (l) receipts name the review attempt: a rerun's findings are recorded before landing"
+echo "main-culprit checks passed"
