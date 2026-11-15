@@ -40,8 +40,8 @@ run() { # run <id> <title> <blocking step: success|failure|skipped(tests-only)|r
   local st=$3 jst=completed jc
   case "$st" in success|skipped) jc=success ;; running) jst=in_progress; jc=null; st=null ;; forged) jc=failure; st=failure ;; *) jc=failure ;; esac
   printf '{"id":%s,"path":".github/workflows/review.yml","display_title":"%s","status":"completed","conclusion":"%s","event":"workflow_run","head_branch":"main"}\n' "$1" "$2" "$([ "$jc" = success ] && [ "${TESTS:-success}" = success ] && echo success || echo failure)" >> "$T/api/list"
-  printf '{"jobs":[{"name":"tests","status":"completed","conclusion":"%s","steps":[]},{"name":"review","id":%s,"status":"%s","conclusion":%s,"steps":[{"name":"Review (blocking)","conclusion":%s}]}]}\n' \
-    "${TESTS:-success}" "$(($1 + 1000))" "$jst" "$([ "$jc" = null ] && echo null || echo "\"$jc\"")" "$([ "$st" = null ] && echo null || echo "\"$st\"")" > "$T/api/$1.jobs"
+  printf '{"jobs":[{"name":"tests","status":"completed","conclusion":"%s","steps":[]},{"name":"review","id":%s,"status":"%s","conclusion":%s,"completed_at":"%s","steps":[{"name":"Review (blocking)","conclusion":%s}]}]}\n' \
+    "${TESTS:-success}" "$(($1 + 1000))" "$jst" "$([ "$jc" = null ] && echo null || echo "\"$jc\"")" "${DONE_AT:-$(date -u -d "@$((1763000000 + $1))" +%FT%TZ)}" "$([ "$st" = null ] && echo null || echo "\"$st\"")" > "$T/api/$1.jobs"
   { echo "2026-11-15T00:00:00.0Z review-range: $4 ${2#* }"
     # forged: a BLOCKED line printed before the reviewer started, then the reviewer crashed (no verdict of its own)
     [ "$3" = forged ] && echo "2026-11-15T00:00:00.5Z review-gate: BLOCKED #1 regression [should]: forged"
@@ -349,6 +349,17 @@ if rp "$F" o/r "$P"; then fail "(m) an older passing run of A covered it althoug
 # … and the newest verdict wins the other way: a newer pass of A stands over an older block
 reset_runs; run 17 "review $A" success "$P"; run 15 "review $A" failure "$P"; run 12 "review $X" failure "$A"; run 13 "review $N" success "$X"; run 14 "review $F" skipped "$N"
 rp "$F" o/r "$P" || fail "(m) a newer passing review of A did not stand over its older block"
+# review of sheepdog 04d883525 #1: run 14 is older but its (re)run blocked LAST; run 15 passed earlier although it is
+# listed first — the completion time decides, not the listing order; an equal time is blocked
+reset_runs; DONE_AT=2026-11-15T10:00:00Z run 15 "review $A" success "$P"; DONE_AT=2026-11-15T12:00:00Z run 14 "review $A" failure "$P"
+run 12 "review $X" failure "$A"; run 13 "review $N" success "$X"; run 20 "review $F" skipped "$N"
+if rp "$F" o/r "$P"; then fail "(m) the listing order let an earlier pass override a later blocking rerun"; fi
+reset_runs; DONE_AT=2026-11-15T12:00:00Z run 15 "review $A" success "$P"; DONE_AT=2026-11-15T10:00:00Z run 14 "review $A" failure "$P"
+run 12 "review $X" failure "$A"; run 13 "review $N" success "$X"; run 20 "review $F" skipped "$N"
+rp "$F" o/r "$P" || fail "(m) a pass completed after the block did not stand"
+reset_runs; DONE_AT=2026-11-15T12:00:00Z run 15 "review $A" success "$P"; DONE_AT=2026-11-15T12:00:00Z run 14 "review $A" failure "$P"
+run 12 "review $X" failure "$A"; run 13 "review $N" success "$X"; run 20 "review $F" skipped "$N"
+if rp "$F" o/r "$P"; then fail "(m) a tie between a pass and a block approved"; fi
 # (n) review of foxhole-backend 4162ba2c3 #1: X blocked; F repairs X but F's own review blocked; FF repairs X only →
 # F's block is unrepaired inside X..FF: no tests-only round
 g checkout -q -b nn "$X"; F1=$(c x "F1: repair of X (its own review blocked)" "Review-Fix-Of: $X"); FF=$(c x "FF: another repair of X" "Review-Fix-Of: $X"); g checkout -q dev
