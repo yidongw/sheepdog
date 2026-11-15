@@ -1094,8 +1094,7 @@ culprits_repaired() { # culprits_repaired <S> <attribution> → 0 (sets dupfix_w
 #    pre-existing main finding (open-findings.log → the next reviews' known-open list) and never routed on $DEV: no
 #    fixer, no fix round, no author notice, no revert clock. Blocked only by such findings, the head lands like a passing
 #    review — review-passed.sh decides that from the trusted run with the same rule (scripts/ci/review-main-culprits.sh).
-#    Only where the contract scripts in use know the rule (CI_SCRIPTS has review-main-culprits.sh): otherwise the head
-#    could neither be routed nor land. ──
+#    Classification needs review-main-culprits.sh; approval capability is negotiated separately by review_approve. ──
 main_culprits_api() { ghm api "repos/$REPO/$1"; }   # a routing read: the landing decision reads GitHub itself (the contract scripts)
 main_culprit_hint() { # main_culprit_hint <S> <findings> → 0 when some FINDING names a full-sha commit= on origin/$MAIN and S
   # (local, no GitHub read: whether the trusted classification is worth asking for)
@@ -1127,14 +1126,15 @@ dev_split_main() { # dev_split_main <S> <run id> <findings> → sets dev_f (the 
   dsm_jid=${att#*.}
   dsm_log=$(main_culprits_api "actions/jobs/$dsm_jid/logs" 2>/dev/null) || return 0
   [ -n "$dsm_log" ] || return 0
+  # Refresh routing from this successful snapshot even if classification finds no main findings (a rerun may now
+  # contain only dev findings), or cannot classify it. Never leave dev_f pointing at the caller's obsolete attempt.
+  f=$(findings "$run" "$jobs" "$dsm_log"); dev_f=$f
   cls=$(cd "$SRC" && review_main_culprits dsm_api "$run" "$s" "$jobs") || rc=$?
   [ "$rc" -le 1 ] && [ -n "$cls" ] || return 0
   main_nums=$(awk '$2 == "main" {printf "%s ", $1}' <<<"$cls"); main_nums=${main_nums% }
   dev_nums=$(awk '$2 != "main" {printf "%s ", $1}' <<<"$cls"); dev_nums=${dev_nums% }
   [ -n "$main_nums" ] || return 0
-  f=$(findings "$run" "$jobs" "$dsm_log")
   for n in $main_nums; do grep -q "^review-gate: BLOCKED #$n " <<<"$f" || { main_nums="" dev_nums=""; return 0; }; done
-  dev_f=$f
   # the proven split holds whatever happens to the record: main findings never reach $DEV's fixer / revert path
   # (review of sheepdog main 6b9031dfb #1); only main_only — the approval — waits for the record
   # shellcheck disable=SC2086 # finding numbers, one word each
@@ -2394,8 +2394,8 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
     fi
   elif [ "$ref" = "$DEV" ]; then
     if [ -z "$f" ]; then f=$(findings "$rid"); dev_split_main "$sha" "$rid" "$f"; fi   # (a failed run: split above already)
-    # An undeclared, receiptless checker keeps ordinary legacy blocking/routing behavior.
-    [ "${approval_named:-1}" = 1 ] || dev_f=$f
+    # Approval capability never changes finding ownership: keep the proven main/dev split even when a legacy checker
+    # refuses approval or a historical capable checker returns no receipt on failure.
     # the reviewer itself did not run: nothing was reviewed — no block, no fixer, no author notice, no revert clock
     if dinfra=$(review_infra_reason "$f"); then dev_infra "$sha" "$rid" "$dinfra"; continue; fi
     # findings whose culprit is on main are main's: recorded, never routed on $DEV (no fixer, round, notice or revert clock)

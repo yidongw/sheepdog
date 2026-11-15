@@ -42,7 +42,9 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   approving review attempt's main findings are recorded (`review-passed.sh` names that attempt in `REVIEW_APPROVAL_OUT`;
   the classification and the record come from one read of its jobs and log; any read or write failure → not landed that
   run, retried). Receipt-capable checkers support main-only approvals in both bundled and repository-local contract
-  scripts. Older checkers must pass with `REVIEW_MAIN_FINDINGS=0` before landing without a receipt. There is no cross-chain "same problem" matching: main's own chain owns the finding.
+  scripts. Older checkers must pass with `REVIEW_MAIN_FINDINGS=0` before landing without a receipt. Approval capability
+  does not change finding ownership: classified main findings stay recorded and excluded from dev's repair and revert
+  paths even when the checker cannot approve the head. There is no cross-chain "same problem" matching: main's own chain owns the finding.
 - **Open findings**: findings whose fix rounds are spent are kept in `$STATE/open-findings.log`, which the review job
   passes to the reviewer (`open-findings-file`) so repeats are recognised as pre-existing.
 
