@@ -20,6 +20,7 @@
 #   (5) attempts of one run: attempt 1 decides over attempt 2, both ways
 #   (6) an earlier run not finished / unreadable jobs / unreadable attestation → unknown
 #   (7) prior-findings.sh attaches the FIRST blocked round of the repaired commit, not a later rerun's
+#   (8) a merge-only commit whose tree is main's own is covered from main whatever its review said (tralyx e964c6539)
 set -euo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"
 cd "$(dirname "$0")/../.."
@@ -205,4 +206,18 @@ grep -q "run 18" <<<"$out" && fail "(7) prior-findings attached the later run 18
 reset; chain; run1 18 "review $X" success "$A"
 env_ bash "$ROOT/scripts/ci/dev-review-base.sh" --only-fixes "$N" "$F" >/dev/null 2>&1 || fail "(7) F is no repair of X (first verdict blocked) after a later passing run"
 echo "ok (7) - prior findings and repair targets follow the first verdict"
+
+# (8) tralyx e964c6539 (11-15): a "merge main into dev" M whose tree IS its main parent's tree and that adds no commit of
+# its own is covered from that main commit even though M's own review blocked (on main's code) — the dispatcher's
+# dev_merge_only rule; nothing in M is dev's. A merge with a change of its own (evil merge) stays vetoed.
+g checkout -q main; Q=$(c q "Q: main hotfix"); g update-ref refs/remotes/origin/main "$Q"
+g checkout -q -b mo "$P"; g merge -q --no-ff -m "merge main into dev" "$Q"; M=$(g rev-parse HEAD)
+Z=$(c z "Z: dev work on top")
+reset; run1 40 "review $M" failure "$P"; run1 41 "review $Z" success "$M"
+rp "$Z" o/r "$Q" || fail "(8) a merge-only commit (main's tree) with a blocked review stranded the dev head above it"
+g checkout -q -b mo2 "$P"; g merge -q --no-ff --no-commit "$Q" >/dev/null; echo evil >> "$T/src/q"; g add q; g commit -q -m "evil merge"; M2=$(g rev-parse HEAD)
+Z2=$(c z "Z2"); reset; run1 42 "review $M2" failure "$P"; run1 43 "review $Z2" success "$M2"
+if rp "$Z2" o/r "$Q"; then fail "(8) a blocked merge with a change of its own was covered"; fi
+g checkout -q dev
+echo "ok (8) - a merge-only commit identical to main's tree is covered; an evil merge's block still stands"
 echo 'review first verdict: all checks passed'
