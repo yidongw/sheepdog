@@ -2,6 +2,3 @@
 #   <suite file name> <the 40-char pin sha> <the protection that is not in the pinned snapshot yet>
 # Allowed only for that exact pin: a pin bump runs every suite against the new pin again. Keep this list empty whenever
 # the newest reviewed main carries the protection — bump the pin instead (docs/self-review.md).
-dev-review-once.sh edb4fb32e98602b9ebe30cd85569bc1f77236739 each dev commit reviewed once (range from the last completed dev review of any verdict, main side excluded, coverage-gated landing) is on dev, not in the pin yet
-dev-review-range.sh edb4fb32e98602b9ebe30cd85569bc1f77236739 the pin re-reviews a blocked commit's range and diffs main's side; the reviewed-once range is on dev, not in the pin yet
-review-fix-of-nonancestor.sh edb4fb32e98602b9ebe30cd85569bc1f77236739 the pin's dev cover base goes back below an unrepaired block; the reviewed-once range is on dev, not in the pin yet
