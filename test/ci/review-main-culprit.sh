@@ -384,4 +384,17 @@ grep -q "run $NRID): finding(s) 1 — culprit on main" "$STATE/open-findings.log
 landed || fail "(j) the train did not land H: $(cat "$LOG")"
 grep -q "run $RID): finding(s) 1 2 — culprit on main" "$STATE/open-findings.log" || fail "(j) the approving run $RID's findings were not recorded (another run's receipt counted)"
 echo "ok - (j) receipts are per run: the approving run's own findings are recorded before landing"
+
+# A rerun keeps the run id but replaces the review job and adds finding #2.
+reset_dev
+cp "$FX/log-$NJID.txt" "$FX/log-$JID.txt"
+( DRY=""; dev_split_main "$H" "$RID" "$(findings "$RID")"; [ "$main_only" = 1 ] ) || fail "(k) first attempt"
+! grep -q 'BLOCKED #2' "$STATE/open-findings.log" || fail "(k) fixture already recorded #2"
+cp "$T/log" "$FX/log-$NJID.txt"
+sed "s/\"id\":$JID/\"id\":$NJID/" "$FX/jobs-$RID.json" > "$T/rerun-jobs"
+cp "$T/rerun-jobs" "$FX/jobs-$RID.json"
+( DRY=""; dev_split_main "$H" "$RID" "$(findings "$RID")"; [ "$main_only" = 1 ] ) || fail "(k) rerun"
+grep -q 'BLOCKED #2' "$STATE/open-findings.log" || fail "(k) rerun finding #2 omitted"
+echo "ok - (k) rerun records the replacement review job's findings"
 echo "main-culprit checks passed"
+

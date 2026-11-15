@@ -1107,14 +1107,17 @@ main_culprit_hint() { # main_culprit_hint <S> <findings> → 0 when some FINDING
 }
 dev_split_main() { # dev_split_main <S> <run id> <findings> → sets dev_f (the findings left for $DEV: the main findings removed),
   # main_nums / dev_nums, and main_only=1 when EVERY blocking finding is a main finding (review_main_culprits: the run's
-  # own log and attestation); the main findings are recorded once per S and run (receipt $STATE/sent/<S>.<run>.mainfindings,
+  # own log and attestation); the main findings are recorded once per S, run and review job (receipt $STATE/sent/<S>.<run>.<job>.mainfindings,
   # touched only after the append succeeded). Unreadable evidence → nothing is removed, main_only=0. A record that cannot be
   # written → the proven main findings are still removed from dev_f (never routed on $DEV), but main_only stays 0, so no
   # caller approves through the main-findings path that run (review of sheepdog main 725a2adc1 #1 / 6b9031dfb #1).
-  local s=$1 run=$2 f=$3 cls rc=0 n
+  local s=$1 run=$2 f=$3 cls rc=0 n jobs jid receipt
   dev_f=$f main_nums="" dev_nums="" main_only=0
   main_culprit_hint "$s" "$f" || return 0
-  cls=$(cd "$SRC" && review_main_culprits main_culprits_api "$run" "$s") || rc=$?
+  jobs=$(main_culprits_api "actions/runs/$run/jobs") || return 0
+  jid=$(jq -er '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].id | select(type == "number")' <<<"$jobs") || return 0
+  receipt="$STATE/sent/$s.$run.$jid.mainfindings"
+  cls=$(cd "$SRC" && review_main_culprits main_culprits_api "$run" "$s" "$jobs") || rc=$?
   [ "$rc" -le 1 ] && [ -n "$cls" ] || return 0
   main_nums=$(awk '$2 == "main" {printf "%s ", $1}' <<<"$cls"); main_nums=${main_nums% }
   dev_nums=$(awk '$2 != "main" {printf "%s ", $1}' <<<"$cls"); dev_nums=${dev_nums% }
@@ -1127,10 +1130,10 @@ dev_split_main() { # dev_split_main <S> <run id> <findings> → sets dev_f (the 
     [ -n "$dev_nums" ] || main_only=1
     echo "DRY $DEV ${s:0:9}: finding(s) $main_nums — culprit on $MAIN (pre-existing main finding): not routed on $DEV${dev_nums:+; routing $dev_nums}"; return 0
   fi
-  if [ ! -e "$STATE/sent/$s.$run.mainfindings" ]; then
+  if [ ! -e "$receipt" ]; then
     # shellcheck disable=SC2086
     if { echo "[$(date -u +%FT%TZ)] ${s:0:9} ($DEV review, run $run): finding(s) $main_nums — culprit on $MAIN ($(for n in $main_nums; do awk -v n="$n" '$1 == n {printf "#%s %s ", $1, substr($3, 1, 9)}' <<<"$cls"; done | sed 's/ $//')); pre-existing main finding(s), owned by main's own re-check chain, not routed on $DEV:"
-      findings_subset "$f" 0 $main_nums; echo; } >> "$STATE/open-findings.log" && touch "$STATE/sent/$s.$run.mainfindings"; then
+      findings_subset "$f" 0 $main_nums; echo; } >> "$STATE/open-findings.log" && touch "$receipt"; then
       log "$DEV ${s:0:9}: finding(s) $main_nums of run $run name a culprit already on $MAIN — recorded as pre-existing main finding(s) (open-findings.log); no $DEV fixer, no fix round${dev_nums:+; routing only $dev_nums}"
     else
       log "$DEV ${s:0:9}: finding(s) $main_nums of run $run name a culprit on $MAIN, but open-findings.log could not be written — not routed on $DEV, not approved as main-only this run (retried)"
@@ -1143,7 +1146,7 @@ dev_split_main() { # dev_split_main <S> <run id> <findings> → sets dev_f (the 
 train_record_main() { # train_record_main <S> <run id> → 0 only when the main findings of THAT run of S are in open-findings.log
   # (its own receipt: a receipt of another run of S proves nothing about this one — review of sheepdog dev 8ba5aaa38 #1/#2)
   dev_split_main "$1" "$2" "$(findings "$2")"
-  [ "$main_only" = 1 ] && [ -e "$STATE/sent/$1.$2.mainfindings" ]
+  [ "$main_only" = 1 ]
 }
 dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> <run url> <fixer task> [<ALL findings>] → the
   # reviewer's route per finding (author groups, see dev_blocked_split); otherwise fixer first, authors only when it failed.
