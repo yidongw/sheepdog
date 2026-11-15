@@ -34,12 +34,14 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   with the `gh run rerun <id> --failed` command; the next push to dev re-triggers the review too.
 - **Findings whose culprit is already on main, in a dev review** (contract, Findings): the reviewer reports them as
   non-blocking `[pre-existing]` notes; a review by an older pinned reviewer can still print one as BLOCKED. Such a finding
-  (its `FINDING #n … commit=` a full sha on `origin/$MAIN`; `dev_main_split`, local, from the findings text already read)
+  (the gate's own `FINDING #n … commit=` — only lines after its last `review-gate: reviewing …` line of the review job's
+  log, each FINDING once and directly followed by its BLOCKED — a full sha on `origin/$MAIN`; `dev_main_split`)
   is appended once to `$STATE/open-findings.log` (so the next reviews see it as known-open / pre-existing) and never
   routed on dev — no fixer, no fix round, no author notice, no `fixfailed`, no revert clock, no file named for a revert;
   only the head's other findings are routed (the dupfix shortcut still decides on the round's full finding set). The
   dispatcher never lands anything because of it: a head blocked only by such findings stays unlanded until a later
-  review passes. `test/ci/review-dispatch-main-culprit.sh`.
+  review passes; the dispatcher exports `REVIEW_MAIN_FINDINGS=0`, which keeps the main-only approval of an older
+  repository-local `review-passed.sh` (sheepdog a036e7a60..6fa9325f9) off. `test/ci/review-dispatch-main-culprit.sh`.
 - **Open findings**: findings whose fix rounds are spent are kept in `$STATE/open-findings.log`, which the review job
   passes to the reviewer (`open-findings-file`) so repeats are recognised as pre-existing.
 

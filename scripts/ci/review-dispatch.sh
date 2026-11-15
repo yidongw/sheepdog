@@ -95,6 +95,10 @@ git -C "$SRC" fetch -q --prune origin
 [ -d "$TRUSTED" ] || git -C "$SRC" worktree add -q --detach "$TRUSTED" origin/$MAIN
 git -C "$TRUSTED" checkout -q --detach origin/$MAIN
 if [ -f "$TRUSTED/.github/sheepdog.yml" ]; then CI_SCRIPTS=$SHEEPDOG_CI; else CI_SCRIPTS=$TRUSTED/scripts/ci; fi
+# No checker ever approves a blocked review here: a repository-local copy of sheepdog's review-passed.sh from a036e7a60..
+# 6fa9325f9 approves a dev review blocked only by main findings unless REVIEW_MAIN_FINDINGS=0 (that path is removed; the
+# dispatcher no longer records for it — review of dev 820120f40 #3). Exported for review-passed.sh and merge-branch.sh.
+export REVIEW_MAIN_FINDINGS=0
 
 source "$(dirname "${BASH_SOURCE[0]}")/review-notify.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machinery_files: what a tests-only approval never lands
@@ -1092,14 +1096,28 @@ culprits_repaired() { # culprits_repaired <S> <attribution> → 0 (sets dupfix_w
 #    revert clock, no file named for a revert. Nothing here approves or lands anything: the head stays blocked until a
 #    review of a later head passes. Local only (the findings text the caller already read; no GitHub read). ──
 dev_main_split() { # dev_main_split <S> <run id> <findings> → dev_f = the findings left for $DEV, main_nums = the others' numbers
-  # A finding is main's when its "FINDING #n … commit=" is a full 40-hex sha that is an ancestor of origin/$MAIN. No
-  # commit, "-", an abbreviated sha or a commit off main → it stays $DEV's.
-  local s=$1 run=$2 f=$3 n c keep="" rec m
+  # A finding is main's when the GATE's own "FINDING #n … commit=" for it is a full 40-hex sha that is an ancestor of
+  # origin/$MAIN. The gate's lines are only those after its LAST "review-gate: reviewing <base8>..<S8>" line of the review
+  # job's log (commit gates and an extra gate print candidate text before the reviewer step: lines there never count), and
+  # they must be well formed — each FINDING #n once, directly followed by its BLOCKED #n (review of dev 820120f40 #1/#2).
+  # Anything else (an unreadable log, no marker, a duplicate or orphan line) → nothing is main's. No commit, "-", an
+  # abbreviated sha or a commit off main → it stays $DEV's.
+  local s=$1 run=$2 f=$3 n c keep="" rec m jobs rid gl
   dev_f=$f main_nums=""
+  jobs=$(ghm api "repos/$REPO/actions/runs/$run/jobs" 2>/dev/null) || return 0
+  rid=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].id // empty' <<<"$jobs" 2>/dev/null) || return 0
+  [[ "$rid" =~ ^[0-9]+$ ]] || return 0
+  gl=$(ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^ ]+ //' \
+       | awk -v h="${s:0:8}" '$0 ~ ("^review-gate: reviewing [0-9a-f]+[.][.]" h "$") { n = 0; seen = 1; next } seen && /^review-gate: (FINDING|BLOCKED) #/ { L[++n] = $0 }
+           END { if (!seen) exit 1; for (i = 1; i <= n; i++) print L[i] }') || return 0
+  # well formed: FINDING #n lines unique, each directly followed by BLOCKED #n
+  awk '/^review-gate: FINDING #/ { match($0, /#[0-9]+/); k = substr($0, RSTART, RLENGTH); if (seen[k]++) bad = 1; want = k; next }
+       /^review-gate: BLOCKED #/ { match($0, /#[0-9]+/); if (want != "" && substr($0, RSTART, RLENGTH) != want) bad = 1; want = ""; next }
+       END { exit (bad || want != "") ? 1 : 0 }' <<<"$gl" || return 0
   while read -r n c; do
     [ -n "$n" ] || continue
     if [[ "$c" =~ ^[0-9a-f]{40}$ ]] && git -C "$SRC" merge-base --is-ancestor "$c" "origin/$MAIN" 2>/dev/null; then main_nums+=" $n"; fi
-  done < <(sed -nE 's/^review-gate: FINDING #([0-9]+) route=[a-z]+ commit=([^ ]+)( .*)?$/\1 \2/p' <<<"$f")
+  done < <(sed -nE 's/^review-gate: FINDING #([0-9]+) route=[a-z]+ commit=([^ ]+)( .*)?$/\1 \2/p' <<<"$gl")
   main_nums=${main_nums# }
   [ -n "$main_nums" ] || return 0
   for n in $(sed -nE 's/^review-gate: BLOCKED #([0-9]+) .*/\1/p' <<<"$f"); do

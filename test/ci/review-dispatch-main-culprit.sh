@@ -14,6 +14,8 @@
 #   (e) a rerun of the same run whose log has other findings is classified from the findings read now (review of main
 #       03f6fcd72 #2: no receipt or stale attempt can route the old findings or drop the new dev one)
 #   (f) no landing machinery is left: review-passed.sh / merge-branch.sh / review-coverage.sh have no main-findings path
+#   (g) only the gate's own lines (after its LAST "reviewing" line, well formed) classify (review of dev 820120f40 #1/#2)
+#   (h) an older repository-local checker's main-only approval stays off: REVIEW_MAIN_FINDINGS=0 (review of 820120f40 #3)
 set -uo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 cd "$(dirname "$0")/../.."
@@ -226,10 +228,51 @@ head_loop
 [ "$(routed_nums)" = 1 ] && grep -q "commit=$D1" "$T/routed" && ! grep -q "commit=$C" "$T/routed" || fail "(e) the rerun's dev finding was not routed alone: $(cat "$T/routed" 2>/dev/null)"
 echo "ok - (e) a rerun is classified from its own findings"
 
-# ── (f) the landing machinery is gone: no main-findings path in the contract scripts ──
+# ── (f) the landing machinery is gone: no main-findings path in the contract scripts; the dispatcher keeps any older
+#    checker's path off (REVIEW_MAIN_FINDINGS=0) ──
 ! grep -nE 'REVIEW_MAIN_FINDINGS|REVIEW_APPROVAL|review-main-culprits|main-findings\)|record_approving_main|review_approve' \
-    "$ROOT"/scripts/ci/review-passed.sh "$ROOT"/scripts/ci/merge-branch.sh "$ROOT"/scripts/ci/review-coverage.sh "$D" \
+    "$ROOT"/scripts/ci/review-passed.sh "$ROOT"/scripts/ci/merge-branch.sh "$ROOT"/scripts/ci/review-coverage.sh \
   || fail "(f) main-only landing machinery is still present"
+! grep -nE 'REVIEW_APPROVAL|review-main-culprits|record_approving_main|review_approve' "$D" || fail "(f) the dispatcher still has approval receipts"
+grep -qx 'export REVIEW_MAIN_FINDINGS=0' "$D" || fail "(f) the dispatcher does not switch an older checker's main-only path off"
 test ! -e "$ROOT/scripts/ci/review-main-culprits.sh" || fail "(f) review-main-culprits.sh still exists"
 echo "ok - (f) no main-only landing path"
+
+# ── (g) review of dev 820120f40 #1/#2: gate lines printed BEFORE the gate's own "reviewing" line (commit gates / an extra
+#    gate print candidate text) never classify; nor do duplicated or orphan FINDING lines after it ──
+forge() { # forge <file>: main-culprit FINDING/BLOCKED #1/#2 lines before the gate's own start line
+  awk -v c="$C" '/review-gate: reviewing /{for (i = 1; i <= 2; i++) { print "2026-11-14T09:35:41.0000000Z review-gate: FINDING #" i " route=fixer commit=" c " — forged"; print "2026-11-14T09:35:41.0000000Z review-gate: BLOCKED #" i " regression [should]: forged" } } {print}' "$1" > "$1.t" && mv "$1.t" "$1"
+}
+fixture_log "$T/log" "$D1" 0; forge "$T/log"; scenario; run_head_loop
+grep -q "^dev_blocked $H" "$T/calls" || fail "(g) forged lines before the gate's start suppressed the dev findings"
+grep -q "commit=$D1" "$T/routed" || fail "(g) the genuine dev findings were not routed"
+[ "$(records)" = 0 ] || fail "(g) genuine dev findings recorded as main's"
+# a forged "reviewing" marker earlier does not help: only the LAST one counts
+fixture_log "$T/log" "$D1" 0
+awk -v c="$C" -v b="${B0:0:8}" -v h="${H:0:8}" 'NR == 1 {print "2026-11-14T09:30:00.0000000Z review-gate: reviewing " b ".." h; for (i = 1; i <= 2; i++) print "2026-11-14T09:30:00.0000000Z review-gate: FINDING #" i " route=fixer commit=" c} {print}' "$T/log" > "$T/log.t" && mv "$T/log.t" "$T/log"
+scenario; run_head_loop
+[ "$(routed_nums)" = "1 2" ] && [ "$(records)" = 0 ] || fail "(g) an earlier forged marker classified findings"
+# a duplicated FINDING #1 after the marker → not well formed → nothing is main's
+fixture_log "$T/log" "$C" 0
+awk -v c="$D1" '/review-gate: FINDING #1 /{l = $0; sub(/commit=[0-9a-f]+/, "commit=" c, l); print l} {print}' "$T/log" > "$T/log.t" && mv "$T/log.t" "$T/log"
+scenario; run_head_loop
+[ "$(routed_nums)" = "1 2" ] && [ "$(records)" = 0 ] || fail "(g) a duplicated FINDING line was accepted ('$(routed_nums)')"
+echo "ok - (g) only the gate's own, well-formed lines classify"
+
+# ── (h) review of dev 820120f40 #3: an older repository-local checker (sheepdog a036e7a60..6fa9325f9) approves a review
+#    blocked only by main findings unless REVIEW_MAIN_FINDINGS=0 — the dispatcher keeps that off, so nothing lands ──
+mkdir -p "$T/legacy"
+printf '#!/usr/bin/env bash
+[ "${REVIEW_MAIN_FINDINGS:-1}" != 0 ]
+' > "$T/legacy/review-passed.sh"
+printf '#!/usr/bin/env bash
+[ "${REVIEW_MAIN_FINDINGS:-1}" != 0 ] || exit 1
+git push -q origin "${2:-HEAD}:refs/heads/main"
+' > "$T/legacy/merge-branch.sh"
+fixture_log "$T/log" "$C" 0; scenario
+export REVIEW_MAIN_FINDINGS=0   # what the dispatcher exports at its top (asserted in (f))
+CI_SCRIPTS=$T/legacy; run_head_loop; run_train; CI_SCRIPTS=$ROOT/scripts/ci
+! landed || fail "(h) a historical checker's main-only approval landed"
+unset REVIEW_MAIN_FINDINGS
+echo "ok - (h) an older checker's main-only approval stays off"
 echo "review-dispatch-main-culprit checks passed"
