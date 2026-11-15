@@ -128,9 +128,21 @@ review_covered() { # <base> <anchor (deployed or review-time main)> <candidate h
   _review_covered "$@" && return 0
   review_fix_links=$saved; return 1
 }
+review_anchor_tree() { # <b> <anchor> -> 0 when <b> has nothing of its own beyond the anchor: no non-merge commit
+  # beyond it, and its tree IS the tree of the anchor-side commit it contains (merge-base) — byte for byte a covered tree.
+  # The same rule as the dispatcher's dev_merge_only (a merge-only round is never blocked). tralyx e964c6539 (11-15): a
+  # "merge main into dev" whose tree equals main 202b89367's; its own review blocked on main's code, and its blocked
+  # verdict vetoed every dev head above it although nothing in it was dev's.
+  local x m
+  x=$(git rev-list --no-merges -n1 "$1" "^$2" 2>/dev/null) || return 1
+  [ -z "$x" ] || return 1
+  m=$(git merge-base "$1" "$2" 2>/dev/null) || return 1
+  [ -n "$m" ] && [ "$(git rev-parse "$1^{tree}" 2>/dev/null)" = "$(git rev-parse "$m^{tree}" 2>/dev/null)" ]
+}
 _review_covered() {
   local b=$1 d=$2 h=$3 n=${4:-0} rc=0 vk vid vatt
   git merge-base --is-ancestor "$b" "$d" 2>/dev/null && return 0
+  review_anchor_tree "$b" "$d" && return 0
   [ "$n" -lt 40 ] || return 1
   # THE verdict of <b> (review_first_verdict, "review <b>" or "recheck <b>"): its first completed, attested verdict is
   # the only run that can link it — a later pass never stands over a block, a later block never revokes a pass. A
