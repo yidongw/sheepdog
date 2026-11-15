@@ -7,7 +7,8 @@
 #   hotfix-review-base.sh [<head>]
 #     → base = the newest ancestor of <head> (by commit date, on either side of a merge: a hotfix re-checked on main and
 #       taken into dev as a merge's second parent, with main then fast-forwarded to dev — pikeway 4a488e66c) whose main
-#       review ("recheck <sha>") COMPLETED: its blocking
+#       review ("recheck <sha>") COMPLETED — its main verdict, the FIRST completed, attested verdict of its re-checks in
+#       run id / run_attempt order (review-evidence.sh review_first_verdict): its blocking
 #       step "Review (blocking …" succeeded, or failed with the reviewer's "review-gate: BLOCKED #n" verdict in the log.
 #       A review job that was cancelled, skipped, timed out or died before the reviewer gave a verdict reviewed nothing:
 #       its commits ride this range. Nothing is moved past (no "reviewed elsewhere" shortcut on main).
@@ -40,18 +41,22 @@ review_api() { api "$1"; }
 # The same anchor used on fallback must also be reachable through every incremental base's proof.
 d=$(git rev-parse -q --verify "refs/tags/deployed^{commit}" 2>/dev/null || true)
 if [ -n "$d" ] && [ "$d" != "$head" ] && git merge-base --is-ancestor "$d" "$head"; then anchor=$d; else anchor=$parent; fi
-# "<sha> <run id>" of every trusted "recheck <sha>" run (the API lists newest first; every page)
-runs=$(review_runs | jq -r 'select(.display_title | test("^recheck [0-9a-f]{40}$")) | "\(.display_title[8:]) \(.id)"')
+# the trusted listing (strict, every status), read once: each candidate's main verdict is THE rule of
+# review-evidence.sh review_first_verdict — the FIRST completed, attested verdict of its "recheck <sha>" runs (run id,
+# then run_attempt); a later rerun never changes it, an unknown one is no base (the range grows; fail closed)
 base=""
-if [ -n "$runs" ]; then
+if review_verdict_load && [ -n "$review_verdict_runs" ]; then
   # Candidates: the newest DEPTH ancestors by commit date (either side of a merge), then DEPTH more down the first-parent
   # chain — a long merged side branch can fill the date-ordered window, and the first-parent walk still reaches the
   # last re-check below it (review of 63212e313 #3). Any base found must link to the anchor, so either is safe.
   for c in $( { git rev-list --date-order -n "$DEPTH" "$parent"; git rev-list --first-parent -n "$DEPTH" "$parent"; } | awk '!seen[$0]++'); do
-    for id in $(awk -v c="$c" '$1 == c { print $2 }' <<<"$runs"); do
-      review_link "$id" "$c" "$anchor" "$head" 0 && { base=$c; break 2; }
-      echo "hotfix-review-base: the review of ${c:0:12} (run $id) has no usable coverage chain — not a base, its commits are reviewed again" >&2
-    done
+    rc=0; review_first_verdict "$c" recheck || rc=$?
+    case "$rc" in
+      1) continue ;;
+      2) echo "hotfix-review-base: the main verdict of ${c:0:12} is unknown (run ${rfv_id:-?}: unreadable or not finished) — not a base" >&2; continue ;;
+    esac
+    review_link "$rfv_id" "$c" "$anchor" "$head" 0 "$rfv_kind" "$rfv_att" && { base=$c; break; }
+    echo "hotfix-review-base: the review of ${c:0:12} (run $rfv_id, $rfv_kind) has no usable coverage chain — not a base, its commits are reviewed again" >&2
   done
 fi
 if [ -z "$base" ]; then

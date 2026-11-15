@@ -67,39 +67,26 @@ review_api() { api "$1"; }
 . "$(dirname "${BASH_SOURCE[0]}")/review-coverage.sh"
 . "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machinery_files: what a tests-only approval never lands
 
-runs=""   # "<sha> <run id>" of the trusted "review <sha>" / "recheck <sha>" runs (the API lists newest first; every page)
+runs=""   # "<sha> <run id>" of the trusted "review <sha>" / "recheck <sha>" runs (the strict listing, every status)
 load_runs() {
-  runs=$(review_runs | jq -r 'select(.display_title | test("^(review|recheck) [0-9a-f]{40}$")) | "\(.display_title | sub("^[a-z]+ "; "")) \(.id)"')
+  review_verdict_load || return 0   # once, in this process: the verdict() subshells read the same listing
+  runs=$(jq -r 'select(.display_title | test("^(review|recheck) [0-9a-f]{40}$")) | "\(.display_title | sub("^[a-z]+ "; "")) \(.id)"' <<<"$review_verdict_runs")
 }
 review_job() { # review_job <jobs JSON> → the review job (with or without the called workflow's "<caller job> / " prefix)
   jq -c '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] // empty' <<<"$1" 2>/dev/null || true
 }
-verdict() { # verdict <sha> → "pass <run id>" | "blocked <run id>" | "fixes <run id>" of its newest completed review; "" when none
-  # completed = the blocking step ran to a verdict: success, or failure WITH the reviewer's "review-gate: BLOCKED #n"
-  # verdict in its log; or a tests-only fix round (step skipped, review job succeeded: the attestation kind is checked by
-  # review_link). A crash, an unreadable verdict, a failed setup / commit gate reviewed nothing: not completed.
-  local id jobs j st jid log
-  for id in $(awk -v c="$1" '$1 == c { print $2 }' <<<"$runs"); do
-    jobs=$(api "actions/runs/$id/jobs" 2>/dev/null || true)
-    j=$(review_job "$jobs"); [ -n "$j" ] || continue
-    st=$(jq -r '[.steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] // ""' <<<"$j" 2>/dev/null || true)
-    case "$st" in
-      success) echo "pass $id"; return ;;
-      skipped)
-        # a tests-only round is a completed round only once its trusted tests passed: with red tests it repaired
-        # nothing yet, and its commits ride the next review (review of fb6bb396e #3)
-        [ "$(jq -r '.conclusion // ""' <<<"$j")" = success ] || continue
-        [ "$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "tests")][0].conclusion // ""' <<<"$jobs" 2>/dev/null)" = success ] || continue
-        echo "fixes $id"; return ;;
-      failure)
-        jid=$(jq -r '.id // empty' <<<"$j" 2>/dev/null || true)
-        [ -n "$jid" ] || continue
-        log=$(api "actions/jobs/$jid/logs" 2>/dev/null || true)
-        # the reviewer's own section of a step that ran (review-evidence.sh) — never a whole-log scan
-        review_blocked_verdict "$jobs" "$log" || continue
-        echo "blocked $id"; return ;;
-    esac
-  done
+verdict() { # verdict <sha> → "pass <run id>" | "blocked <run id>" | "fixes <run id>": THE verdict of <sha> — its FIRST
+  # completed, attested verdict in run id / run_attempt order (review-evidence.sh review_first_verdict; a later run or
+  # rerun never changes it: owner 11-16); "unknown <run id>" when an earlier run is unreadable or not finished yet
+  # (fail closed: no base, no repair target, blocked for a repair round's own commits); "" when none.
+  # A crash, a failed setup / commit gate, a cancelled / skipped step and an unattested pass are no verdict.
+  local rc=0
+  review_first_verdict "$1" any || rc=$?
+  case "$rc" in
+    0) echo "$rfv_kind $rfv_id" ;;
+    2) echo "unknown ${rfv_id:-0}" ;;
+  esac
+  return 0
 }
 declare -A _verdicts=()
 vm=""
@@ -202,7 +189,7 @@ only_fixes() { # only_fixes <base> <head>
     # a commit of the round whose OWN review blocked (e.g. a repair that was itself reviewed and blocked) stays blocked
     # until it is repaired on the head: no tests-only round over it (review of foxhole-backend 4162ba2c3 #1)
     verdict_m "$c"; v=$vm
-    if [ "${v%% *}" = blocked ] && ! repaired "$c" "$2"; then rm -f "$TMPF"*; return 1; fi
+    case "${v%% *}" in blocked|unknown) if ! repaired "$c" "$2"; then rm -f "$TMPF"*; return 1; fi ;; esac
     touches_only "$c" "$TMPF.allowed" || { echo "dev-review-base: ${c:0:12} changes lines outside the blocked range it repairs — a full review" >&2; rm -f "$TMPF"*; return 1; }
     echo "$c" >> "$TMPF.allowed"
     n=$((n + 1))
@@ -244,7 +231,7 @@ case "${1:-}" in
 esac
 
 usable_base() { # usable_base <c> <verdict> → 0 when c's completed review is a range base (readable proof, producer mode)
-  case "${2%% *}" in pass|blocked|fixes) review_link "${2##* }" "$1" "$mb" "$head" 0 ;; *) return 1 ;; esac
+  case "${2%% *}" in pass|blocked|fixes) review_link "${2##* }" "$1" "$mb" "$head" 0 "${2%% *}" ;; *) return 1 ;; esac
 }
 head=$(git rev-parse "${1:-HEAD}^{commit}")
 mb=$(git merge-base "$MAINREF" "$head")
@@ -264,6 +251,7 @@ if parent=$(git rev-parse -q --verify "$head^1^{commit}") && ! git merge-base --
         waited=1
         echo "dev-review-base: the review of ${c:0:12} (run $rid) is still running — waiting for it (up to ${WAIT}s)" >&2
         if await_review "$rid"; then
+          review_verdict_listed=0; load_runs   # re-read: the run completed
           _verdicts[$c]=$(verdict "$c"); v=${_verdicts[$c]}
           usable_base "$c" "$v" && { base=$c; break; }
         fi

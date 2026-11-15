@@ -18,14 +18,16 @@ with tempfile.TemporaryDirectory() as temporary:
     for line in (CI / "review-passed.sh").read_text().splitlines():
         if line.strip().startswith('art=$(gh api '):
             cases.append((f"artifact selector {len(cases) + 1}", line, "art", "7"))
-    assert len(cases) == 1, "approval artifact selectors changed; update the fixture"
+    # (11-16: review-passed.sh reads the attestation the verdict reader validated — review-evidence.sh, no selector pipe)
+    assert len(cases) == 0, "approval artifact selectors changed; update the fixture"
     line = next(line for line in (CI / "prior-findings.sh").read_text().splitlines()
-                if line.strip().startswith('jid=$(api '))
+                if line.strip().startswith('jid=$(jq '))
     cases.append(("ledger job selector", line, "jid", "1000"))
     setup = '''
 gh() { cat "$FIXTURE_DIR/ids"; }
 api() { cat "$FIXTURE_DIR/jobs"; }
 repo=o/r; id=1; rid=1
+rfv_jobs=$(cat "$FIXTURE_DIR/jobs")
 '''
     env = dict(os.environ, FIXTURE_DIR=str(work), RUNNER_TEMP=str(work))
     for name, line, variable, want in cases:

@@ -23,7 +23,9 @@ it guards.
   runs every review-flow suite of the tree (all of `test/ci/` except the dispatcher's, which runs from the trusted main
   checkout) against the pinned snapshot; one it fails fails the tests. A new protection lands first (its suite named
   in `test/ci/self-review-pin.pending` for exactly the current pin, with the reason — a reviewed admission that the
-  pin lags), then the pin bump, which drops the line: a pending line for another sha, or one the pin passes, fails.
+  pin lags; only the fix's NEW suites), then — as soon as that fix's main re-check passed — the pin bump to it, which
+  empties the list: a pending line for another sha, or one the pin passes, fails. Never pin a sha whose own re-check has
+  not passed.
   Bump the pin to the newest reviewed `main` whenever the review machinery changed there.
 - The trusted test list is `.github/sheepdog/tests.sh` (every shell suite, the reviewer's typecheck and tests, the
   no-dependency check, and ci.yml's pinned actionlint and zizmor — merge authority needs them green too) on a GitHub-hosted runner. The review runs on a self-hosted runner (`sheepdog-review`) whose

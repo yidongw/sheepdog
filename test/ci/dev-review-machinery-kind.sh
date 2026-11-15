@@ -47,6 +47,7 @@ cat > "$T/bin/gh" <<GH
 #!/usr/bin/env bash
 [ "\$1" = api ] || exit 1
 q=""; [ "\${3:-}" = -q ] && q=\$4
+case "\$2" in */zip) exec "$T/bin/api" "\$2" ;; esac   # binary: never through a shell variable
 j=\$("$T/bin/api" "\$2") || exit 1
 if [ -n "\$q" ]; then jq -r "\$q" <<<"\$j"; else printf '%s\n' "\$j"; fi
 GH

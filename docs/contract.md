@@ -52,6 +52,18 @@ what gets deployed. The workflow is [.github/workflows/review.yml](../.github/wo
   Main then reviews the fix under (a). Because no later dev review vouches for a blocked commit, approval does:
   landing a dev sha (`merge-branch.sh`, the merge train, a devfix landing) needs the coverage chain (c) from main to
   it, and a blocked review is a link of that chain only with an effective repair of it on the head.
+- **A commit's verdict is its FIRST completed, attested verdict** (owner 11-16; `review-evidence.sh`
+  `review_first_verdict`, the one reader every consumer uses: `review-passed.sh`, `review-coverage.sh`,
+  `dev-review-base.sh`, `hotfix-review-base.sh`, `prior-findings.sh`, the dispatcher). The trusted runs of the commit
+  ("review <sha>" / "recheck <sha>") are ordered by run id, then run_attempt — monotonic GitHub fields, never timestamps
+  or the listing order — and the first attempt whose review job ran to a verdict decides: a pass (blocking step
+  succeeded AND the run's attestation is valid for the sha — an unattested pass is no verdict), a block (the reviewer's
+  `review-gate: BLOCKED #n` in the step that ran), or a tests-only fix round. Crashes, cancels and infrastructure
+  failures have no verdict and are skipped. An earlier run that cannot be read (or has not finished) makes the verdict
+  unknown, which is treated as blocked (fail closed; the next dispatcher run asks again). Later runs and reruns never
+  change a verdict: a blocked commit is cleared only by an effective `Review-Fix-Of:` repair. Main's own verdict of a
+  commit (its first "recheck <sha>") is the separate after-the-fact check: its block routes to a main fix chain and
+  withdraws a tests-only approval (rule (g)).
 - **A reverted repair repairs nothing** (`review-repair.sh`, also the dispatcher's `fix_reverted`): a standing direct
   revert of the repair, or ANY merge revert after it. Conservative by policy: any merge revert after a repair forces a
   full review instead of trusting the repair; it costs one extra review and never approves unreviewed code.

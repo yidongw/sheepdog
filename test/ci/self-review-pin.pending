@@ -2,3 +2,4 @@
 #   <suite file name> <the 40-char pin sha> <the protection that is not in the pinned snapshot yet>
 # Allowed only for that exact pin: a pin bump runs every suite against the new pin again. Keep this list empty whenever
 # the newest reviewed main carries the protection — bump the pin instead (docs/self-review.md).
+review-first-verdict.sh 12fe197397098249130932fa383a43b880382877 a commit's verdict is its FIRST completed, attested verdict (run id / run_attempt order; owner 11-16): the pin bump to this Hotfix follows once its main re-check passes
