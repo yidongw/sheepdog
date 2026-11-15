@@ -131,7 +131,7 @@ run() { # run <title> <path> <event> <branch> <head sha> <status> <conclusion> <
 R=.github/workflows/review.yml
 publish() { (IFS=,; echo "[${RUNS[*]}]") | jq 'reverse' > "$FX/runs.json"; }
 run "review $D1" $R workflow_run main "$D1" completed failure; RD1=$id
-printf '2026-11-13T00:00:00.0000000Z review-range: %s %s\n2026-11-13T00:00:00.0000000Z review-gate: FINDING #1 route=fixer commit=%s — x\n2026-11-13T00:00:00.0000000Z review-gate: BLOCKED #1 regression [should]: d1 drops rows\n2026-11-13T00:00:00.0000000Z evidence: src/d1.ts:1 x\n' "$A" "$D1" "$D1" > "$FX/log-${RD1}2.txt"
+printf '2026-11-13T00:00:00.0000000Z review-range: %s %s\n2026-11-13T00:00:00.0000000Z review-gate: reviewing aaaaaaaa..bbbbbbbb\n2026-11-13T00:00:00.0000000Z review-gate: FINDING #1 route=fixer commit=%s — x\n2026-11-13T00:00:00.0000000Z review-gate: BLOCKED #1 regression [should]: d1 drops rows\n2026-11-13T00:00:00.0000000Z evidence: src/d1.ts:1 x\n' "$A" "$D1" "$D1" > "$FX/log-${RD1}2.txt"
 # D1's review attests A..D1 (A is on main): a devfix of D1 is covered below D1 (review-covered.sh)
 echo "{\"artifacts\":[{\"name\":\"review-attestation\",\"id\":$RD1}]}" > "$FX/artifacts-$RD1.json"
 jq -nc --arg h "$D1" --arg b "$A" '{head: $h, base: $b, kind: "review"}' > "$FX/attest-$RD1.json"
@@ -179,7 +179,7 @@ printf 'jobs:\n  sheepdog:\n    uses: yidongw/sheepdog/.github/workflows/review.
 D2=$(c .github/workflows/review.yml); g push -q -f origin "dev2:refs/heads/dev"
 blocked() { # blocked <sha> → its dev review blocked; the dispatcher wakes a fixer for it
   run "review $1" $R workflow_run main "$1" completed failure; local r=$id
-  printf '2026-11-13T00:00:00.0000000Z review-range: %s %s\n2026-11-13T00:00:00.0000000Z review-gate: FINDING #1 route=fixer commit=%s — x\n2026-11-13T00:00:00.0000000Z review-gate: BLOCKED #1 regression [should]: it drops rows\n2026-11-13T00:00:00.0000000Z evidence: src/x.ts:1 x\n' "$1" "$1" "$1" > "$FX/log-${r}2.txt"
+  printf '2026-11-13T00:00:00.0000000Z review-range: %s %s\n2026-11-13T00:00:00.0000000Z review-gate: reviewing aaaaaaaa..bbbbbbbb\n2026-11-13T00:00:00.0000000Z review-gate: FINDING #1 route=fixer commit=%s — x\n2026-11-13T00:00:00.0000000Z review-gate: BLOCKED #1 regression [should]: it drops rows\n2026-11-13T00:00:00.0000000Z evidence: src/x.ts:1 x\n' "$1" "$1" "$1" > "$FX/log-${r}2.txt"
   publish; dispatch; [ -e "$STATE/sent/$1.fixer-blocked" ] || { fail "setup: no fixer for the blocked ${1:0:9}: $(tail -3 "$STATE/dispatch.log")"; }; }
 blocked "$D2"
 g checkout -q -B fx "$D2"; FXH=$(c src/fix2.ts "Review-Fix-Of: $D2
