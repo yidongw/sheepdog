@@ -17,9 +17,8 @@
 #       loop; review of main 725a2adc1 #1); (j) receipts are per run (review of dev 8ba5aaa38 #1/#2); (k) the head loop
 #       is bound to the approving review, (k2) also when its log cannot be read (review of dev 8a8373271 #1); (l) receipts
 #       name the review attempt (review of pawx 7f0dbbc8f #1/#2); (m) a repository-local review-passed.sh's pass is a plain
-#       pass, never main-only; (n) DRY previews without a receipt (review of main 9b7ece173 #1-#3); (l2) one jobs answer
-#       binds classification, text and receipt (review of dev 84ada34cc #3); (o) one log read for classification and
-#       record, (p) a repository-local checker's main-only head is routed as an ordinary blocked head (review of 76fdca743)
+#       pass only after a full-review check; (n) DRY previews without a receipt (review of main 9b7ece173 #1-#3); (l2) one jobs answer
+#       binds classification, text and receipt (review of dev 84ada34cc #3)
 set -uo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 cd "$(dirname "$0")/../.."
@@ -126,10 +125,11 @@ RP() { (cd "$SRC" && bash "$ROOT/scripts/ci/review-passed.sh" "$H" o/r >/dev/nul
 ghm() { # the routing memo: the real (fake) gh; with $T/ghm-logs-fail present, job-log reads fail (an unavailable read)
   # (its content, if any: only that job's log fails)
   if [ -e "$T/ghm-logs-fail" ] && [[ "$*" == *"/jobs/$(cat "$T/ghm-logs-fail")"*"/logs"* ]]; then return 1; fi
-  # $T/ghm-log-nth = "<job id> <n>": only the n-th read of that job's log fails (counted in $T/ghm-log-count)
-  if [ -e "$T/ghm-log-nth" ] && [[ "$*" == *"/jobs/$(cut -d' ' -f1 "$T/ghm-log-nth")/logs"* ]]; then
-    echo x >> "$T/ghm-log-count"
-    [ "$(wc -l < "$T/ghm-log-count")" = "$(cut -d' ' -f2 "$T/ghm-log-nth")" ] && return 1
+  # A recent/uncached log can fail once between a successful initial read and a successful retry.
+  if [ -e "$T/fail-log-read-at" ] && [[ "$*" == *"/jobs/$JID/logs"* ]]; then
+    local reads=0; [ ! -f "$T/log-reads" ] || reads=$(cat "$T/log-reads")
+    reads=$((reads + 1)); echo "$reads" > "$T/log-reads"
+    if [ "$reads" = "$(cat "$T/fail-log-read-at")" ]; then return 1; fi
   fi
   # $T/swap-jobs = "<run id> <file>": right after the first read of that run's jobs, the run is rerun (jobs replaced)
   if [ -e "$T/swap-jobs" ] && [[ "$*" == *"/runs/$(cut -d' ' -f1 "$T/swap-jobs")/jobs"* ]]; then
@@ -141,7 +141,7 @@ STATE=$T/state MAIN=main DEV=dev TRUSTED=$T/trusted WORK=$T/work OUTBOX=$T/state
 DEV_REVERT_AFTER_SEC=3600 DEV_REVERT_WARN_SEC=900 key_prefix="" SUPERVISOR_THREAD=sup DISPATCH_THREAD=disp
 mkdir -p "$STATE/sent" "$OUTBOX"; LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 git -C "$SRC" worktree add -q --detach "$TRUSTED" origin/main
-eval "$(sed -n '/^review_list() {/,/^}/p; /^dev_round_noop() {/,/^}/p; /^dev_merge_only() {/,/^}/p; /^review_infra_reason() {/,/^}/p; /^run_verdict() {/,/^}/p; /^dev_verdict_run() {/,/^}/p; /^named_files() {/p; /^findings_cap() {/,/^}/p; /^findings() {/,/^}/p; /^notes_of() {/,/^}/p; /^findings_subset() {/,/^}/p; /^main_culprits_api() /p; /^main_culprit_hint() {/,/^}/p; /^dsm_api() {/,/^}/p; /^dev_split_main() {/,/^}/p; /^record_approving_main() {/,/^}/p; /^thread_of() /p; /^range_threads() {/,/^}/p' "$D")"
+eval "$(sed -n '/^review_jobs() {/p; /^review_list() {/,/^}/p; /^dev_round_noop() {/,/^}/p; /^dev_merge_only() {/,/^}/p; /^review_infra_reason() {/,/^}/p; /^run_verdict() {/,/^}/p; /^dev_verdict_run() {/,/^}/p; /^named_files() {/p; /^findings_cap() {/,/^}/p; /^findings() {/,/^}/p; /^notes_of() {/,/^}/p; /^findings_subset() {/,/^}/p; /^main_culprits_api() /p; /^main_culprit_hint() {/,/^}/p; /^dsm_api() {/,/^}/p; /^dev_split_main() {/,/^}/p; /^review_approve() {/,/^}/p; /^record_approving_main() {/,/^}/p; /^thread_of() /p; /^range_threads() {/,/^}/p' "$D")"
 source "$ROOT/scripts/ci/review-main-culprits.sh"
 source "$ROOT/scripts/ci/review-machinery.sh"
 for f in review_list findings findings_subset main_culprit_hint dev_split_main record_approving_main main_culprits_api review_main_culprits dev_verdict_run; do
@@ -175,6 +175,7 @@ run_train() { reset_dev; DRY=""; ( cd "$ROOT" && eval "$train" ) || fail "train 
 landed() { [ "$(g rev-parse origin/main)" = "$H" ]; }
 routed_nums() { sed -nE 's/^review-gate: BLOCKED #([0-9]+) .*/\1/p' "$T/routed" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
 
+if [ -z "${REVIEW_MAIN_REGRESSION:-}" ]; then
 # ── (a) the real 0cd95ca42 log without its own #3: blocked only by #1/#2, culprit on main ──
 fixture_log "$T/log" "$C" 0
 scenario "review $H" success "$STEPS_OK" "$MAINSHA"
@@ -468,7 +469,7 @@ grep -q "run $RID): finding(s) 1 2 — culprit on main" "$STATE/open-findings.lo
 echo "ok - (l2) one jobs answer binds classification, text and receipt: a rerun between reads is recorded on its own"
 # ── review of sheepdog main 9b7ece173 #1/#2: a repository-local (older) review-passed.sh writes no approval file. Its
 #    approval is a plain full-review pass: the train and the head loop land on it, and it is asked with
-#    REVIEW_MAIN_FINDINGS=0 — a main-only approval can only come from sheepdog's own checker's file ──
+#    REVIEW_MAIN_FINDINGS=0 before accepting its receiptless pass ──
 LEG=$T/legacy-ci; rm -rf "$LEG"; cp -r "$ROOT/scripts/ci" "$LEG"
 cat > "$LEG/review-passed.sh" <<'RP'
 #!/usr/bin/env bash
@@ -480,16 +481,16 @@ RP
 fixture_log "$T/log" "$C" 0
 scenario "review $H" success "$STEPS_OK" "$MAINSHA"
 rm -f "$FX/legacy-rp-main"; reset_dev
-( cd "$ROOT" && DRY="" && CI_SCRIPTS=$LEG && approval_named=0 && eval "$train" ) || fail "(m) train failed"; g fetch -q origin
+( cd "$ROOT" && DRY="" && CI_SCRIPTS=$LEG && eval "$train" ) || fail "(m) train failed"; g fetch -q origin
 landed || fail "(m) the train refused a legacy script's plain pass: $(cat "$LOG")"
-! grep -qv '^0$' "$FX/legacy-rp-main" || fail "(m) the legacy script was asked with main findings allowed: $(sort -u "$FX/legacy-rp-main" | tr '\n' ' ')"
+[ "$(tail -1 "$FX/legacy-rp-main")" = 0 ] || fail "(m) the legacy script was not checked with main findings disabled"
 rm -f "$FX/legacy-rp-main"; reset_dev
-( cd "$ROOT" && merged_one=0 && DRY="" && CI_SCRIPTS=$LEG && approval_named=0 && eval "$loop" ) || fail "(m) head loop failed"; g fetch -q origin
+( cd "$ROOT" && merged_one=0 && DRY="" && CI_SCRIPTS=$LEG && eval "$loop" ) || fail "(m) head loop failed"; g fetch -q origin
 landed || fail "(m) the head loop refused a legacy script's plain pass: $(cat "$LOG")"
-! grep -qv '^0$' "$FX/legacy-rp-main" || fail "(m) head loop: the legacy script was asked with main findings allowed"
+[ "$(tail -1 "$FX/legacy-rp-main")" = 0 ] || fail "(m) head loop: the legacy script was not checked with main findings disabled"
 # … while sheepdog's own checker with an empty approval file is still refused (unreadable evidence)
 printf '' > "$T/empty.approval"; ( approval_named=1; ! record_approving_main "$H" "$T/empty.approval" ) || fail "(m) an empty approval file of sheepdog's checker was accepted"
-echo "ok - (m) a repository-local review-passed.sh: plain pass lands, never asked for a main-only approval"
+echo "ok - (m) a repository-local review-passed.sh: receiptless pass requires a check with main findings disabled"
 
 # ── review of sheepdog main 9b7ece173 #3: DRY previews a main-only merge from the classification alone (no receipt) ──
 fixture_log "$T/log" "$C" 0
@@ -500,33 +501,134 @@ grep -q "DRY merge dev ${H:0:9}" <<<"$out" || fail "(n) DRY did not preview the 
 ! landed || fail "(n) DRY landed"
 test ! -s "$STATE/open-findings.log" || fail "(n) DRY wrote a record"
 echo "ok - (n) DRY previews a main-only merge without a receipt and writes nothing"
-# ── review of sheepdog main 76fdca743 #1: classification and record come from ONE log read. The head loop's first read of
-#    the approving job's log works, dev_split_main's own read fails: no receipt, no landing this run ──
-fixture_log "$T/log" "$C" 0
-scenario "review $H" success "$STEPS_OK" "$MAINSHA"
-reset_dev; rm -f "$T/ghm-log-count"; echo "$JID 2" > "$T/ghm-log-nth"
-( cd "$ROOT" && merged_one=0 && DRY="" && eval "$loop" ) >/dev/null 2>&1; g fetch -q origin
-rm -f "$T/ghm-log-nth" "$T/ghm-log-count"
-! landed || fail "(o) landed although dev_split_main's log read failed"
-! ls "$STATE/sent/" | grep -q mainfindings || fail "(o) a receipt from a failed read: $(ls "$STATE/sent")"
-! grep -q "BLOCKED #" "$STATE/open-findings.log" 2>/dev/null || fail "(o) recorded from a failed read"
-echo "ok - (o) a failed log read inside the classification: no receipt, no landing"
+fi
 
-# ── review of sheepdog main 76fdca743 #2: a repository-local checker never approves main-only, and a head blocked only by
-#    main findings is then an ORDINARY blocked head: its findings are routed (never "neither landed nor routed") ──
-cat > "$LEG/review-passed.sh" <<'RP'
+# Focused regressions for the main review of 76fdca743. Select with REVIEW_MAIN_REGRESSION=refresh|local-contract.
+if [ -z "${REVIEW_MAIN_REGRESSION:-}" ] || [ "$REVIEW_MAIN_REGRESSION" = refresh ]; then
+  fixture_log "$T/log" "$C" 0
+  scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+  reset_dev; echo 2 > "$T/fail-log-read-at"; rm -f "$T/log-reads"
+  ( cd "$ROOT" && merged_one=0 && DRY="" && eval "$loop" ) || fail "(o) head loop failed"
+  g fetch -q origin
+  if landed; then
+    [ "$(grep -c '^review-gate: BLOCKED #[12] ' "$STATE/open-findings.log")" = 2 ] || fail "(o) landed with a receipt but missing findings after the failed refresh"
+  fi
+  for receipt in "$STATE/sent/"*.mainfindings; do
+    [ ! -e "$receipt" ] || [ "$(grep -c '^review-gate: BLOCKED #[12] ' "$STATE/open-findings.log")" = 2 ] || fail "(o) certified an empty record"
+  done
+  rm -f "$T/fail-log-read-at" "$T/log-reads"
+  ( cd "$ROOT" && merged_one=0 && DRY="" && eval "$loop" ) || fail "(o) head retry failed"
+  g fetch -q origin
+  landed || fail "(o) head did not land after reads recovered"
+  [ "$(grep -c '^review-gate: BLOCKED #[12] ' "$STATE/open-findings.log")" = 2 ] || fail "(o) retry omitted findings"
+
+  # The post-approval guard must also reject this sequence, even with a valid caller-supplied initial read.
+  reset_dev; echo 2 > "$T/fail-log-read-at"; rm -f "$T/log-reads"
+  echo "$RID 1 $JID main" > "$T/o.approval"
+  if ( DRY=""; record_approving_main "$H" "$T/o.approval" ); then
+    [ "$(grep -c '^review-gate: BLOCKED #[12] ' "$STATE/open-findings.log")" = 2 ] || fail "(o) record_approving_main accepted an empty record"
+  fi
+  test ! -e "$STATE/sent/$H.$RID.1.$JID.mainfindings" || fail "(o) failed log read created a receipt"
+  rm -f "$T/fail-log-read-at" "$T/log-reads"
+  ( DRY=""; record_approving_main "$H" "$T/o.approval" ) || fail "(o) guard retry did not record"
+  echo "ok - (o) a failed refresh cannot certify an empty record; head and guard recover on retry"
+fi
+
+if [ -z "${REVIEW_MAIN_REGRESSION:-}" ] || [ "$REVIEW_MAIN_REGRESSION" = local-contract ]; then
+  fixture_log "$T/log" "$C" 0
+  scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+  # Use the production initialization, including CI_SCRIPTS selection, for a repository-local capable checker.
+  init=$(python3 - "$D" <<'PYINIT'
+import sys
+s = open(sys.argv[1]).read()
+a = s.index('if [ -f "$TRUSTED/.github/sheepdog.yml" ]')
+print(s[a:s.index('\nsource ', a)])
+PYINIT
+)
+  mkdir -p "$TRUSTED/scripts/ci"; cp "$ROOT/scripts/ci/"*.sh "$TRUSTED/scripts/ci/"
+  for path in head train; do
+    reset_dev
+    ( SHEEPDOG_CI=$ROOT/scripts/ci; unset approval_named; eval "$init"; DRY=""; merged_one=0
+      if [ "$path" = head ]; then eval "$loop"; else eval "$train"; fi
+    ) || fail "(p) local capable $path failed"
+    g fetch -q origin
+    landed || fail "(p) $path stranded a receipt-capable repository-local checker: $(cat "$LOG")"
+    test -e "$STATE/sent/$H.$RID.1.$JID.mainfindings" || fail "(p) local capable $path bypassed the receipt guard"
+    [ "$(grep -c '^review-gate: BLOCKED #[12] ' "$STATE/open-findings.log")" = 2 ] || fail "(p) local capable $path omitted findings"
+  done
+  # A historical receipt-capable local checker has no capability declaration, but its approval sidecar still works.
+  git -C "$ROOT" show 76fdca743b72d1a0e481d5ca1a2cef1d47a176b7:scripts/ci/review-passed.sh > "$TRUSTED/scripts/ci/review-passed.sh"
+  for path in head train; do
+    reset_dev
+    ( SHEEPDOG_CI=$ROOT/scripts/ci; unset approval_named; eval "$init"; DRY=""; merged_one=0
+      if [ "$path" = head ]; then eval "$loop"; else eval "$train"; fi
+    ) || fail "(p) historical capable $path failed"
+    g fetch -q origin
+    landed || fail "(p) $path stranded a historical receipt-capable local checker"
+    test -e "$STATE/sent/$H.$RID.1.$JID.mainfindings" || fail "(p) historical capable $path bypassed recording"
+  done
+  # Legacy main-only approvals without a sidecar are refused when the full-review fallback refuses.
+  LEG=$T/legacy-ci; mkdir -p "$LEG"; cp "$ROOT/scripts/ci/"*.sh "$LEG/"
+  cat > "$LEG/review-passed.sh" <<'RP'
 #!/usr/bin/env bash
-# a repository-local checker (receipt-capable or not): with REVIEW_MAIN_FINDINGS=0 a blocked review is not approved
 echo "${REVIEW_MAIN_FINDINGS:-unset}" >> "$FX/legacy-rp-main"
-exit 1
+[ -z "${REVIEW_KIND_OUT:-}" ] || echo review > "$REVIEW_KIND_OUT"
+[ "${REVIEW_MAIN_FINDINGS:-1}" != 0 ] || [ -e "$FX/legacy-allow-pass" ]
 RP
-fixture_log "$T/log" "$C" 0
-scenario "review $H" success "$STEPS_OK" "$MAINSHA"
-rm -f "$FX/legacy-rp-main"; reset_dev
-( cd "$ROOT" && merged_one=0 && DRY="" && CI_SCRIPTS=$LEG && approval_named=0 && eval "$loop" ) >/dev/null 2>&1; g fetch -q origin
-! landed || fail "(p) a repository-local checker's head landed main-only"
-grep -q "^dev_blocked $H" "$T/calls" 2>/dev/null || fail "(p) the head was neither landed nor routed: $(cat "$LOG")"
-[ "$(routed_nums)" = "1 2" ] || fail "(p) routed '$(routed_nums)', want 1 2 (all findings, as an ordinary blocked head)"
-! grep -qv '^0$' "$FX/legacy-rp-main" || fail "(p) the repository-local checker was asked with main findings allowed"
-echo "ok - (p) a repository-local checker: no main-only approval; the head is routed as an ordinary blocked head"
+  for path in head train; do
+    reset_dev; rm -f "$FX/legacy-rp-main"
+    ( CI_SCRIPTS=$LEG; DRY=""; merged_one=0
+      if [ "$path" = head ]; then eval "$loop"; else eval "$train"; fi
+    ) || fail "(p) legacy $path failed"
+    g fetch -q origin
+    ! landed || fail "(p) $path accepted a receiptless main-only approval"
+    [ "$(tail -1 "$FX/legacy-rp-main")" = 0 ] || fail "(p) $path did not require a full-review check from the legacy checker"
+    if [ "$path" = head ]; then
+      [ "$(routed_nums)" = "1 2" ] || fail "(p) legacy blocked head was neither landed nor routed"
+    fi
+  done
+  touch "$FX/legacy-allow-pass"
+  for path in head train; do
+    reset_dev; rm -f "$FX/legacy-rp-main"
+    ( CI_SCRIPTS=$LEG; DRY=""; merged_one=0
+      if [ "$path" = head ]; then eval "$loop"; else eval "$train"; fi
+    ) || fail "(p) legacy plain pass $path failed"
+    g fetch -q origin
+    landed || fail "(p) $path refused a legacy full-review pass"
+    [ "$(tail -1 "$FX/legacy-rp-main")" = 0 ] || fail "(p) legacy merge did not keep main findings disabled"
+  done
+  cat > "$LEG/review-passed.sh" <<'RP'
+#!/usr/bin/env bash
+[ -z "${REVIEW_APPROVAL_OUT:-}" ] || echo 'bad receipt' > "$REVIEW_APPROVAL_OUT"
+RP
+  for path in head train; do
+    reset_dev
+    ( CI_SCRIPTS=$LEG; DRY=""; merged_one=0
+      if [ "$path" = head ]; then eval "$loop"; else eval "$train"; fi
+    ) || fail "(p) malformed receipt $path failed"
+    g fetch -q origin
+    ! landed || fail "(p) $path waived a malformed receipt"
+  done
+  # Explicit capability survives an unsuccessful check. Missing receipts and temporary approval failures cannot turn
+  # a capable checker into a legacy checker and route already-classified main findings into a dev fixer/revert.
+  cat > "$LEG/review-passed.sh" <<'RP'
+#!/usr/bin/env bash
+printf '%s\n' receipt-v1 > "$REVIEW_APPROVAL_PROTOCOL_OUT"
+[ -z "${REVIEW_KIND_OUT:-}" ] || echo review > "$REVIEW_KIND_OUT"
+exit "${CAP_CHECK_RC:-1}"
+RP
+  for checker_rc in 0 1; do
+    for path in head train; do
+      reset_dev
+      ( export CAP_CHECK_RC=$checker_rc; CI_SCRIPTS=$LEG; DRY=""; merged_one=0
+        if [ "$path" = head ]; then eval "$loop"; else eval "$train"; fi
+      ) || fail "(p) declared capable $path failed"
+      g fetch -q origin
+      ! landed || fail "(p) $path accepted a missing receipt from a declared capable checker"
+      ! grep -qE '^(dev_blocked|wake_fixer)' "$T/calls" 2>/dev/null || fail "(p) $path routed main findings after a declared capable check failed"
+      test ! -e "$STATE/dev.blocked_since" || fail "(p) declared capable checker started a dev revert clock"
+    done
+  done
+  echo "ok - (p) local capable and legacy full-review passes land; receiptless main-only and malformed receipts cannot land"
+fi
 echo "main-culprit checks passed"

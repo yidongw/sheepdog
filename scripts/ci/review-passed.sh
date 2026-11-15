@@ -13,6 +13,10 @@
 # of (or equal to) deployed-sha, so no commit pushed to main outside the review rides along.
 # Needs a local clone in the current directory for the ancestry check.
 set -euo pipefail
+# Declare receipt support even when the review cannot approve (for example, an API read fails).
+if [ -n "${REVIEW_APPROVAL_PROTOCOL_OUT:-}" ]; then
+  printf '%s\n' receipt-v1 > "$REVIEW_APPROVAL_PROTOCOL_OUT"
+fi
 sha="${1:?usage: review-passed.sh <full-sha> [owner/repo]}"
 repo="${2:-${REPO:?usage: review-passed.sh <full-sha> [owner/repo] (or REPO=owner/name)}}"
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "need a full sha" >&2; exit 2; }

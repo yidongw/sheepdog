@@ -95,10 +95,6 @@ git -C "$SRC" fetch -q --prune origin
 [ -d "$TRUSTED" ] || git -C "$SRC" worktree add -q --detach "$TRUSTED" origin/$MAIN
 git -C "$TRUSTED" checkout -q --detach origin/$MAIN
 if [ -f "$TRUSTED/.github/sheepdog.yml" ]; then CI_SCRIPTS=$SHEEPDOG_CI; else CI_SCRIPTS=$TRUSTED/scripts/ci; fi
-# Only sheepdog's own review-passed.sh names its approving attempt (REVIEW_APPROVAL_OUT), so only it may approve a dev
-# review as main-only: a repository-local contract script (an unmigrated repository) runs with REVIEW_MAIN_FINDINGS=0 and
-# its approval counts as a plain full-review pass (review of sheepdog main 9b7ece173 #1/#2).
-if [ "$CI_SCRIPTS" = "${SHEEPDOG_CI:-}" ]; then approval_named=1; else approval_named=0; fi
 
 source "$(dirname "${BASH_SOURCE[0]}")/review-notify.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machinery_files: what a tests-only approval never lands
@@ -1121,9 +1117,6 @@ dev_split_main() { # dev_split_main <S> <run id> <findings> → sets dev_f (the 
   # caller approves through the main-findings path that run (review of sheepdog main 725a2adc1 #1 / 6b9031dfb #1).
   local s=$1 run=$2 f=$3 cls rc=0 n att jobs dsm_log dsm_jid
   dev_f=$f main_nums="" dev_nums="" main_only=0 main_receipt=""
-  # a repository-local checker never approves main-only (approval_named=0), so its heads keep every finding: an ordinary
-  # blocked head, routed as before — never "neither landed nor routed" (review of sheepdog main 76fdca743 #2)
-  [ "${approval_named:-1}" = 1 ] || return 0
   main_culprit_hint "$s" "$f" || return 0
   # ONE jobs answer and ONE read of its review job's log for the classification, the recorded / routed text and the
   # receipt's attempt / job identity (reviews of 84ada34cc #3, 76fdca743 #1): any read failure → nothing removed, no
@@ -1166,12 +1159,39 @@ dev_split_main() { # dev_split_main <S> <run id> <findings> → sets dev_f (the 
   [ -n "$dev_nums" ] || main_only=1
   return 0
 }
+review_approve() { # review_approve <S> <allow main findings 0|1> <approval file> → check + negotiate the receipt contract
+  # A declaration is available even on failure. Older receipt-capable checkers can establish support by writing the
+  # existing approval sidecar. Legacy checkers must pass with main findings disabled before landing without a receipt.
+  local s=$1 allow_main=$2 approval=$3 protocol=$3.protocol rc=0
+  approval_named=1
+  : > "$approval"; : > "$protocol"
+  (cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=$allow_main REVIEW_APPROVAL_OUT=$approval REVIEW_APPROVAL_PROTOCOL_OUT=$protocol bash "$CI_SCRIPTS/review-passed.sh" "$s" "$REPO" >/dev/null 2>&1) || rc=$?
+  if [ -s "$protocol" ]; then
+    [ "$(cat "$protocol")" = receipt-v1 ] || return 1
+    [ "$rc" = 0 ] && [ -s "$approval" ]; return
+  fi
+  if [ -s "$approval" ]; then return "$rc"; fi
+  approval_named=0
+  if [ "$allow_main" != 0 ]; then
+    rc=0
+    (cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=0 REVIEW_APPROVAL_OUT=$approval REVIEW_APPROVAL_PROTOCOL_OUT=$protocol bash "$CI_SCRIPTS/review-passed.sh" "$s" "$REPO" >/dev/null 2>&1) || rc=$?
+    # A fallback can also discover support; never waive a declared protocol or a nonempty receipt.
+    if [ -s "$protocol" ] || [ -s "$approval" ]; then
+      approval_named=1
+      [ ! -s "$protocol" ] || [ "$(cat "$protocol")" = receipt-v1 ] || return 1
+      [ "$rc" = 0 ] && [ -s "$approval" ]; return
+    fi
+    # The first check may have refused while the full-review fallback passed.
+    [ "$rc" = 0 ] || return 1
+  fi
+  return "$rc"
+}
+
 record_approving_main() { # record_approving_main <S> <approval file of review-passed.sh (REVIEW_APPROVAL_OUT)> → 0 when S may
   # land: the approval is not a main-findings one, or the main findings of THAT approving attempt (run, attempt, review
   # job) are in open-findings.log — written now or before. The one guard of the train AND the branch-head landing path
   # (review of pawx-twitter-poller 7f0dbbc8f #1). Anything unreadable / mismatched → 1 (not landed; the next run retries).
-  # A repository-local script (approval_named=0) ran with REVIEW_MAIN_FINDINGS=0 and writes no file: its approval is a plain
-  # pass. sheepdog's own script always writes the file, so an empty one there is unreadable evidence.
+  # After review_approve succeeds, approval_named=0 means a plain pass with REVIEW_MAIN_FINDINGS=0 and no receipt.
   local run att jid how
   if [ "${approval_named:-1}" != 1 ]; then return 0; fi
   read -r run att jid how < "$2" 2>/dev/null || return 1
@@ -2082,9 +2102,7 @@ Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). You
       dev_split_main "$tsha" "$trid" "$(findings "$trid")"
     done
     : > "$STATE/train.kind"
-    : > "$STATE/train.approval"
-    [ "${approval_named:-1}" = 1 ] || rp_main=0
-    (cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=$rp_main REVIEW_KIND_OUT="$STATE/train.kind" REVIEW_APPROVAL_OUT="$STATE/train.approval" bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" >/dev/null 2>&1) || continue
+    REVIEW_KIND_OUT="$STATE/train.kind" review_approve "$tsha" "$rp_main" "$STATE/train.approval" || continue
     # Approved by a review that blocked only on pre-existing main findings: THAT attempt's findings are recorded
     # (open-findings.log) BEFORE the sha lands, or it does not land this run (reviews of d9228afe7 #1, 625246776 #1,
     # 7f0dbbc8f #1/#2)
@@ -2334,9 +2352,7 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
   if [ "$ref" = "$DEV" ] && [ "$concl" != success ]; then
     f=$(findings "$rid"); dev_split_main "$sha" "$rid" "$f"; [ "$main_only" = 1 ] || rp_main=0
   fi
-  : > "$STATE/head.approval"
-  [ "${approval_named:-1}" = 1 ] || rp_main=0
-  if (cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=$rp_main REVIEW_APPROVAL_OUT="$STATE/head.approval" bash "$CI_SCRIPTS/review-passed.sh" "$sha" "$REPO" >/dev/null 2>&1); then
+  if review_approve "$sha" "$rp_main" "$STATE/head.approval"; then
     # the same guard as the train: a main-findings approval lands only after the APPROVING attempt's findings are recorded
     # (review of pawx-twitter-poller 7f0dbbc8f #1: the head loop checked the run it had selected, not the one approving)
     if ! record_approving_main "$sha" "$STATE/head.approval"; then
@@ -2378,6 +2394,8 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
     fi
   elif [ "$ref" = "$DEV" ]; then
     if [ -z "$f" ]; then f=$(findings "$rid"); dev_split_main "$sha" "$rid" "$f"; fi   # (a failed run: split above already)
+    # An undeclared, receiptless checker keeps ordinary legacy blocking/routing behavior.
+    [ "${approval_named:-1}" = 1 ] || dev_f=$f
     # the reviewer itself did not run: nothing was reviewed — no block, no fixer, no author notice, no revert clock
     if dinfra=$(review_infra_reason "$f"); then dev_infra "$sha" "$rid" "$dinfra"; continue; fi
     # findings whose culprit is on main are main's: recorded, never routed on $DEV (no fixer, round, notice or revert clock)
