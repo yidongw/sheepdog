@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Dev reviews (owner 11-12: "review on dev once; if it fails, fix once; when CI passes, merge into main without a second review"; "every commit is reviewed once"), mirroring
-# main's re-checks (test/ci/main-review-range.sh): the reviewed range starts at the last COMPLETED dev review that passed
-# or whose block is repaired — not at merge-base(main, dev); a blocked commit without its repair is reviewed again with
-# the next commits (never lands on an unrelated commit's review); clean main→dev merges right above the base are not
-# diffed; a range of only fixes of earlier BLOCKED reviews (+ clean merges) is a tests-only-fix round (reviewer skipped,
-# never a pass; review-passed.sh accepts it on its tests and its own re-check), and the merge-train lands it; the strict deploy checker follows a chain of completed rounds to prod.
-# 11-12: every dev round reviewed all 38 commits again and found something new — dev stuck 7.5 h.
+# Dev reviews (owner 11-15: on dev every new commit is reviewed EXACTLY ONCE), mirroring main's re-checks
+# (test/ci/main-review-range.sh): the reviewed range starts at the last COMPLETED dev review of an ancestor — passed,
+# blocked or a tests-only round — not at merge-base(main, dev); a blocked commit is not reviewed again (its repair, and
+# approval's coverage chain, answer it); main's side of a main→dev merge is never in the dev diff; a range of only fixes
+# of earlier BLOCKED reviews (+ clean merges) is a tests-only-fix round (reviewer skipped, never a pass; review-passed.sh
+# accepts it on its tests and its own re-check), and the merge-train lands it; the strict deploy checker follows a chain
+# of completed rounds to prod. 11-12: every dev round reviewed all 38 commits again and found something new — dev stuck 7.5 h.
 set -euo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 cd "$(dirname "$0")/../.."
@@ -101,18 +101,19 @@ reset_runs; run 22 "review $N1" cancelled; run 21 "review $X" failure
 test "$(base HEAD)" = "$X"                                   # a cancelled review of the parent reviewed nothing
 reset_runs; run 22 "review $N1" success; run 21 "review $X" failure
 test "$(base HEAD)" = "$N1"                                  # a passed review: the base
-# R blocked, an unrelated S after it, no repair → R is reviewed again with S (from where R's review started)
+# R blocked, an unrelated S after it, no repair → S is reviewed alone: R had its one review (owner 11-15); approval
+# needs R's repair (review-coverage.sh), not a second review of R
 g checkout -q -b rs "$H"; R=$(c b "R (blocked)"); S=$(c b "S (unrelated)")
 reset_runs; run 31 "review $R" failure
-test "$(base HEAD)" = "$H"
+test "$(base HEAD)" = "$R"
 g checkout -q -b rs2 "$D1"; R=$(c b "R (blocked)"); S=$(c b "S (unrelated)")
 reset_runs; run 32 "review $D1" success; run 31 "review $R" failure "" "$D1"
-test "$(base HEAD)" = "$D1"                                  # the base stays where R's review started
-if base --only-fixes "$D1" "$S"; then echo "unrelated S after an unrepaired R skipped" >&2; exit 1; fi
+test "$(base HEAD)" = "$R"                                   # not back to where R's review started
+if base --only-fixes "$R" "$S"; then echo "unrelated S after an unrepaired R skipped" >&2; exit 1; fi
 RF=$(c rf "repair of R" "Review-Fix-Of: $R"); c b "S2" >/dev/null
-test "$(base HEAD)" = "$R"                                   # repaired → past R
+test "$(base HEAD)" = "$R"
 g revert --no-edit "$RF" >/dev/null; c b "S3" >/dev/null
-test "$(base HEAD)" = "$D1"                                  # the repair was reverted → R reviewed again
+test "$(base HEAD)" = "$R"                                   # a reverted repair: still not reviewed again
 g checkout -q dev
 # a review whose step failed without the reviewer's verdict (crash / setup) reviewed nothing: not a base, not "blocked"
 reset_runs; run 21 "review $X" crash
@@ -125,19 +126,18 @@ test "$(base HEAD)" = "$X"
 reset_runs; EXTRA=3000 run 21 "review $X" failure "" "$D1"
 test "$(base HEAD)" = "$X"
 base --only-fixes "$X" "$F"
-echo 'dev range base: last completed review that passed or is repaired; an unrepaired block is reviewed again'
+echo 'dev range base: the last completed review of any verdict; a blocked commit is not reviewed again'
 
-# 2. the diff starts past clean main→dev merges right above the base (their main side was reviewed on main)
-#    — review contract: only when that main side has its own completed main review (proof, review-coverage.sh)
-test "$(base --diff "$X" "$N2")" = "$X"                      # H's re-check never ran: not moved past
-run 61 "recheck $H" success
-test "$(base --diff "$X" "$N2")" = "$M"
-test "$(g diff --name-only "$M" "$N2")" = a
-test "$(base --diff "$F" "$N2")" = "$F"                      # no merge right above F
+# 2. main's side of a main→dev merge is never in the dev diff (owner 11-15: main re-checks it; approval needs main's
+#    proof of it through the attested mainside), wherever the merge sits in the range
+test "$(g diff --name-only "$(base --diff "$X" "$N2")" "$N2")" = a
+test "$(base --mainside "$X" "$N2")" = "$H"
+test "$(base --diff "$F" "$N2")" = "$F"                      # main's side is below F: nothing to exclude
+test -z "$(base --mainside "$F" "$N2")"
 g checkout -q -b evil "$X"; g merge -q --no-ff --no-commit main >/dev/null 2>&1; echo evil > "$T/src/evil"; g add evil; g commit -q -m "merge main (with code of its own)"
 EF=$(c a "fix of X again" "Review-Fix-Of: $X")
-test "$(base --diff "$X" "$EF")" = "$X"                      # an evil merge is not moved past
-echo 'diff base: past clean main→dev merges right above the base; never past a merge with code of its own'
+test "$(g diff --name-only "$(base --diff "$X" "$EF")" "$EF" | sort | tr '\n' ' ')" = "a evil "   # a merge's own code is dev-side
+echo "diff base: main's side excluded; a merge's own code stays in the diff"
 
 # 3. only fixes of an earlier BLOCKED review (+ clean merges, main's commits) → skipped; anything else reviewed
 reset_runs; run 21 "review $X" failure
@@ -151,7 +151,7 @@ if base --only-fixes "$X" "$F"; then echo "fix of a review that passed skipped" 
 reset_runs; run 21 "review $X" failure; run 22 "review $F" failure
 if base --only-fixes "$X" "$N2"; then echo "x" >&2; exit 1; fi
 g checkout -q -b fixfix "$F"; FF=$(c a "fix of X, more" "Review-Fix-Of: $X")
-if base --only-fixes "$X" "$FF"; then echo "a fix whose own review blocked (unrepaired) skipped" >&2; exit 1; fi
+base --only-fixes "$X" "$FF"                                 # repairs only: tests-only (F's own block is approval's)
 FF2=$(c a "fix of F" "Review-Fix-Of: $F")
 base --only-fixes "$X" "$FF2"                                # once F is repaired, the fixes are fixes again
 g checkout -q -b fake "$H"; FK=$(c a "first contribution" "Review-Fix-Of: $P")
@@ -160,17 +160,17 @@ if base --only-fixes "$H" "$FK"; then echo "Review-Fix-Of an old main commit wit
 run 41 "recheck $P" failure
 base --only-fixes "$H" "$FK"                                 # a fix of a blocked main re-check counts
 g checkout -q dev
-# the f68613dd4 shape (11-12): Q0 passed; R9 and R3 blocked (their reviews ran from Q0); main merged in (Mx, blocked
-# too, from Q0, unrepaired); Fh repairs R3 only. The base may be no newer than Mx's / R9's own start (Q0), and no skip:
-# blocked, unrepaired commits (R9, the merge Mx) lie in the range.
+# the f68613dd4 shape (11-12): Q0 passed; R9 and R3 blocked; main merged in (Mx, blocked too, unrepaired); Fh repairs
+# R3 only. Each commit is reviewed once: the base is the newest completed review (Mx); a range with R9 in it is no
+# tests-only round; R9 / Mx unrepaired keep Fh from approval (coverage), not from its tests-only round.
 g checkout -q -b shape "$H"; Q0=$(c q "Q0"); R9=$(c q "R9"); R3=$(c q "R3")
 g checkout -q -b main2 "$H"; H2=$(c hot2 "hotfix two" "Hotfix: h2"); g checkout -q shape
 g merge -q --no-ff -m "merge main into dev" main2; Mx=$(g rev-parse HEAD)
 Fh=$(c q "repair of R3" "Review-Fix-Of: $R3")
 g update-ref refs/remotes/origin/main "$H2"
 reset_runs; run 71 "review $Q0" success; run 72 "review $R9" failure "" "$Q0"; run 73 "review $R3" failure "" "$Q0"; run 74 "review $Mx" failure "" "$Q0"
-test "$(base HEAD)" = "$Q0"
-if base --only-fixes "$R3" "$Fh"; then echo "a range with a blocked, unrepaired merge skipped" >&2; exit 1; fi
+test "$(base HEAD)" = "$Mx"
+base --only-fixes "$R3" "$Fh"
 if base --only-fixes "$Q0" "$Fh"; then echo "a range with blocked, unrepaired R9 skipped" >&2; exit 1; fi
 FR=$(c q "repair of R9 and Mx" "Review-Fix-Of: $R9
 Review-Fix-Of: $Mx")
@@ -202,14 +202,15 @@ PY
 export GITHUB_ENV=$T/env GITHUB_OUTPUT=$T/out; : > "$GITHUB_ENV"; : > "$GITHUB_OUTPUT"
 out=$(cd "$T/candidate" && PATH=$T/bin:$PATH GH_TOKEN=x REPO=o/r bash -e "$T/range.sh" 2>&1)
 grep -q "^dev review: covers from ${X:0:12}" <<<"$out" || { echo "range: $out" >&2; exit 1; }
-grep -qx "review-range: $M $F" <<<"$out"
+grep -qx "review-range: $X $F" <<<"$out"
 grep -qx 'kind=tests-only-fix' "$GITHUB_OUTPUT"
 (cd "$T/candidate" && set -a && . "$GITHUB_ENV" && set +a && RANGE_KIND=tests-only-fix bash -e "$T/attest.sh" >/dev/null)
-test "$(jq -r .base "$T/attest/review-attestation.json")" = "$M"   # the diffed base (past the clean main merge)
+test "$(jq -r .base "$T/attest/review-attestation.json")" = "$X"   # the cover base …
+test "$(jq -r .mainside "$T/attest/review-attestation.json")" = "$H"   # … and main's side, not reviewed here
 test "$(jq -r .kind "$T/attest/review-attestation.json")" = tests-only-fix
 git -C "$T/candidate" checkout -q --detach origin/n2; : > "$GITHUB_ENV"; : > "$GITHUB_OUTPUT"
 (cd "$T/candidate" && PATH=$T/bin:$PATH GH_TOKEN=x REPO=o/r bash -e "$T/range.sh" >/dev/null 2>&1)
-grep -qx 'kind=review' "$GITHUB_OUTPUT"; grep -qx "REVIEW_BASE=$M" "$GITHUB_ENV"
+grep -qx 'kind=review' "$GITHUB_OUTPUT"; grep -qx "REVIEW_BASE=$X" "$GITHUB_ENV"
 echo 'review.yml: dev range from the last completed dev review; fix-only head is a tests-only-fix round (reviewer skipped)'
 
 DEFAULT_ATT=   # from here on an attestation is only where a run passes one (proof is under test)

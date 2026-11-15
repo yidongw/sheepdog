@@ -1963,7 +1963,11 @@ Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). You
   for tsha in $(git -C "$SRC" rev-list origin/$MAIN.."origin/$DEV" | head -60); do
     grep -qx "review $tsha" <<<"$done_titles" || continue
     : > "$STATE/train.kind"
-    (cd "$TRUSTED" && REVIEW_KIND_OUT="$STATE/train.kind" bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" >/dev/null 2>&1) || continue
+    # covered from the main commit it contains (review contract (b)/(c)): dev reviews each commit once, so a passing review
+    # of tsha does not vouch for a blocked commit below it — that one lands only with its Review-Fix-Of: repair
+    tanc=$(git -C "$SRC" merge-base "origin/$MAIN" "$tsha" 2>/dev/null) || continue
+    : > "$STATE/train.fixes"
+    (cd "$TRUSTED" && REVIEW_KIND_OUT="$STATE/train.kind" REVIEW_FIXES_OUT="$STATE/train.fixes" bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" "$tanc" >/dev/null 2>&1) || continue
     # a tests-only approval never lands review machinery, by fast-forward or Train-Merge (review of dev a171d3396 #1/#2)
     if [ "$(cat "$STATE/train.kind" 2>/dev/null)" != review ]; then
       tmfiles=$(landing_machinery_files "$SRC" "origin/$MAIN" "$tsha")
@@ -2013,6 +2017,13 @@ Train-Merge: $tsha" >/dev/null 2>&1) \
       fi
       git -C "$SRC" worktree remove --force "$WORK" >/dev/null 2>&1 || true
       break
+    fi
+    # a fast-forward to a head whose chain passes through tests-only fix rounds main has not re-checked, without a
+    # re-check trailer of its own: an older candidate (the fix head itself) lands first (merge-branch.sh refuses this one)
+    tmsg=$(git -C "$SRC" show -s --format=%B "$tsha")   # buffered: grep -q must not SIGPIPE git under pipefail
+    if [ -s "$STATE/train.fixes" ] && ! grep -qE '^(Review-Fix-Of: [0-9a-f]{40}|Hotfix: [^[:space:]]|Train-Merge: [0-9a-f]{40})' <<<"$tmsg"; then
+      [ -e "$STATE/sent/$tsha.train-fixfirst" ] || { log "train: $DEV@${tsha:0:9} carries tests-only fix round(s) $(tr '\n' ' ' < "$STATE/train.fixes")— the fix lands first"; touch "$STATE/sent/$tsha.train-fixfirst"; }
+      continue
     fi
     if out=$(cd "$TRUSTED" && bash "$CI_SCRIPTS/merge-branch.sh" "$DEV" "$tsha" 2>&1); then
       merged_one=1; log "MERGED $DEV@${tsha:0:9} (train; $DEV head $(git -C "$SRC" rev-parse --short "origin/$DEV")): $out"
@@ -2095,6 +2106,14 @@ $gaps}"
         touch "$STATE/sent/$fh.machinery"   # the LOG marker only; the notice below is retried every run until notify's receipts say delivered
       fi
       notify_threads "$fs" "machinery-${fh:0:9}" "$(or_supervisor "$(range_threads "$fh")")" "[review-dispatch] the review fix ${fh:0:9} on $fref (fix of ${fs:0:9}) changes review machinery: $(tr '\n' ' ' <<<"$mfiles"). A devfix lands on its trusted tests alone, and the next $MAIN run would already execute that change, so it is NOT landed. Push the repair to $DEV as a regular commit (fully reviewed) or as one Hotfix: commit on $MAIN (re-checked), with the same Review-Fix-Of: ${fs} trailer; then delete $fref."
+      continue
+    fi
+    # S's own review covered only what came after the review before it (dev reviews each commit once, whatever that
+    # review's verdict): S + its fix land only when the chain below S is covered too — a blocked commit under S has its
+    # own repair first (review-covered.sh; a repository on its own scripts/ci/ copy without it keeps the old rule)
+    if [ -f "$CI_SCRIPTS/review-covered.sh" ] \
+       && ! (cd "$TRUSTED" && bash "$CI_SCRIPTS/review-covered.sh" "$fs" "$(git -C "$SRC" merge-base "origin/$MAIN" "$fh")" "$fh" "$REPO" >/dev/null 2>&1); then
+      [ -e "$STATE/sent/$fh.devfix-uncovered" ] || { log "devfix $fref ${fh:0:9}: the commits below ${fs:0:9} are not covered (a blocked review there without its repair, or missing proof) — not landed yet"; touch "$STATE/sent/$fh.devfix-uncovered"; }
       continue
     fi
     msha=$(git -C "$SRC" rev-parse origin/$MAIN); landed=""

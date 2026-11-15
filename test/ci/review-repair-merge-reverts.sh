@@ -73,11 +73,12 @@ for mainline in 1 2; do
   run 3 "review $E" success failure "$C" '' blocked
   run 4 "review $F" success skipped "$E" tests-only-fix
   repair_state 0 "$E" "$F"
-  check absent bash "$CI/dev-review-base.sh" --only-fixes "$E" "$F"
-  check absent RP "$F" o/r
+  # dev reviews each commit once (owner 11-15): F repairs E — a tests-only round — and the next range starts at E; the
+  # removed repair of C is caught by approval: C is no link of F's coverage chain without an effective repair
+  check bash "$CI/dev-review-base.sh" --only-fixes "$E" "$F"
   check absent RP "$F" o/r "$P"
   cover=$(bash "$CI/dev-review-base.sh" "$F" 2>"$T/base.err")
-  [ "$cover" = "$P" ] || { echo 'FAIL: full review excludes C' >&2; bad=1; }
+  [ "$cover" = "$E" ] || { echo "FAIL: F's range does not start at the completed review of E (got $cover)" >&2; bad=1; }
   review_api() { curl -fsSL "https://api.github.com/repos/$REPO/$1"; }
   . "$CI/review-runs.sh"; . "$CI/review-coverage.sh"
   check absent review_link 1 "$C" "$P" "$F" 0
@@ -90,30 +91,13 @@ for mainline in 1 2; do
   run 5 "review $G" success skipped "$E" tests-only-fix
   check RP "$G" o/r "$P"
 
-  # Or the automatically widened full review can recover, with main pinned
-  # at P. Cover both a passing full review and a blocked one repaired later.
-  for verdict in success failure; do
-    g checkout -q --detach "$F"
-    reset
-    run 1 "review $C" success failure "$P" '' blocked
-    run 3 "review $E" success failure "$C" '' blocked
-    run 6 "review $F" success "$verdict" "$cover" review "$([ "$verdict" = failure ] && echo blocked)"
-    if [ "$verdict" = failure ]; then
-      H=$(c 'repair full review' "Review-Fix-Of: $F" followup)
-      check bash "$CI/dev-review-base.sh" --only-fixes "$F" "$H"
-      run 7 "review $H" success skipped "$F" tests-only-fix
-      check RP "$H" o/r "$P"
-    else
-      printf 'review-range: %s %s\n' "$cover" "$F" > "$FX/log-1006.txt"
-      check RP "$F" o/r "$P"
-    fi
-    J=$(commit_file 'next blocked review' broken next)
-    run 8 "review $J" success failure "$F" '' blocked
-    K=$(commit_file 'repair next review' fixed next "Review-Fix-Of: $J")
-    check bash "$CI/dev-review-base.sh" --only-fixes "$J" "$K"
-    run 9 "review $K" success skipped "$J" tests-only-fix
-    check RP "$K" o/r "$P"
-  done
-  echo "exercised mainline $mainline: removed trailer repair, both gates, dispatcher, fresh repair and full-review recovery"
+  # and later rounds keep working above the new repair
+  J=$(commit_file 'next blocked review' broken next)
+  run 8 "review $J" success failure "$G" '' blocked
+  K=$(commit_file 'repair next review' fixed next "Review-Fix-Of: $J")
+  check bash "$CI/dev-review-base.sh" --only-fixes "$J" "$K"
+  run 9 "review $K" success skipped "$J" tests-only-fix
+  check RP "$K" o/r "$P"   # through the tests-only round G (a verified link)
+  echo "exercised mainline $mainline: removed trailer repair, both gates, dispatcher, fresh repair"
 done
 [ "$bad" = 0 ] || fail 'merge-reverted trailer repair still eligible'

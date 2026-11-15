@@ -43,7 +43,7 @@ printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "$RUNNER_TEMP/args"\nwhile [
 chmod +x "$T/bin/node"
 step() { # step <key>: the step's run text, in its working directory, with the env review.yml gives it
   local wd; wd=$(cat "$W/$1.wd"); [ -n "$wd" ] && wd=$WS/$wd || wd=$WS
-  (cd "$wd" && PATH="$T/bin:$PATH" RUNNER_TEMP=$T/rt REVIEW_BASE=$BASE GH_TOKEN=x REPO=o/r REVIEW_DEFAULT_BRANCH=main \
+  (cd "$wd" && PATH="$T/bin:$PATH" RUNNER_TEMP=$T/rt REVIEW_BASE=$BASE REVIEW_DIFF_BASE=$BASE GH_TOKEN=x REPO=o/r REVIEW_DEFAULT_BRANCH=main \
     OPEN_FINDINGS=$OPEN REVIEWER_ENV_FILE= bash -e -c "$(cat "$W/$1.sh")" 2>&1)
 }
 OPEN=$T/state/open-findings.log

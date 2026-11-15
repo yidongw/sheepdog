@@ -233,9 +233,12 @@ jobs:
           node-version: 24 # the reviewer runs as TypeScript with node's type stripping: no dependencies
       # The reviewed range (docs/contract.md):
       #  (a) default branch: everything since the last completed default-branch review (hotfix-review-base.sh).
-      #  (b) dev: everything since the last completed dev review; a range of only Review-Fix-Of: repairs of blocked
+      #  (b) dev: each commit once — everything since the last COMPLETED dev review of an ancestor (passed, blocked or a
+      #      tests-only round), minus what a main→dev merge brought (main's: the diff starts at a virtual merge of the
+      #      cover base with that main side, recorded as "mainside"); a range of only Review-Fix-Of: repairs of blocked
       #      reviews is a TESTS-ONLY FIX round (kind tests-only-fix): the blocking step below is skipped, never a pass.
-      #  `review-range: <base> <head>` is read by the dispatcher to attribute findings per commit.
+      #  `review-range: <base> <head>` (the attested, published base) is read by the dispatcher; REVIEW_DIFF_BASE is
+      #  what the reviewer, the pin step and the ledger diff against (a local, never-published commit on dev).
       - name: Reviewed range
         id: range
         working-directory: candidate
@@ -249,22 +252,24 @@ jobs:
             msg=$(git show -s --format=%B HEAD)
             grep -qE '^(Hotfix: [^[:space:]]|Train-Merge: [0-9a-f]{40}|Review-Fix-Of: [0-9a-f]{40})' <<<"$msg" || { echo "default-branch head without a Hotfix: / Train-Merge: / Review-Fix-Of: trailer"; exit 1; }
             base=$(bash "$S/hotfix-review-base.sh" HEAD)
-            gate_base=$base
+            gate_base=$base; diff_base=$base; mainside=""
           elif [ "$HEAD_BRANCH" = "$DEV_BRANCH" ]; then
             cover=$(bash "$S/dev-review-base.sh" HEAD)
-            echo "dev review: covers from ${cover:0:12} (the last completed dev review that passed or was repaired; else $MAIN_BRANCH)"
+            echo "dev review: covers from ${cover:0:12} (the last completed dev review of an ancestor, any verdict; else $MAIN_BRANCH)"
             if bash "$S/dev-review-base.sh" --only-fixes "$cover" HEAD; then kind=tests-only-fix; fi
-            # Clean merges can shorten the code diff; their new commits still need all commit gates.
-            gate_base=$cover
-            base=$(bash "$S/dev-review-base.sh" --diff "$cover" HEAD)
+            # main's commits merged into dev are main's: not in the diff; the commit gates still see every new commit
+            gate_base=$cover; base=$cover
+            mainside=$(bash "$S/dev-review-base.sh" --mainside "$cover" HEAD)
+            diff_base=$(bash "$S/dev-review-base.sh" --diff "$cover" HEAD)
+            [ -z "$mainside" ] || echo "dev review: main's side ${mainside:0:12} (merged into dev) is not part of this range; diffing against ${diff_base:0:12}"
           else
             base=$(git merge-base "origin/$MAIN_BRANCH" HEAD)
-            gate_base=$base
+            gate_base=$base; diff_base=$base; mainside=""
           fi
           echo "review-range: $base $(git rev-parse HEAD)"
           echo "review-kind: $kind"
-          git log --oneline -n 50 "$base..HEAD"
-          { echo "REVIEW_BASE=$base"; echo "GATE_BASE=$gate_base"; echo "REVIEW_MAIN=$main"; } >> "$GITHUB_ENV"
+          git log --oneline --no-merges -n 50 "$diff_base..HEAD"
+          { echo "REVIEW_BASE=$base"; echo "REVIEW_DIFF_BASE=$diff_base"; echo "REVIEW_MAINSIDE=$mainside"; echo "GATE_BASE=$gate_base"; echo "REVIEW_MAIN=$main"; } >> "$GITHUB_ENV"
           echo "kind=$kind" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -304,8 +309,8 @@ jobs:
           print(" ".join(sorted({j["uses"][len(p):] for j in jobs.values() if isinstance(j, dict) and isinstance(j.get("uses"), str) and j["uses"].startswith(p)})))' \
               "$RUNNER_TEMP/caller.yml" "$SHEEPDOG_REPO" || echo error
           }
-          old=$(pins_at "$REVIEW_BASE"); new=$(pins_at HEAD)
-          if [ "$old" = error ] || [ "$new" = error ]; then echo "::error::the caller workflow does not parse at ${REVIEW_BASE:0:12} or HEAD"; exit 1; fi
+          old=$(pins_at "$REVIEW_DIFF_BASE"); new=$(pins_at HEAD)
+          if [ "$old" = error ] || [ "$new" = error ]; then echo "::error::the caller workflow does not parse at ${REVIEW_DIFF_BASE:0:12} or HEAD"; exit 1; fi
           if [ "$old" = "$new" ]; then echo "no sheepdog pin change in this range (${old:0:12})"; exit 0; fi
           if [ "$old" = none ] || [ -z "$old" ]; then echo "the range adopts sheepdog (no pin at its base): pinned ${new:0:12}"; exit 0; fi
           # Fail closed: an existing pin replaced by anything but exactly one full sha (a second pin, a tag or branch, its
@@ -338,8 +343,8 @@ jobs:
         working-directory: candidate
         run: |
           mkdir -p ../attest
-          jq -nc --arg head "$(git rev-parse HEAD)" --arg base "$REVIEW_BASE" --arg kind "$KIND" --arg main "$REVIEW_MAIN" \
-            '{head: $head, base: $base, kind: $kind, main: $main}' > ../attest/review-attestation.json
+          jq -nc --arg head "$(git rev-parse HEAD)" --arg base "$REVIEW_BASE" --arg kind "$KIND" --arg main "$REVIEW_MAIN" --arg ms "${REVIEW_MAINSIDE:-}" \
+            '{head: $head, base: $base, kind: $kind, main: $main} + (if $ms == "" then {} else {mainside: $ms} end)' > ../attest/review-attestation.json
           cat ../attest/review-attestation.json
         env:
           KIND: ${{ steps.range.outputs.kind }}
@@ -348,7 +353,7 @@ jobs:
       - name: Previous findings (review ledger)
         if: steps.range.outputs.kind == 'review'
         working-directory: candidate
-        run: bash ../.sheepdog/scripts/ci/prior-findings.sh "$REVIEW_BASE" HEAD > "$RUNNER_TEMP/prior-findings.txt" || true
+        run: bash ../.sheepdog/scripts/ci/prior-findings.sh "$REVIEW_DIFF_BASE" HEAD > "$RUNNER_TEMP/prior-findings.txt" || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -375,7 +380,7 @@ jobs:
           if [ -n "${PIN_TO:-}" ]; then
             pin=(--pin-repo "$SHEEPDOG_REPO" --pin-from "$PIN_FROM" --pin-to "$PIN_TO" --pin-diff "$RUNNER_TEMP/sheepdog-pin/sheepdog-pin.diff" --pin-log "$RUNNER_TEMP/sheepdog-pin/sheepdog-pin.log")
           fi
-          node ../.sheepdog/reviewer/src/review-gate.ts --base "$REVIEW_BASE" --head HEAD --prior "$RUNNER_TEMP/prior-findings.txt" --known-open "$RUNNER_TEMP/known-open.txt" "${pin[@]}"
+          node ../.sheepdog/reviewer/src/review-gate.ts --base "$REVIEW_DIFF_BASE" --head HEAD --prior "$RUNNER_TEMP/prior-findings.txt" --known-open "$RUNNER_TEMP/known-open.txt" "${pin[@]}"
         env:
           REVIEWER_ENV_FILE: ${{ inputs.reviewer-env-file }}
           SHEEPDOG_REPO: ${{ inputs.sheepdog-repository }}

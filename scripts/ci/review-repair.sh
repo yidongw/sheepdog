@@ -7,9 +7,9 @@
 reverted() { # <c> <head> [depth] → 0 when c is reverted or a later merge revert makes its survival unknown
   local x undos k=${3:-0}
   [ "$k" -lt 64 ] || return 0
-  # A merge revert names the merge, not the repair it removes. As with
-  # supersession's review_stands, do not try to prove retained contributions
-  # or restorations: ANY merge revert after c requires a new repair/full review.
+  # A merge revert names the merge, not the repair it removes. Do not try to
+  # prove retained contributions or restorations (supervisor 11-14): ANY merge
+  # revert after c requires a new repair.
   # Check before recursion, so an uncertain undo can never restore a repair
   # by flipping the recursive answer. Git errors also withhold the privilege.
   undos=$(git log --format=%H -i -E --grep='^This reverts commit [0-9a-f]{7,40}, reversing' "$1..$2" 2>/dev/null) || return 0

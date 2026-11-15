@@ -28,7 +28,7 @@ for ((i=1; i<=3000; i++)); do
 done > "$T/history"
 g fast-import --quiet < "$T/history"
 head=$(g rev-parse long)
-# review contract: the merge is moved past only when its main side has a completed, attested main review (fake API)
+# fake API (the diff base needs none: approval checks main's side)
 mkdir -p "$T/bin" "$T/api"
 printf '{"head":"%s","base":"%s","kind":"review"}\n' "$main" "$root" > "$T/api/att.json"
 python3 -c 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1],"w"); z.write(sys.argv[2],"review-attestation.json"); z.close()' "$T/api/att.zip" "$T/api/att.json"
@@ -46,8 +46,10 @@ esac
 CURL
 chmod +x "$T/bin/curl"
 actual=$(cd "$T/src" && PATH=$T/bin:$PATH GH_TOKEN=x REPO=o/r bash "$BASE_SH" --diff "$base" "$head")
-if [ "$actual" != "$merge" ]; then
-  echo 'FAIL: the diff base did not move past a clean main merge (git rev-list / head SIGPIPE)' >&2
+# owner 11-15: main's side is never in the dev diff — the (virtual) diff base carries it; the long history is dev's
+if [ -n "$(g diff --name-only "$actual" "$head")" ] || [ "$(g rev-list --no-merges --count "$actual..$head")" != 3000 ] \
+   || ! g merge-base --is-ancestor "$main" "$actual"; then
+  echo 'FAIL: the diff base did not exclude the clean main merge (git rev-list / head SIGPIPE)' >&2
   exit 1
 fi
-echo 'long review range: diff base moves past the clean main merge under pipefail'
+echo 'long review range: diff base excludes the clean main merge under pipefail'

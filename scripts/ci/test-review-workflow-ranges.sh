@@ -55,7 +55,9 @@ case "${1:-}" in
       g merge -q --no-ff -m "$msg" "$H"; M=$(git rev-parse HEAD)
       B=$(c next "$valid" devfile)
       range_step dev
-      [ "$REVIEW_BASE" = "$M" ] || fail 'clean merge no longer shortens the code diff'
+      [ "$REVIEW_BASE" = "$A" ] || fail 'the attested base is not the cover base'
+      [ "$(git diff --name-only "$REVIEW_DIFF_BASE" HEAD)" = devfile ] || fail "main's side of a clean merge is in the code diff"
+      [ "$REVIEW_MAINSIDE" = "$H" ] || fail 'the main side is not exported for the attestation'
       status=0; gates || status=$?
       if [ "$merge_valid" = no ]; then
         [ "$status" = 3 ] || fail "unchecked clean merge passed workflow gates (exit $status)"

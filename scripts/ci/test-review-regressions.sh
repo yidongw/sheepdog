@@ -42,11 +42,15 @@ regression() {
       g checkout -q --detach "$dev_head"; g merge -q --no-ff -m merge "$main_head"
       merge_head=$(git rev-parse HEAD); candidate=$(c next "" devfile)
       reset; run 1 "review $dev_head" success success "$p"
-      [ "$(dbase --diff "$dev_head" "$candidate")" = "$dev_head" ] || fail "#4 diff advanced over a merge with missing main-side proof"
+      # dev reviews each commit once (owner 11-15): main's side of a main→dev merge is never in the dev diff …
+      v=$(dbase --diff "$dev_head" "$candidate")
+      [ "$(git diff --name-only "$v" "$candidate")" = devfile ] || fail "#4 main's side is in the dev diff"
+      [ "$(dbase --mainside "$dev_head" "$candidate")" = "$main_head" ] || fail "#4 the main side is not reported"
+      # … and approval needs main's own proof of it (the attested mainside)
+      MAINSIDE=$main_head run 3 "review $candidate" success success "$dev_head"
+      if RP "$candidate" o/r "$p"; then fail "#4 a main side without main-side proof was approved"; fi
       run 2 "recheck $main_head" success success "$p"
-      [ "$(dbase --diff "$dev_head" "$candidate")" = "$merge_head" ] || fail "#4 diff did not advance over a proven clean merge"
-      run 3 "review $candidate" success success "$merge_head"
-      RP "$candidate" o/r "$p" || fail "#4 clean-merge diff base not usable by consumer"
+      RP "$candidate" o/r "$p" || fail "#4 a proven main side not usable by consumer"
       ;;
     *) fail "unsupported finding $finding" ;;
   esac

@@ -11,6 +11,9 @@
 # With [deployed-sha] (the controller passes prod's current sha) it also requires that the
 # reviewed range covers everything new to prod: the run's attestation base must be an ancestor
 # of (or equal to) deployed-sha, so no commit pushed to main outside the review rides along.
+# Landing a dev sha on main (merge-branch.sh, the dispatcher's merge train) passes main's sha (or the main
+# commit the dev sha contains) as [deployed-sha]: dev reviews each commit once, so a head's own review
+# does not vouch for an earlier blocked commit below it — only the chain does, once its repair is on the head.
 # Needs a local clone in the current directory for the ancestry check.
 set -euo pipefail
 sha="${1:?usage: review-passed.sh <full-sha> [owner/repo]}"
@@ -24,13 +27,13 @@ list_runs() { review_runs "$1"; }
 ids=$(list_runs success | jq -r --arg a "review $sha" --arg b "recheck $sha" 'select(.display_title == $a or .display_title == $b) | .id')
 # A workflow whose jobs were all skipped (CI failed, or not a push) still concludes
 # "success": require the review job itself to have run its blocking step successfully.
-attest_of_kind() { # attest_of_kind <run id> → "<head> <base> <main at review time, or -> <kind>" (kind "review" when the artifact has none); 1 when no usable artifact
+attest_of_kind() { # attest_of_kind <run id> → "<head> <base> <main at review time, or -> <mainside, or -> <kind>" (kind "review" when the artifact has none); 1 when no usable artifact
   local art tmpd
   # sed prints the first result while draining the producer (head can cause SIGPIPE under pipefail).
   art=$(gh api "repos/$repo/actions/runs/$1/artifacts" -q '.artifacts[] | select(.name == "review-attestation" and .expired != true) | .id' | sed -n '1p')
   [ -n "$art" ] || return 1
   tmpd=$(mktemp -d); gh api "repos/$repo/actions/artifacts/$art/zip" > "$tmpd/a.zip" && (cd "$tmpd" && unzip -q a.zip)
-  jq -r '"\(.head) \(.base) \(.main // "-") \(.kind // "review")"' "$tmpd/review-attestation.json"; rm -rf "$tmpd"
+  jq -r '"\(.head) \(.base) \(.main // "-") \(.mainside // "-") \(.kind // "review")"' "$tmpd/review-attestation.json"; rm -rf "$tmpd"
 }
 # Coverage by a chain of completed rounds (dev reviews cover only what no completed review covered, owner 11-12):
 # <base> is covered when it is an ancestor of (or equal to) <deployed>; or a completed review of <base> itself
@@ -41,6 +44,7 @@ attest_of_kind() { # attest_of_kind <run id> → "<head> <base> <main at review 
 # parents) and BOTH parents are covered (a main hotfix merged into dev is covered only by its own review chain, never by
 # the dev side's). Every link is a trusted run of this workflow; nothing is taken from the candidate. Fail closed past
 # 40 links.
+REVIEW_LINK_FIXES=1 REVIEW_REPO=$repo   # review-coverage.sh: verified tests-only rounds are links (reported in review_fix_links)
 . "$(dirname "${BASH_SOURCE[0]}")/review-coverage.sh"
 covered() { review_covered "$1" "$2" "$sha" "${3:-0}"; }
 # Contract (CLAUDE.md "Shipping"): a run passes when its trusted `tests` job passed AND either
@@ -79,14 +83,13 @@ for id in $ids; do
     *) continue ;;
   esac
   if [ -n "${3:-}" ]; then
-    art=$(gh api "repos/$repo/actions/runs/$id/artifacts" -q '.artifacts[] | select(.name == "review-attestation" and .expired != true) | .id' | sed -n '1p')
+    # (the attestation read above, attest_of_kind: one download per run)
     # Runs made before the attestation step existed (review.yml before this change) carry no
     # artifact, so their reviewed range cannot be proven: never auto-deployable. That is a
     # one-time bootstrap: the commit that introduces the attestation is deployed by hand
     # (DEPLOY_PULL_SHA on prod, under supervision); every later review carries the artifact.
-    [ -n "$art" ] || { echo "run $id predates review attestations: not auto-deployable (deploy by hand once)" >&2; continue; }
-    tmpd=$(mktemp -d); gh api "repos/$repo/actions/artifacts/$art/zip" > "$tmpd/a.zip" && (cd "$tmpd" && unzip -q a.zip)
-    base=$(jq -r .base "$tmpd/review-attestation.json"); head=$(jq -r .head "$tmpd/review-attestation.json"); rm -rf "$tmpd"
+    [ -n "$hb" ] || { echo "run $id predates review attestations: not auto-deployable (deploy by hand once)" >&2; continue; }
+    read -r head base _ mside _ <<<"$hb"; [ "$mside" != - ] || mside=""
     [ "$head" = "$sha" ] || { echo "attestation head mismatch" >&2; continue; }
     # REVIEW_MERGE_INTO=1 (autodeploy, train merge): $3 is the merge's main-side parent, which
     # need not be an ancestor of sha; the range check below still applies.
@@ -100,8 +103,19 @@ for id in $ids; do
       echo "run $id: reviewed range ${base:0:12}..${sha:0:12} does not cover prod ${3:0:12}" >&2
       continue
     fi
+    # A dev range that brought main commits in did not review them ("mainside", dev-review-base.sh --mainside): main's
+    # own chain must cover that main side (its re-checks, or prod already runs it).
+    if [ -n "$mside" ]; then
+      if ! [[ "$mside" =~ ^[0-9a-f]{40}$ ]] || ! git merge-base --is-ancestor "$mside" "$sha" 2>/dev/null || ! covered "$mside" "$3"; then
+        echo "run $id: the main side ${mside:0:12} that ${base:0:12}..${sha:0:12} brought in is not covered from ${3:0:12}" >&2
+        continue
+      fi
+    fi
   fi
   [ -z "${REVIEW_KIND_OUT:-}" ] || { [ "$st" = skipped ] && echo tests-only-fix || echo review; } > "$REVIEW_KIND_OUT"
+  # REVIEW_FIXES_OUT=<file>: the tests-only rounds the coverage chain went through (no dev review read them): merge-branch.sh
+  # lands such a chain only as a head that main re-checks
+  [ -z "${REVIEW_FIXES_OUT:-}" ] || printf '%s' "$review_fix_links" | tr ' ' '\n' | sed '/^$/d' > "$REVIEW_FIXES_OUT"
   echo "trusted tests + review passed for ${sha:0:12} (run $id)"; exit 0
 done
 echo "no successful trusted review for ${sha:0:12}" >&2

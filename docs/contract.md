@@ -33,28 +33,28 @@ what gets deployed. The workflow is [.github/workflows/review.yml](../.github/wo
   `hotfix-review-base.sh HEAD..HEAD`: merge resolutions and the tests-only dev fixes a merge brought included. One main
   reviewer at a time (job-level concurrency): the running one finishes, only the newest waits, and a superseded waiting
   one is cancelled — its commits ride the next range.
-- **(b) dev is reviewed once per commit.** A dev review covers everything since the last completed dev review that
-  passed, or that blocked and is repaired in the range (`dev-review-base.sh`). A range of only `Review-Fix-Of:` repairs
-  of blocked reviews is a **tests-only fix round**: the blocking step is skipped (never reported as a pass), the
-  attestation says `kind: tests-only-fix`, and `review-passed.sh` re-checks from the trusted runs that every commit
-  really repairs a completed, blocked review before it lets the fix land on green tests. A blocked review below the
-  range needs no repair of its own when it is superseded: a later completed review of a descendant re-reviewed its whole
-  range (its range base is at or below the blocked one's) and passed or is repaired — and no revert at all (git revert's
-  "This reverts commit …" line, merge reverts included, or a `Revert "` subject) lies between that review's head and the
-  candidate: after any revert the blocked range is reviewed in full again (conservative; no content proofs of what a
-  revert, undo or restoration left standing — supervisor 11-14). Cover-base selection checks all dev ancestors for
-  blocks that are neither repaired nor superseded before choosing a newer review as its base. This widens the next
-  full review to include those blocked ranges; a passing or repaired full review then restores tests-only eligibility
-  while the main boundary stays unchanged. A quoted `Revert "` title in a commit body is not a revert subject.
-  Direct trailer repairs also lose eligibility after any later merge revert (Git's `This reverts commit …, reversing`
-  marker), which names the merge rather than its constituent repairs. This conservative rule applies to range bases,
-  coverage links and dispatcher completion, even after the merge revert is undone; a new repair or full review is
-  required. Direct non-merge revert chains still recognize a reverted revert as restoring the repair.
-  Main then reviews the fix under (a).
-- **(c) Coverage is a chain of completed reviews.** Each review uploads an attestation `{head, base, kind, main}`.
-  `review-passed.sh <sha> [repo] [deployed sha]` approves a sha only when its trusted tests passed, its review step
-  passed (or it is a valid tests-only round), and — given the deployed sha — the chain of attested ranges reaches from
-  the deployed sha to `<sha>` with no gap; across a clean merge both parents must be covered.
+- **(b) dev reviews every commit exactly once.** A dev review covers everything since the most recent COMPLETED dev
+  review of an ancestor of the head, whatever its verdict — passed, blocked, or a tests-only fix round
+  (`dev-review-base.sh`); while that ancestor's review is still running, the range step waits for it. A blocked commit
+  is therefore never reviewed again by the next push's review, and a new commit after a blocked one is reviewed alone.
+  Commits that reached dev through a main→dev merge are main's (main re-checks them, (a)): they are in no dev commit
+  list or diff — the reviewer diffs against a virtual (never published) merge of the cover base with the main commit
+  the head contains, and the attestation records that main side as `mainside`. A range of only `Review-Fix-Of:`
+  repairs of blocked reviews (plus clean main merges) is a **tests-only fix round**: the blocking step is skipped
+  (never reported as a pass), the attestation says `kind: tests-only-fix`, and `review-passed.sh` re-checks from the
+  trusted runs that every commit really repairs a completed, blocked review before it lets the fix land on green tests.
+  Repairs whose landing would change review machinery get a full review of those repair commits only (rule (h)).
+  Main then reviews the fix under (a). Because no later dev review vouches for a blocked commit, approval does:
+  landing a dev sha (`merge-branch.sh`, the merge train, a devfix landing) needs the coverage chain (c) from main to
+  it, and a blocked review is a link of that chain only with an effective repair of it on the head.
+- **(c) Coverage is a chain of completed reviews.** Each review uploads an attestation `{head, base, kind, main}`
+  (`mainside` too when a dev range brought main commits in). `review-passed.sh <sha> [repo] [deployed sha]` approves a
+  sha only when its trusted tests passed, its review step passed (or it is a valid tests-only round), and — given the
+  deployed sha (main's sha when landing) — the chain of attested ranges reaches from the deployed sha to `<sha>` with
+  no gap: a link is a review that passed or that blocked and is repaired on `<sha>` (`review-repair.sh`), or a
+  tests-only round whose range re-checks as repairs of blocked reviews (against the main boundary it recorded); a
+  `mainside` must be covered in its own right; across a clean merge both parents must be covered. Main's own range
+  producer never starts at a tests-only round (main re-checks the fix).
 - **(d) Only this run's attestation is uploaded**, also for a blocked review (a repaired blocked round is a link of the
   chain).
 - **(e) Evidence is read only from trusted runs** (`review-runs.sh`): runs of the default branch's
@@ -63,7 +63,8 @@ what gets deployed. The workflow is [.github/workflows/review.yml](../.github/wo
 - **(f) No completed main review yet** → the first range starts at the deployed sha (the tag `deployed`, which each
   repository's deploy job moves after a successful deploy), not at ancient history.
 - **(g) A tests-only fix lands only as a main head that main re-checks** (`merge-branch.sh` refuses any other
-  landing of a tests-only approval), and its approval still holds after main advanced onto it (the attestation records
+  landing of a tests-only approval, and of a reviewed head whose coverage chain passes through a tests-only round main
+  has not re-checked yet — the merge train lands the fix head first), and its approval still holds after main advanced onto it (the attestation records
   the main boundary it was judged against).
 - **(h) A tests-only approval never lands review machinery** (`scripts/ci/review-machinery.sh`: anything under
   `.github/` — the caller workflow and its sheepdog pin, `.github/sheepdog/tests.sh`, `.github/sheepdog.yml` —,

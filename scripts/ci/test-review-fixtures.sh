@@ -54,13 +54,13 @@ chmod +x "$T/bin/gh" "$T/bin/curl"; export PATH=$T/bin:$PATH GH_TOKEN=x REPO=o/r
 
 # fake GitHub fixtures
 RUNS=()
-run() { # run <id> <title> <tests concl> <blocking step concl|-> [<attest base> <kind>] [blocked]
+run() { # run <id> <title> <tests concl> <blocking step concl|-> [<attest base> <kind>] [blocked]   (MAINSIDE=<sha>: attested main side)
   local id=$1 title=$2 tc=$3 st=$4 base=${5:-} kind=${6:-} blk=${7:-} rc=success steps="[]"
   [ "$st" = - ] || steps="[{\"name\":\"Review (blocking; sheepdog's reviewer, this repository's diff)\",\"conclusion\":\"$st\"}]"
   [ "$st" = failure ] && rc=failure
   echo "{\"jobs\":[{\"name\":\"${JOB_PREFIX:-}tests\",\"conclusion\":\"$tc\"},{\"name\":\"${JOB_PREFIX:-}review\",\"id\":$((id + 1000)),\"conclusion\":\"$rc\",\"steps\":$steps}]}" > "$FX/jobs-$id.json"
   [ -n "$blk" ] && printf 'review-range: %s %s\nreview-gate: BLOCKED #1 regression [blocker]: x\n' "${base:-0000000000000000000000000000000000000000}" "${title#* }" > "$FX/log-$((id + 1000)).txt"
-  [ -n "$base" ] && echo "{\"head\":\"${title#* }\",\"base\":\"$base\"${kind:+,\"kind\":\"$kind\"}${kind:+,\"main\":\"$(git rev-parse origin/main)\"}}" > "$FX/attest-$id.json"
+  [ -n "$base" ] && echo "{\"head\":\"${title#* }\",\"base\":\"$base\"${kind:+,\"kind\":\"$kind\"}${kind:+,\"main\":\"$(git rev-parse origin/main)\"}${MAINSIDE:+,\"mainside\":\"$MAINSIDE\"}}" > "$FX/attest-$id.json"
   local concl=success; [ "$tc" = success ] && [ "$rc" = success ] || concl=failure
   [ ! -f "$FX/runs.json" ] || mapfile -t RUNS < <(jq -c '.workflow_runs[]' "$FX/runs.json")
   RUNS=("{\"id\":$id,\"display_title\":\"$title\",\"status\":\"completed\",\"conclusion\":\"$concl\",\"event\":\"workflow_run\",\"head_branch\":\"main\",\"path\":\".github/workflows/review.yml\"}" "${RUNS[@]}")

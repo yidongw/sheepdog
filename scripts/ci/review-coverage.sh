@@ -44,13 +44,53 @@ review_clean_merge() {
   t=$(git merge-tree --write-tree "$1^1" "$1^2" 2>/dev/null) || return 1
   [ "${t%%$'\n'*}" = "$(git rev-parse "$1^{tree}")" ]
 }
+# review_link: the attested range base..<link head> of a trusted run is a link of the coverage chain of <candidate head>.
+#  · a review link: the review passed, or it blocked and an effective Review-Fix-Of: repair of it is on <candidate head>
+#    (review-repair.sh) — for the dev range PRODUCER (dev-review-base.sh sets REVIEW_LINK_PRODUCER=1) any completed
+#    review is a base (its repair may come later: approval waits for it, the range does not), so no dev commit is
+#    reviewed twice.
+#  · a tests-only fix round (kind tests-only-fix, blocking step skipped, review job succeeded): a base for the dev
+#    producer; a link for the APPROVAL consumers that opt in (review-passed.sh, review-covered.sh: REVIEW_LINK_FIXES=1)
+#    only when its range re-checks as repairs of blocked reviews against the main boundary it recorded
+#    (dev-review-base.sh --only-fixes). Its head is then added to review_fix_links: those fixes were reviewed by no dev
+#    review, so merge-branch.sh lands a chain with them only as a head that main re-checks (rule (g)). Main's own range
+#    producer (hotfix-review-base.sh) sets neither: a tests-only round is never a main base — main re-checks the fix.
+#  · the attestation's "mainside" (a dev range that brought main commits in and did not review them): that main commit
+#    must be covered in its own right (main's reviews, or below the anchor).
+review_fix_links=""
+review_fix_round() { # <run id> -> 0 when it is a completed tests-only fix round: review job succeeded, blocking step skipped
+  local jobs
+  jobs=$(review_api "actions/runs/$1/jobs") || return 1
+  jq -e '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] | select(.conclusion == "success")
+    | [.steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] == "skipped"' <<<"$jobs" >/dev/null 2>&1
+}
 review_link() { # <run id> <link head> <anchor> <candidate head> <depth>
-  local att v
+  local att v m k am
   att=$(review_attestation "$1" "$2") || return 1
-  [ "$(jq -r .kind <<<"$att")" = review ] || return 1
-  v=$(review_verdict "$1") || return 1
-  [ "$v" = pass ] || repaired "$2" "$4" || return 1
-  review_covered "$(jq -r .base <<<"$att")" "$3" "$4" "$5"
+  k=$(jq -r .kind <<<"$att")
+  case "$k" in
+    review)
+      v=$(review_verdict "$1") || return 1
+      [ "$v" = pass ] || [ "${REVIEW_LINK_PRODUCER:-0}" = 1 ] || repaired "$2" "$4" || return 1 ;;
+    tests-only-fix)
+      review_fix_round "$1" || return 1
+      if [ "${REVIEW_LINK_PRODUCER:-0}" != 1 ]; then
+        [ "${REVIEW_LINK_FIXES:-0}" = 1 ] || return 1
+        am=$(jq -r '.main // ""' <<<"$att")
+        [[ "$am" =~ ^[0-9a-f]{40}$ ]] && git rev-parse -q --verify "$am^{commit}" >/dev/null 2>&1 || return 1
+        (REPO=${REVIEW_REPO:-${REPO:-}} DEV_REVIEW_MAIN_REF=$am \
+          bash "$(dirname "${BASH_SOURCE[0]}")/dev-review-base.sh" --only-fixes "$(jq -r .base <<<"$att")" "$2" >/dev/null 2>&1) || return 1
+      fi ;;
+    *) return 1 ;;
+  esac
+  m=$(jq -r '.mainside // ""' <<<"$att")
+  if [ -n "$m" ]; then
+    [[ "$m" =~ ^[0-9a-f]{40}$ ]] && git merge-base --is-ancestor "$m" "$2" 2>/dev/null || return 1
+    review_covered "$m" "$3" "$4" "$(($5 + 1))" || return 1
+  fi
+  review_covered "$(jq -r .base <<<"$att")" "$3" "$4" "$5" || return 1
+  if [ "$k" = tests-only-fix ] && [ "${REVIEW_LINK_PRODUCER:-0}" != 1 ]; then review_fix_links+="$2 "; fi
+  return 0
 }
 review_covered() { # <base> <anchor (deployed or review-time main)> <candidate head> [depth]
   local b=$1 d=$2 h=$3 n=${4:-0} id

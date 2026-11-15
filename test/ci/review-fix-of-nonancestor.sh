@@ -57,9 +57,9 @@ g checkout -q dev; g merge -q --no-ff -m "merge main into dev" -m "$valid" main;
 . "$CI/review-repair.sh"
 if repaired "$S" "$DM"; then fail "repaired(): a non-ancestor Review-Fix-Of: repaired the blocked dev review"; fi
 cover=$(DEV_REVIEW_MAIN_REF=$H2 bash "$CI/dev-review-base.sh" "$DM" 2>"$T/err")
-# Check the coverage obligation, not diagnostic wording: this suite also runs
-# against the older self-review pin, which reports an unrepaired block differently.
-[ "$cover" = "$P" ] || fail "dev cover base: expected the blocked review's base $P, got $cover: $(cat "$T/err")"
+# dev reviews each commit once (owner 11-15): the range starts at S's completed (blocked) review; the obligation to
+# repair S is approval's — S is no coverage link while only the non-ancestor H "repairs" it (below)
+[ "$cover" = "$S" ] || fail "dev cover base: expected the blocked review $S, got $cover: $(cat "$T/err")"
 # review-passed.sh's coverage link: the blocked review of S is no link while only H "repairs" it
 review_api() { curl -fsSL "https://api.github.com/repos/$REPO/$1"; }
 . "$CI/review-runs.sh"; . "$CI/review-coverage.sh"

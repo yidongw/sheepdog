@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory() as temporary:
     for line in (CI / "review-passed.sh").read_text().splitlines():
         if line.strip().startswith('art=$(gh api '):
             cases.append((f"artifact selector {len(cases) + 1}", line, "art", "7"))
-    assert len(cases) == 2, "approval artifact selectors changed; update the fixture"
+    assert len(cases) == 1, "approval artifact selectors changed; update the fixture"
     line = next(line for line in (CI / "prior-findings.sh").read_text().splitlines()
                 if line.strip().startswith('jid=$(api '))
     cases.append(("ledger job selector", line, "jid", "1000"))

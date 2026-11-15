@@ -36,7 +36,7 @@ git init -q -b main "$WS/candidate"; cd "$WS/candidate"; mkdir -p .github/workfl
 caller() { mkdir -p .github/workflows; printf 'name: Review\njobs:\n  sheepdog:\n    uses: yidongw/sheepdog/.github/workflows/review.yml@%s\n' "$1" > .github/workflows/review.yml; g add -A; g commit -qm "pin ${1:0:7}"; git rev-parse HEAD; }
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "$RUNNER_TEMP/args"\n' > "$T/bin/node"; chmod +x "$T/bin/node"
 step() { # step <key> <base>
-  (cd "$WS/candidate" && PATH="$T/bin:$PATH" GITHUB_WORKSPACE=$WS GITHUB_ENV=$T/env RUNNER_TEMP=$T/rt REVIEW_BASE=$2 \
+  (cd "$WS/candidate" && PATH="$T/bin:$PATH" GITHUB_WORKSPACE=$WS GITHUB_ENV=$T/env RUNNER_TEMP=$T/rt REVIEW_BASE=$2 REVIEW_DIFF_BASE=$2 \
     KIND=${KIND:-review} SHEEPDOG_REPO=yidongw/sheepdog SHEEPDOG_REVIEW_WORKFLOW=review.yml REVIEWER_ENV_FILE= bash -e -c "$(cat "$W/$1.sh")" 2>&1)
 }
 run_both() { # run_both <base> → pin step rc in $prc; then the review step with the env the pin step wrote

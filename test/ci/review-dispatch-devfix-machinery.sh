@@ -132,6 +132,9 @@ R=.github/workflows/review.yml
 publish() { (IFS=,; echo "[${RUNS[*]}]") | jq 'reverse' > "$FX/runs.json"; }
 run "review $D1" $R workflow_run main "$D1" completed failure; RD1=$id
 printf '2026-11-13T00:00:00.0000000Z review-range: %s %s\n2026-11-13T00:00:00.0000000Z review-gate: FINDING #1 route=fixer commit=%s — x\n2026-11-13T00:00:00.0000000Z review-gate: BLOCKED #1 regression [should]: d1 drops rows\n2026-11-13T00:00:00.0000000Z evidence: src/d1.ts:1 x\n' "$A" "$D1" "$D1" > "$FX/log-${RD1}2.txt"
+# D1's review attests A..D1 (A is on main): a devfix of D1 is covered below D1 (review-covered.sh)
+echo "{\"artifacts\":[{\"name\":\"review-attestation\",\"id\":$RD1}]}" > "$FX/artifacts-$RD1.json"
+jq -nc --arg h "$D1" --arg b "$A" '{head: $h, base: $b, kind: "review"}' > "$FX/attest-$RD1.json"
 publish
 
 export PATH="$T/bin:$PATH" REPO=o/r SRC=$T/src STATE=$T/state GH_TOKEN=x T3_PROJECT=mcp:p SUPERVISOR_THREAD=mcp:22222222-2222-2222-2222-222222222222 \
@@ -161,6 +164,11 @@ ls "$STATE/sent/$D1.machinery-${FXH:0:9}".* >/dev/null 2>&1 || fail "an undelive
 [ "$(grep -c "${FXH:0:9}: changes review machinery" "$STATE/dispatch.log")" = 1 ] || fail "the machinery devfix was logged again on the retry"
 echo "ok - an undelivered machinery notice is retried on the next run (logged once)"
 fix src/d1.ts; run "review $FXH" $R workflow_run main "$FXH" completed success skipped; publish
+# owner 11-15 (dev reviews each commit once): without proof of what lies below D1, D1 + its fix do not land
+mv "$FX/attest-$RD1.json" "$FX/attest-$RD1.json.off"; dispatch
+[ "$(main_at)" = "$A" ] || fail "a devfix landed without coverage below its blocked base"
+grep -q "devfix devfix/$D1 ${FXH:0:9}: the commits below ${D1:0:9} are not covered" "$STATE/dispatch.log" || fail "no coverage log: $(tail -3 "$STATE/dispatch.log")"
+mv "$FX/attest-$RD1.json.off" "$FX/attest-$RD1.json"
 dispatch
 [ "$(main_at)" = "$FXH" ] || fail "a code-only devfix did not land: $(tail -3 "$STATE/dispatch.log")"
 echo "ok - a code-only devfix still lands on its tests"
@@ -208,3 +216,5 @@ grep -q 'changes review machinery' <<<"$out" || fail "merge-branch.sh: unexpecte
 g checkout -q -B fxc origin/main; c src/ok.ts "Review-Fix-Of: $D1" >/dev/null; g push -q origin fxc
 out=$(bash "$MB/merge-branch.sh" fxc 2>&1) || fail "merge-branch.sh refused a code-only tests-only fix: $out"
 echo "ok - merge-branch.sh: a tests-only approval never lands review machinery; a code-only one still merges"
+# the merge train asks review-passed.sh for coverage from the main commit the candidate contains (owner 11-15)
+grep -q 'review-passed.sh" "$tsha" "$REPO" "$tanc"' "$ROOT/scripts/ci/review-dispatch.sh" || fail "the merge train does not check coverage"

@@ -21,8 +21,10 @@ if ! git merge-base --is-ancestor origin/$MAIN "$sha"; then
   echo "origin/$branch is not a fast-forward of main: rebase it, push, and let CI + review run again" >&2
   exit 1
 fi
-kf=$(mktemp); trap 'rm -f "$kf"' EXIT
-REVIEW_KIND_OUT=$kf REVIEW_DEFAULT_BRANCH="${REVIEW_DEFAULT_BRANCH:-$MAIN}" bash "$here/review-passed.sh" "$sha" "$REPO"
+kf=$(mktemp); ff=$(mktemp); trap 'rm -f "$kf" "$ff"' EXIT
+# Coverage from main (review contract (b)/(c)): dev reviews every commit once, so the approval of <sha> needs the chain of
+# completed reviews from main to <sha> — a blocked commit below it lands only with its Review-Fix-Of: repair.
+REVIEW_KIND_OUT=$kf REVIEW_FIXES_OUT=$ff REVIEW_DEFAULT_BRANCH="${REVIEW_DEFAULT_BRANCH:-$MAIN}" bash "$here/review-passed.sh" "$sha" "$REPO" "$(git rev-parse "origin/$MAIN")"
 # A TESTS-ONLY approval (a fix round the dev reviewer did not read) is not a review: the fix may land only as a main head
 # that review.yml re-checks — one carrying Review-Fix-Of: / Hotfix: / Train-Merge: (the main-review triggers there).
 # Read the full message before matching: grep -q can close a pipe early and make git die of SIGPIPE under pipefail.
@@ -30,6 +32,12 @@ msg=$(git show -s --format=%B "$sha")
 if [ "$(cat "$kf")" != review ] \
    && ! grep -qE '^(Review-Fix-Of: [0-9a-f]{40}|Hotfix: [^[:space:]]|Train-Merge: [0-9a-f]{40})' <<<"$msg"; then
   echo "${sha:0:12} has a tests-only approval and no Review-Fix-Of: / Hotfix: / Train-Merge: trailer: it would land on $MAIN without a main review — not merged" >&2
+  exit 1
+fi
+# … the same for a reviewed head whose coverage chain passes through tests-only rounds below it (dev reviews each commit
+# once, so no dev review read those fixes): land the fix head itself first (main re-checks it), then this one
+if [ -s "$ff" ] && ! grep -qE '^(Review-Fix-Of: [0-9a-f]{40}|Hotfix: [^[:space:]]|Train-Merge: [0-9a-f]{40})' <<<"$msg"; then
+  echo "${sha:0:12} carries the tests-only fix round(s) $(tr '\n' ' ' < "$ff")that main has not re-checked, and no Review-Fix-Of: / Hotfix: / Train-Merge: trailer — land the fix first; not merged" >&2
   exit 1
 fi
 # … and never with review machinery in it (review of dev a171d3396 #1/#2): main's next run would already execute a
