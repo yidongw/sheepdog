@@ -23,6 +23,7 @@ printf '#!/usr/bin/env bash\nexit 1\n' > "$TRUSTED/scripts/ci/review-passed.sh" 
 LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh"; done; }
 declare -F review_list >/dev/null || eval "$(fns review_list)"; eval "$(fns review_first_verdict review_attempt_verdict review_attested_kind review_verdict_load review_blocked_verdict review_log_lines gate_section review_step_ran)"; eval "$(fns review_api review_verdict_list)"   # THE verdict reader the dispatcher's helpers call (review_first_verdict)
+source "${D%/*}/review-runs.sh"
 hotfix_pass_confirmed() { :; }   # the completion gate (review-passed.sh REVIEW_PASSED_MODE=recheck): review-first-verdict.sh / the API budget run test it
 eval "$(fns finding_jobs dev_round_noop dev_merge_only run_verdict dev_verdict_run named_files dev_main_hold review_infra_reason dev_infra infra_alert)"
 for f in review_infra_reason dev_infra infra_alert; do declare -F "$f" >/dev/null || fail "missing $f"; done
