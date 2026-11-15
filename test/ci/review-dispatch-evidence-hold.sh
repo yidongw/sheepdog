@@ -18,7 +18,7 @@ LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 ghc_note_jobs() { cat >/dev/null; }
 ghm() { gh "$@"; }
 fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D"; done; }
-eval "$(fns finding_jobs gate_section findings findings_cap dev_round_noop dev_merge_only run_verdict dev_verdict_run named_files review_infra_reason dev_main_hold dispatch_msg infra_alert notify_best_effort)"
+eval "$(fns finding_jobs gate_section review_step_ran findings findings_cap dev_round_noop dev_merge_only run_verdict dev_verdict_run named_files review_infra_reason dev_main_hold dispatch_msg infra_alert notify_best_effort)"
 loop=$(python3 - "$D" <<'PY'
 import sys
 s = open(sys.argv[1]).read()
@@ -90,7 +90,7 @@ g add .; g commit -q -m 'dev contribution'; S=$(g rev-parse HEAD)
 g push -q origin HEAD:refs/heads/dev; g fetch -q origin
 READ_MODE=ok
 jobs() { jq -nc --argjson id "${2:-11}" --arg st "${1:-success}" \
-  '{jobs:[{name:"review",id:$id,conclusion:"failure"},{name:"tests",id:12,conclusion:$st}]}' > "$T/jobs"; }
+  '{jobs:[{name:"review",id:$id,conclusion:"failure",steps:[{name:"Review (blocking)",conclusion:"failure"}]},{name:"tests",id:12,conclusion:$st}]}' > "$T/jobs"; }
 jobs
 fixture() { # fixture <reported culprit> [mixed]
   {

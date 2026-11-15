@@ -19,7 +19,7 @@ mkdir -p "$STATE/sent" "$FIXER_GATE/queue"
 LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 source scripts/ci/review-notify.sh   # digest_add / digest_file / steer_thread / the real notify (kept as real_notify below)
 eval "real_$(declare -f notify)"
-eval "$(fns findings_cap gate_section thread_of fixer_receipt_thread norm_tid finding_blocks finding_meta finding_route attribute_finding attribution findings_subset \
+eval "$(fns findings_cap gate_section review_step_ran thread_of fixer_receipt_thread norm_tid finding_blocks finding_meta finding_route attribute_finding attribution findings_subset \
   att_of named_files repair_effective fix_reverted fix_of launch_failed)"
 helpers=$(python3 - "$D" <<'PY'
 import sys
@@ -246,7 +246,7 @@ echo 'refused strongest-fixer launches: escalated, retried'
 # 14. (#4) pre-existing findings: the CLI's exact line is recorded; a failed / empty log fetch is retried, not marked
 reset; rm -f "$STATE/preexisting-findings.log"
 GHLOG=ok
-gh() { case "$*" in *runs/77/jobs*) echo '{"jobs":[{"name":"review","id":78}]}' ;;
+gh() { case "$*" in *runs/77/jobs*) echo '{"jobs":[{"name":"review","id":78,"steps":[{"name":"Review (blocking)","conclusion":"success"}]}]}' ;;
   *jobs/78/logs*) [ "$GHLOG" = ok ] || return 1; echo '2026-11-13T03:40:00.1Z review-gate: reviewing a..b'; echo '2026-11-13T03:40:00.1234567Z review-gate: NIT (non-blocking): regression: [pre-existing] One owner can close a batch (x.sh:1)'; echo '2026-11-13T03:40:00.1Z review-gate: NIT (non-blocking): ducktape: a plain nit' ;; esac; }
 GHLOG=fail; preexisting_record "$H6" 77
 test ! -e "$STATE/sent/$H6.preexisting-77" || fail "a failed log fetch marked the run processed"

@@ -18,7 +18,7 @@ STATE=$T/state SRC=$T/src MAIN=main DEV=dev REPO=o/r LOG=$T/state/dispatch.log
 mkdir -p "$STATE/sent"
 log() { echo "$*" >> "$LOG"; }
 source scripts/ci/review-notify.sh
-eval "$(sed -n '/^notify_best_effort() /p; /^findings_cap() {/,/^}/p; /^gate_section() {/,/^}/p; /^findings() {/,/^}/p; /^notes_of() {/,/^}/p; /^obsolete_rule() {/,/^}/p' "$script")"; for _f in notify_best_effort findings_cap gate_section findings notes_of obsolete_rule; do declare -F "$_f" >/dev/null || { echo "missing helper $_f (not extracted from the dispatcher)" >&2; exit 1; }; done
+eval "$(sed -n '/^notify_best_effort() /p; /^findings_cap() {/,/^}/p; /^gate_section() {/,/^}/p; /^review_step_ran() {/,/^}/p; /^findings() {/,/^}/p; /^notes_of() {/,/^}/p; /^obsolete_rule() {/,/^}/p' "$script")"; for _f in notify_best_effort findings_cap gate_section review_step_ran findings notes_of obsolete_rule; do declare -F "$_f" >/dev/null || { echo "missing helper $_f (not extracted from the dispatcher)" >&2; exit 1; }; done
 SUPERVISOR_THREAD=import:claudeAgent:00000000-0000-4000-8000-000000000051
 eval "$(sed -n '/^FIX_ROUNDS_MAX=/,/^# ── one fixer per repo/p' "$script")"
 eval "$(sed -n '/^fixer_phrase() {/,/^}/p' "$script")"; for _f in fixer_phrase; do declare -F "$_f" >/dev/null || { echo "missing helper $_f (not extracted from the dispatcher)" >&2; exit 1; }; done
@@ -39,7 +39,7 @@ cat > "$T/joblog" <<'L'
 L
 gh() {
   case "$2" in
-    */jobs) echo '{"jobs":[{"name":"review","id":7,"conclusion":"failure"},{"name":"tests","id":8,"conclusion":"success"}]}' ;;
+    */jobs) echo '{"jobs":[{"name":"review","id":7,"conclusion":"failure","steps":[{"name":"Review (blocking)","conclusion":"failure"}]},{"name":"tests","id":8,"conclusion":"success"}]}' ;;
     */jobs/7/logs) cat "$T/joblog" ;;
   esac
 }
@@ -123,7 +123,7 @@ cat > "$T/bin/curl" <<CURL
 #!/usr/bin/env bash
 case "\$*" in
   *workflows/review.yml/runs*) echo '{"workflow_runs":[{"id":41,"display_title":"recheck $c3","conclusion":"failure","event":"workflow_run","head_branch":"main","path":".github/workflows/review.yml"},{"id":40,"display_title":"review $c3","conclusion":"success","event":"workflow_run","head_branch":"main","path":".github/workflows/review.yml"}]}' ;;
-  *runs/41/jobs*) echo '{"jobs":[{"name":"review","id":77}]}' ;;
+  *runs/41/jobs*) echo '{"jobs":[{"name":"review","id":77,"steps":[{"name":"Review (blocking)","conclusion":"failure"}]}]}' ;;
   *jobs/77/logs*) printf '%s\n' '2026-11-12T00:00:00Z review-gate: reviewing a..b' '2026-11-12T00:00:00Z review-gate: BLOCKED #2 regression [should]: x overflows' '2026-11-12T00:00:00Z evidence: src/x.ts:4' '2026-11-12T00:00:00Z noise' ;;
   *) exit 22 ;;
 esac
