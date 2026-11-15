@@ -2,4 +2,3 @@
 #   <suite file name> <the 40-char pin sha> <the protection that is not in the pinned snapshot yet>
 # Allowed only for that exact pin: a pin bump runs every suite against the new pin again. Keep this list empty whenever
 # the newest reviewed main carries the protection — bump the pin instead (docs/self-review.md).
-dev-review-once.sh 04d883525a12386abfb823c5510e379bbd7a5e50 the newest verdict by completion time, not listing order (review of 04d883525 #1): the pin bump follows this Hotfix
