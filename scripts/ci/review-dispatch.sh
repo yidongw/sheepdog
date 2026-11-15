@@ -199,9 +199,10 @@ gate_section() { # stdin: a review job log (timestamps stripped) → only what t
     END { if (m) { for (i = m + 1; i <= NR; i++) print l[i] }
           else { for (i = 1; i <= NR; i++) if (l[i] ~ /^(\[gates .*ERROR|review-gate: (reviewer|no parseable|crashed))/) print l[i] } }'
 }
+finding_jobs() { ghm api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null; }   # routing/notification snapshot only, never approval evidence
 findings() { # findings <run id> [<its jobs answer, already read>] → text (blocking findings only: the reviewer's NIT lines are notes, see notes_of)
-  local run=$1 jobs=${2:-} tests_ok rid gl
-  if [ -n "$jobs" ]; then ghc_note_jobs <<<"$jobs"; else
+  local run=$1 jobs=${2:-} tests_ok rid gl review_available=0
+  if [ "$#" -ge 2 ]; then ghc_note_jobs <<<"$jobs"; else
     jobs=$(ghm api "repos/$REPO/actions/runs/$run/jobs") || { echo 'review-gate: reviewer failed: finding jobs unavailable'; return 0; }
   fi
   if ! jq -e '.jobs | type == "array"' >/dev/null 2>&1 <<<"$jobs"; then
@@ -210,17 +211,21 @@ findings() { # findings <run id> [<its jobs answer, already read>] → text (blo
   tests_ok=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "tests") | .conclusion' <<<"$jobs")
   rid=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "review") | .id' <<<"$jobs")
   if [ -n "$rid" ]; then
-    # Read once, and reject even a partial response when the fetch failed. Missing evidence never establishes a code defect.
-    gl=$(ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null) || { echo 'review-gate: reviewer failed: finding log unavailable'; return 0; }
-    # Ownership, repair routing and rollback use this same bounded snapshot.
-    sed -E 's/^[^ ]+ //' <<<"$gl" | gate_section \
-      | grep -E '^(review-gate: (BLOCKED|FINDING|ROUTE|reviewer|no parseable|crashed|NOTE)|evidence:|\[gates .*ERROR)' | findings_cap || true
+    # Reject even a partial failed fetch, but keep independent trusted-test evidence below.
+    if gl=$(ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null); then
+      review_available=1
+      # Ownership, repair routing and rollback use this same bounded snapshot.
+      sed -E 's/^[^ ]+ //' <<<"$gl" | gate_section \
+        | grep -E '^(review-gate: (BLOCKED|FINDING|ROUTE|reviewer|no parseable|crashed|NOTE)|evidence:|\[gates .*ERROR)' | findings_cap || true
+    else echo 'review-gate: reviewer failed: finding log unavailable'; fi
   else
-    echo 'review-gate: reviewer failed: review job evidence unavailable'; return 0
+    echo 'review-gate: reviewer failed: review job evidence unavailable'
   fi
   # a CANCELLED tests job is never a code finding: the dispatcher cancels it itself once the review blocked ("tests no
   # longer needed") or a newer head superseded it (11-13 01:44Z: that cancellation was handed to a fixer as a finding;
   # it disputed it and the round was reported as "fix failed")
+  # Without review evidence, an absent or unfinished tests job supplies no independent failure either.
+  if [ "$review_available" = 0 ] && { [ -z "$tests_ok" ] || [ "$tests_ok" = null ]; }; then return 0; fi
   if [ "$tests_ok" != success ] && [ "$tests_ok" != cancelled ]; then
     echo "trusted tests job: ${tests_ok:-not run}"
     local tid; tid=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "tests") | .id' <<<"$jobs")
@@ -229,10 +234,10 @@ findings() { # findings <run id> [<its jobs answer, already read>] → text (blo
   fi
 }
 
-dev_main_hold() { # dev_main_hold <S> <run id> <findings> → 0: hold the WHOLE blocked round for the owner when a reported culprit is on main
+dev_main_hold() { # dev_main_hold <S> <run id> <findings> <its jobs snapshot> → 0: hold the WHOLE blocked round for the owner when a reported culprit is on main
   # This never approves a head or drops findings. A dev revert cannot remove a defect already on main; matching its file
   # against dev commits instead removes unrelated work. Mixed rounds wait too, until main is repaired and dev is reviewed again.
-  local s=$1 run=$2 f=$3 n claim c nums=""
+  local s=$1 run=$2 f=$3 n claim c jid nums=""
   while read -r n claim; do
     [[ "$claim" =~ ^[0-9a-f]{7,40}$ ]] || continue
     grep -qE "^review-gate: BLOCKED #$n( |$)" <<<"$f" || continue
@@ -241,11 +246,14 @@ dev_main_hold() { # dev_main_hold <S> <run id> <findings> → 0: hold the WHOLE 
   done < <(sed -nE 's/^review-gate: FINDING #([0-9]+) route=[a-z]+ commit=([^ ]+).*/\1 \2/p' <<<"$f")
   [ -n "$nums" ] || return 1
   if [ -n "${DRY:-}" ]; then echo "DRY $DEV ${s:0:9}: main-side findings$nums — owner escalation, no dev repair or revert"; return 0; fi
-  if [ ! -e "$STATE/sent/$s.main-on-dev-logged.$run" ]; then
+  # A rerun has a new job id. Use the evidence's identity, not a later jobs fetch that could see the next attempt.
+  jid=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].id // empty' <<<"${4:-}" 2>/dev/null || true); jid=${jid:-unknown}
+  if [ ! -e "$STATE/sent/$s.main-on-dev-logged.$run.$jid" ]; then
     log "$DEV ${s:0:9}: main-side findings$nums — blocked pending owner action; no dev repair or revert"
-    touch "$STATE/sent/$s.main-on-dev-logged.$run"
+    touch "$STATE/sent/$s.main-on-dev-logged.$run.$jid"
   fi
-  notify_best_effort "$s" "main-on-dev.$run" "$SUPERVISOR_THREAD" "[review-dispatch] $DEV ${s:0:9} remains blocked by findings whose reported culprit is on $MAIN:$nums.
+  # Reuse delivery-aware escalation: a retired supervisor falls back to the CI owner; no delivery stays retryable.
+  INFRA_WHERE=$DEV infra_alert "$s" "$run" "main-on-dev.$run.$jid" "$STATE/sent/$s.main-on-dev.$jid" "[review-dispatch] $DEV ${s:0:9} remains blocked by findings whose reported culprit is on $MAIN:$nums.
 The whole round is held for owner action: no dev fixer, block clock, revert warning or automatic revert. Repair the main-side defect through $MAIN's review chain, then re-run the dev review. Reverting dev commits that share its filename cannot repair it.
 $f
 run: https://github.com/$REPO/actions/runs/$run"
@@ -1995,9 +2003,10 @@ if [ -z "${DRY:-}" ] && git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/
     if [[ "$bsha" =~ ^[0-9a-f]{40}$ ]] && git -C "$SRC" merge-base --is-ancestor "$bsha" "origin/$DEV" 2>/dev/null \
        && ! git -C "$SRC" merge-base --is-ancestor "$bsha" origin/$MAIN 2>/dev/null \
        && ! dev_round_noop "$bsha" "$brid" failure; then   # a merge-only round is never blocked
-      bf=$(findings "$brid")
+      bjobs=$(finding_jobs "$brid") || bjobs=""
+      bf=$(findings "$brid" "$bjobs")
       if binfra=$(review_infra_reason "$bf"); then dev_infra "$bsha" "$brid" "$binfra"
-      elif dev_main_hold "$bsha" "$brid" "$bf"; then :
+      elif dev_main_hold "$bsha" "$brid" "$bf" "$bjobs"; then :
       else
       bcul=$(culprit_threads "$bsha" "$bf")
       # reviewer → fixer → author: the fixer gets it; the authors only when it failed (dev_blocked)
@@ -2299,10 +2308,11 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
       git -C "$SRC" worktree remove --force "$WORK" >/dev/null 2>&1 || true
     fi
   elif [ "$ref" = "$DEV" ]; then
-    f=$(findings "$rid")
+    djobs=$(finding_jobs "$rid") || djobs=""
+    f=$(findings "$rid" "$djobs")
     # the reviewer itself did not run: nothing was reviewed — no block, no fixer, no author notice, no revert clock
     if dinfra=$(review_infra_reason "$f"); then dev_infra "$sha" "$rid" "$dinfra"; continue; fi
-    if dev_main_hold "$sha" "$rid" "$f"; then continue; fi
+    if dev_main_hold "$sha" "$rid" "$f" "$djobs"; then continue; fi
     since_f="$STATE/dev.blocked_since"
     if [ ! -s "$since_f" ]; then echo "$now" > "$since_f"; echo "$sha" > "$since_f.sha"; fi   # the episode's owner (dev_round_noop)
     since=$(cat "$since_f")
