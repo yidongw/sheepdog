@@ -765,12 +765,18 @@ dev_carries_fix() { # dev_carries_fix <S> <files (newline separated)> [<exclude 
 fix_reverted() { # <R> <ref>... → 0 when R is reverted on a ref that contains it: review-repair.sh reverted(), THE one rule
   # (a standing direct revert, recursively; ANY later merge revert — conservative by policy, docs/contract.md; past 64
   # levels or on a git error: reverted, fail closed). Each ref judged on its own; "^<sha>" refs are exclusions, skipped.
-  local r=$1 ref; shift
+  local r=$1 ref rc; shift
   _fix_reverted_unsure=0
   for ref in "$@"; do
     case "$ref" in ^*) continue ;; esac
     git -C "$SRC" merge-base --is-ancestor "$r" "$ref" 2>/dev/null || continue
-    (cd "$SRC" && reverted "$r" "$ref") && return 0
+    # the answer travels as the exit status (a subshell cannot set a flag): 0 reverted, 1 stands, 2 unknown
+    rc=0; (cd "$SRC" && reverted "$r" "$ref") || rc=$?
+    case "$rc" in
+      0) return 0 ;;
+      1) ;;
+      *) _fix_reverted_unsure=1; return 0 ;;   # unknown: the repair does not count (fail closed)
+    esac
   done
   return 1
 }
