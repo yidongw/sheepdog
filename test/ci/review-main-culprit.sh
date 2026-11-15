@@ -135,6 +135,11 @@ ghm() { # the routing memo: the real (fake) gh; with $T/ghm-logs-fail present, j
   if [ -e "$T/swap-jobs" ] && [[ "$*" == *"/runs/$(cut -d' ' -f1 "$T/swap-jobs")/jobs"* ]]; then
     gh "$@"; local rc=$?; cp "$(cut -d' ' -f2 "$T/swap-jobs")" "$FX/jobs-$(cut -d' ' -f1 "$T/swap-jobs").json"; rm -f "$T/swap-jobs"; return $rc
   fi
+  # Rerun immediately after the head loop's initial log read: its caller still has attempt 1's main findings, while
+  # dev_split_main will read attempt 2's jobs and dev-only log.
+  if [ -e "$T/swap-after-log" ] && [[ "$*" == *"/jobs/$JID/logs"* ]]; then
+    gh "$@"; local rc=$?; cp "$T/rerun-jobs.json" "$FX/jobs-$RID.json"; rm -f "$T/swap-after-log"; return $rc
+  fi
   gh "$@"; }
 ghc_note_jobs() { cat > /dev/null; }
 STATE=$T/state MAIN=main DEV=dev TRUSTED=$T/trusted WORK=$T/work OUTBOX=$T/state/outbox CI_SCRIPTS=$ROOT/scripts/ci
@@ -144,6 +149,7 @@ git -C "$SRC" worktree add -q --detach "$TRUSTED" origin/main
 eval "$(sed -n '/^review_jobs() {/p; /^review_list() {/,/^}/p; /^dev_round_noop() {/,/^}/p; /^dev_merge_only() {/,/^}/p; /^review_infra_reason() {/,/^}/p; /^run_verdict() {/,/^}/p; /^dev_verdict_run() {/,/^}/p; /^named_files() {/p; /^findings_cap() {/,/^}/p; /^findings() {/,/^}/p; /^notes_of() {/,/^}/p; /^findings_subset() {/,/^}/p; /^main_culprits_api() /p; /^main_culprit_hint() {/,/^}/p; /^dsm_api() {/,/^}/p; /^dev_split_main() {/,/^}/p; /^review_approve() {/,/^}/p; /^record_approving_main() {/,/^}/p; /^thread_of() /p; /^range_threads() {/,/^}/p' "$D")"
 source "$ROOT/scripts/ci/review-main-culprits.sh"
 source "$ROOT/scripts/ci/review-machinery.sh"
+eval "$(sed -n '/^dispatch_msg() {/,/^}/p' "$D")"   # the real revert path's commit message
 for f in review_list findings findings_subset main_culprit_hint dev_split_main record_approving_main main_culprits_api review_main_culprits dev_verdict_run; do
   declare -F "$f" >/dev/null || fail "helper $f not extracted"
 done
@@ -584,8 +590,10 @@ RP
     ! landed || fail "(p) $path accepted a receiptless main-only approval"
     [ "$(tail -1 "$FX/legacy-rp-main")" = 0 ] || fail "(p) $path did not require a full-review check from the legacy checker"
     if [ "$path" = head ]; then
-      [ "$(routed_nums)" = "1 2" ] || fail "(p) legacy blocked head was neither landed nor routed"
+      ! grep -qE '^(dev_blocked|wake_fixer)' "$T/calls" 2>/dev/null || fail "(p) legacy checker routed main findings on dev"
+      test ! -e "$STATE/dev.blocked_since" || fail "(p) legacy checker started a dev revert clock for main findings"
     fi
+    [ "$(grep -c '^review-gate: BLOCKED #[12] ' "$STATE/open-findings.log")" = 2 ] || fail "(p) legacy checker lost main findings"
   done
   touch "$FX/legacy-allow-pass"
   for path in head train; do
@@ -630,5 +638,71 @@ RP
     done
   done
   echo "ok - (p) local capable and legacy full-review passes land; receiptless main-only and malformed receipts cannot land"
+fi
+
+# Main review of 03f6fcd72 #1: approval capability is separate from ownership. Exercise the actual head loop, including
+# its revert path against a fixture remote, with unrelated dev work in the file named by main's findings.
+if [ -z "${REVIEW_MAIN_REGRESSION:-}" ] || [ "$REVIEW_MAIN_REGRESSION" = ownership ]; then
+  H=$(c scripts/ci/dev-review-base.sh "unrelated dev edit in main finding's file")
+  unrelated=$(g show "$H:scripts/ci/dev-review-base.sh")
+  LEG=$T/ownership-ci; mkdir -p "$LEG"; cp "$ROOT/scripts/ci/"*.sh "$LEG/"
+  for checker in historical legacy; do
+    if [ "$checker" = historical ]; then
+      # Receipt-capable before protocol declarations; an unavailable approval API writes no sidecar. Only this
+      # checker's reads fail: the dispatcher's routing reads still classify the main findings successfully.
+      { printf '#!/usr/bin/env bash\ngh() { return 1; }\n'
+        git -C "$ROOT" show 76fdca743b72d1a0e481d5ca1a2cef1d47a176b7:scripts/ci/review-passed.sh
+      } > "$LEG/review-passed.sh"
+    else
+      printf '#!/usr/bin/env bash\nexit 1\n' > "$LEG/review-passed.sh"
+    fi
+    fixture_log "$T/log" "$C" 0
+    scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+    for episode in overdue fresh; do
+      reset_dev
+      if [ "$episode" = overdue ]; then
+        echo $(( $(date +%s) - 4000 )) > "$STATE/dev.blocked_since"; echo "$H" > "$STATE/dev.blocked_since.sha"
+      fi
+      ( cd "$ROOT" && CI_SCRIPTS=$LEG && merged_one=0 && DRY="" && eval "$loop" ) || fail "(q) $checker $episode head loop failed"
+      g fetch -q origin
+      ! landed || fail "(q) $checker $episode landed without approval"
+      [ "$(g rev-parse origin/dev)" = "$H" ] || fail "(q) $checker $episode reverted unrelated dev work for main findings"
+      [ "$(g show origin/dev:scripts/ci/dev-review-base.sh)" = "$unrelated" ] || fail "(q) $checker $episode lost the unrelated edit"
+      ! grep -qE '^(dev_blocked|wake_fixer|notify)' "$T/calls" 2>/dev/null || fail "(q) $checker $episode routed main findings on dev"
+      [ "$(grep -c '^review-gate: BLOCKED #[12] ' "$STATE/open-findings.log")" = 2 ] || fail "(q) $checker $episode lost the main findings record"
+      if [ "$episode" = fresh ]; then
+        test ! -e "$STATE/dev.blocked_since" || fail "(q) $checker started a dev block clock for main findings"
+      fi
+    done
+    # Mixed findings remain blocked and route the dev defect only, even without approval support.
+    fixture_log "$T/log" "$C" 1
+    scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+    reset_dev
+    ( cd "$ROOT" && CI_SCRIPTS=$LEG && merged_one=0 && DRY="" && eval "$loop" ) || fail "(q) $checker mixed head loop failed"
+    ! landed || fail "(q) $checker landed a mixed review"
+    [ "$(routed_nums)" = 3 ] || fail "(q) $checker mixed routed '$(routed_nums)', want only 3"
+  done
+  echo "ok - (q) approval capability cannot route main findings or revert unrelated dev work; mixed reviews route only dev"
+fi
+
+# Main review of 03f6fcd72 #2: the rerun's successful snapshot must replace stale routing even with NO main findings.
+if [ -z "${REVIEW_MAIN_REGRESSION:-}" ] || [ "$REVIEW_MAIN_REGRESSION" = rerun-dev ]; then
+  fixture_log "$T/log" "$C" 0
+  scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+  RJID=$((JID + 7))
+  fixture_log "$T/rerun-log" "$C" 1
+  awk '/review-gate: reviewing / || /review-gate: (FINDING|BLOCKED) #3 / || /evidence: scripts\/ci\/review-dispatch.sh:1114 /' "$T/rerun-log" > "$FX/log-$RJID.txt"
+  echo "{\"jobs\":[{\"name\":\"sheepdog / tests\",\"conclusion\":\"success\",\"run_attempt\":2},{\"name\":\"sheepdog / review\",\"id\":$RJID,\"run_attempt\":2,\"conclusion\":\"failure\",\"steps\":[$STEPS_OK]}]}" > "$T/rerun-jobs.json"
+  reset_dev; touch "$T/swap-after-log"
+  ( cd "$ROOT" && merged_one=0 && DRY="" && eval "$loop" ) || fail "(r) rerun head loop failed"
+  g fetch -q origin
+  test ! -e "$T/swap-after-log" || fail "(r) fixture did not replace attempt 1 after the initial log read"
+  ! landed || fail "(r) landed with the rerun's dev finding"
+  [ "$(routed_nums)" = 3 ] || fail "(r) routed '$(routed_nums)', want current dev finding 3"
+  grep -q "commit=$H" "$T/routed" && ! grep -q "commit=$C" "$T/routed" || fail "(r) routed text came from the obsolete attempt"
+  grep -q 'new rest fixer receipt is missing from lifecycle consumers' "$T/routed" || fail "(r) omitted current dev finding text"
+  test ! -s "$STATE/open-findings.log" || fail "(r) recorded obsolete main findings"
+  ! ls "$STATE/sent/" | grep -q mainfindings || fail "(r) certified obsolete main findings"
+  echo "ok - (r) rerun from main-only to dev-only findings routes the new attempt's dev defect only"
 fi
 echo "main-culprit checks passed"
