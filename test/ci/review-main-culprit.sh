@@ -16,7 +16,9 @@
 #       (review of sheepdog main 625246776 #1); (i) an unwritable record never yields a main-only approval (train or head
 #       loop; review of main 725a2adc1 #1); (j) receipts are per run (review of dev 8ba5aaa38 #1/#2); (k) the head loop
 #       is bound to the approving review, (k2) also when its log cannot be read (review of dev 8a8373271 #1); (l) receipts
-#       name the review attempt (review of pawx 7f0dbbc8f #1/#2)
+#       name the review attempt (review of pawx 7f0dbbc8f #1/#2); (m) a repository-local review-passed.sh's pass is a plain
+#       pass, never main-only; (n) DRY previews without a receipt (review of main 9b7ece173 #1-#3); (l2) one jobs answer
+#       binds classification, text and receipt (review of dev 84ada34cc #3)
 set -uo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 cd "$(dirname "$0")/../.."
@@ -123,6 +125,10 @@ RP() { (cd "$SRC" && bash "$ROOT/scripts/ci/review-passed.sh" "$H" o/r >/dev/nul
 ghm() { # the routing memo: the real (fake) gh; with $T/ghm-logs-fail present, job-log reads fail (an unavailable read)
   # (its content, if any: only that job's log fails)
   if [ -e "$T/ghm-logs-fail" ] && [[ "$*" == *"/jobs/$(cat "$T/ghm-logs-fail")"*"/logs"* ]]; then return 1; fi
+  # $T/swap-jobs = "<run id> <file>": right after the first read of that run's jobs, the run is rerun (jobs replaced)
+  if [ -e "$T/swap-jobs" ] && [[ "$*" == *"/runs/$(cut -d' ' -f1 "$T/swap-jobs")/jobs"* ]]; then
+    gh "$@"; local rc=$?; cp "$(cut -d' ' -f2 "$T/swap-jobs")" "$FX/jobs-$(cut -d' ' -f1 "$T/swap-jobs").json"; rm -f "$T/swap-jobs"; return $rc
+  fi
   gh "$@"; }
 ghc_note_jobs() { cat > /dev/null; }
 STATE=$T/state MAIN=main DEV=dev TRUSTED=$T/trusted WORK=$T/work OUTBOX=$T/state/outbox CI_SCRIPTS=$ROOT/scripts/ci
@@ -437,4 +443,55 @@ landed || fail "(l) the train did not land H: $(cat "$LOG")"
 grep -q "run $RID): finding(s) 1 2 — culprit on main" "$STATE/open-findings.log" || fail "(l) the rerun's findings #1/#2 were not recorded (the first attempt's receipt counted)"
 test -e "$STATE/sent/$H.$RID.2.$RJID.mainfindings" || fail "(l) no receipt for attempt 2 / job $RJID"
 echo "ok - (l) receipts name the review attempt: a rerun's findings are recorded before landing"
+# (l2) review of dev 84ada34cc #3: a rerun right after the first jobs read. The classification, the recorded text and the
+#     receipt all come from that one answer (attempt 1, job $JID, #1 only); the rerun's attempt 2 / job $RJID (#1/#2) is
+#     never marked recorded by it, and recording that attempt later writes #1/#2
+fixture_log "$T/log" "$C" 0
+scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+awk '/review-gate: (FINDING|BLOCKED) #2 /{skip = 1; next} skip && /^[^ ]+ evidence:/{skip = 0; next} {skip = 0; print}' "$T/log" > "$FX/log-$JID.txt"
+cp "$T/log" "$FX/log-$RJID.txt"
+echo "{\"jobs\":[{\"name\":\"sheepdog / tests\",\"conclusion\":\"success\",\"run_attempt\":2},{\"name\":\"sheepdog / review\",\"id\":$RJID,\"run_attempt\":2,\"conclusion\":\"failure\",\"steps\":[$STEPS_OK]}]}" > "$T/rerun-jobs.json"
+reset_dev; echo "$RID $T/rerun-jobs.json" > "$T/swap-jobs"
+( DRY=""; dev_split_main "$H" "$RID" "$(cat "$FX/log-$JID.txt" | sed -E 's/^[^ ]+ //' | grep -E '^(review-gate: (BLOCKED|FINDING)|evidence:)')" ) >/dev/null
+rm -f "$T/swap-jobs"
+test -e "$STATE/sent/$H.$RID.1.$JID.mainfindings" || fail "(l2) the first attempt's receipt is not named by its own job: $(ls "$STATE/sent")"
+test ! -e "$STATE/sent/$H.$RID.2.$RJID.mainfindings" || fail "(l2) the rerun attempt was marked recorded with the first attempt's findings"
+echo "$RID 2 $RJID main" > "$T/l2.approval"
+( DRY=""; record_approving_main "$H" "$T/l2.approval" ) || fail "(l2) recording the rerun attempt failed"
+grep -q "run $RID): finding(s) 1 2 — culprit on main" "$STATE/open-findings.log" || fail "(l2) the rerun's #1/#2 were not recorded"
+echo "ok - (l2) one jobs answer binds classification, text and receipt: a rerun between reads is recorded on its own"
+# ── review of sheepdog main 9b7ece173 #1/#2: a repository-local (older) review-passed.sh writes no approval file. Its
+#    approval is a plain full-review pass: the train and the head loop land on it, and it is asked with
+#    REVIEW_MAIN_FINDINGS=0 — a main-only approval can only come from sheepdog's own checker's file ──
+LEG=$T/legacy-ci; rm -rf "$LEG"; cp -r "$ROOT/scripts/ci" "$LEG"
+cat > "$LEG/review-passed.sh" <<'RP'
+#!/usr/bin/env bash
+# a repository-local contract script from before REVIEW_APPROVAL_OUT: approves, writes no approval file
+echo "${REVIEW_MAIN_FINDINGS:-unset}" >> "$FX/legacy-rp-main"
+[ -z "${REVIEW_KIND_OUT:-}" ] || echo review > "$REVIEW_KIND_OUT"
+echo "trusted tests + review passed for ${1:0:12} (run 1)"
+RP
+fixture_log "$T/log" "$C" 0
+scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+rm -f "$FX/legacy-rp-main"; reset_dev
+( cd "$ROOT" && DRY="" && CI_SCRIPTS=$LEG && approval_named=0 && eval "$train" ) || fail "(m) train failed"; g fetch -q origin
+landed || fail "(m) the train refused a legacy script's plain pass: $(cat "$LOG")"
+! grep -qv '^0$' "$FX/legacy-rp-main" || fail "(m) the legacy script was asked with main findings allowed: $(sort -u "$FX/legacy-rp-main" | tr '\n' ' ')"
+rm -f "$FX/legacy-rp-main"; reset_dev
+( cd "$ROOT" && merged_one=0 && DRY="" && CI_SCRIPTS=$LEG && approval_named=0 && eval "$loop" ) || fail "(m) head loop failed"; g fetch -q origin
+landed || fail "(m) the head loop refused a legacy script's plain pass: $(cat "$LOG")"
+! grep -qv '^0$' "$FX/legacy-rp-main" || fail "(m) head loop: the legacy script was asked with main findings allowed"
+# … while sheepdog's own checker with an empty approval file is still refused (unreadable evidence)
+printf '' > "$T/empty.approval"; ( approval_named=1; ! record_approving_main "$H" "$T/empty.approval" ) || fail "(m) an empty approval file of sheepdog's checker was accepted"
+echo "ok - (m) a repository-local review-passed.sh: plain pass lands, never asked for a main-only approval"
+
+# ── review of sheepdog main 9b7ece173 #3: DRY previews a main-only merge from the classification alone (no receipt) ──
+fixture_log "$T/log" "$C" 0
+scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+reset_dev
+out=$( cd "$ROOT" && merged_one=0 && DRY=1 && eval "$loop" 2>&1 ) || fail "(n) DRY head loop failed"
+grep -q "DRY merge dev ${H:0:9}" <<<"$out" || fail "(n) DRY did not preview the main-only merge: $out"
+! landed || fail "(n) DRY landed"
+test ! -s "$STATE/open-findings.log" || fail "(n) DRY wrote a record"
+echo "ok - (n) DRY previews a main-only merge without a receipt and writes nothing"
 echo "main-culprit checks passed"
