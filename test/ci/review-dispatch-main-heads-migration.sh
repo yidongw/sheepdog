@@ -6,7 +6,7 @@ source "$(dirname "$0")/lib/no-real-t3.sh"
 cd "$(dirname "$0")/../.."
 D=scripts/ci/review-dispatch.sh
 fail() { echo "FAIL: $*" >&2; exit 1; }
-fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p" "$D"; done; }
+fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh"; done; }
 eval "$(fns main_heads_base main_head_candidate main_arrivals hotfix_candidates)"; MAIN_WINDOW_SEC=604800
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 MAIN=main DRY=""

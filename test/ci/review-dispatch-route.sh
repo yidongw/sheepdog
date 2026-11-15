@@ -11,10 +11,10 @@ command_not_found_handle() { echo "FAIL: command not found: $1 (a helper the tes
 FIXER_ENDED_GRACE_MIN=0   # these cases judge receipts written a moment ago
 cd "$(dirname "$0")/../.."
 D=scripts/ci/review-dispatch.sh
-fns() { local n b; for n in "$@"; do b=$(sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D")  # a missing helper fails the test (it used to only print to stderr)
+fns() { local n b; for n in "$@"; do b=$(sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh")  # a missing helper fails the test (it used to only print to stderr)
   if [ -z "$b" ]; then printf '{ echo "fns: helper %s not found in %s" >&2; exit 1; }\n' "$n" "$D"; else printf '%s\n' "$b"; fi; done; }
 eval "$(fns repair_effective author_group_key findings_cap gate_section review_step_ran thread_of fixer_receipt_thread range_threads culprit_threads or_supervisor notify_threads devfix_fix_of fixer_ended launch_failed \
-  dev_round_pending dev_carries_fix fix_reverted hotfix_fix_pushed escalate_ended_fixer named_files blocked_author_reason \
+  dev_round_pending dev_carries_fix fix_reverted reverted hotfix_fix_pushed escalate_ended_fixer named_files blocked_author_reason \
   dev_blocked norm_tid finding_blocks finding_meta finding_route review_round_route route_reason attribute_finding \
   attribution findings_subset att_of culprit_lines notify_attributed author_fixed author_turn split_fixer_failed \
   split_fixer dev_blocked_split revert_after_for own_findings fyi_author culprits_repaired att_threads)"

@@ -17,7 +17,7 @@ printf '#!/usr/bin/env bash\nexit 1\n' > "$CI_SCRIPTS/review-passed.sh"
 LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 ghc_note_jobs() { cat >/dev/null; }
 ghm() { gh "$@"; }
-fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D"; done; }
+fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh"; done; }
 eval "$(fns finding_jobs gate_section review_step_ran findings findings_cap dev_round_noop dev_merge_only run_verdict dev_verdict_run named_files review_infra_reason dev_main_hold dispatch_msg infra_alert notify_best_effort)"
 loop=$(python3 - "$D" <<'PY'
 import sys

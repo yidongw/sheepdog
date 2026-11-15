@@ -2,6 +2,7 @@
 # Shared usable-proof rule for range producers and approval consumers. Source review-runs.sh first;
 # callers pass only run ids from its trusted listing. Missing proof widens the range at production time.
 # review_api returns JSON, log text or artifact bytes using the caller's existing authenticated client.
+. "$(dirname "${BASH_SOURCE[0]}")/review-evidence.sh"   # the one evidence reader
 review_verdict() { # <run id> -> pass|blocked; setup failures, cancellation and skips are not verdicts (exit 1);
   # exit 2 when the evidence could not be READ (API / log failure): unknown, which a caller deciding that a commit is
   # NOT blocked must treat as blocked (review of vpn-sub c3d6df140 #1)
@@ -16,7 +17,7 @@ review_verdict() { # <run id> -> pass|blocked; setup failures, cancellation and 
       [ -n "$jid" ] || return 1
       # Consume the whole log before matching: grep -q in a pipe can SIGPIPE curl under pipefail.
       log=$(review_api "actions/jobs/$jid/logs") || return 2
-      grep -qE '^([^ ]+ )?review-gate: BLOCKED #[0-9]+' <<<"$log" || return 1
+      review_blocked_verdict "$jobs" "$log" || return 1
       echo blocked ;;
     *) return 1 ;;
   esac

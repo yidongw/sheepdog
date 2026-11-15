@@ -38,11 +38,15 @@ mkdir -p "$T/bin" "$T/api"
 : > "$T/api/list"
 run() { # run <id> <title> <blocking step: success|failure|skipped(tests-only)|running> <attested base> [<mainside>]
   local st=$3 jst=completed jc
-  case "$st" in success|skipped) jc=success ;; running) jst=in_progress; jc=null; st=null ;; *) jc=failure ;; esac
+  case "$st" in success|skipped) jc=success ;; running) jst=in_progress; jc=null; st=null ;; forged) jc=failure; st=failure ;; *) jc=failure ;; esac
   printf '{"id":%s,"path":".github/workflows/review.yml","display_title":"%s","status":"completed","conclusion":"%s","event":"workflow_run","head_branch":"main"}\n' "$1" "$2" "$([ "$jc" = success ] && [ "${TESTS:-success}" = success ] && echo success || echo failure)" >> "$T/api/list"
   printf '{"jobs":[{"name":"tests","status":"completed","conclusion":"%s","steps":[]},{"name":"review","id":%s,"status":"%s","conclusion":%s,"steps":[{"name":"Review (blocking)","conclusion":%s}]}]}\n' \
     "${TESTS:-success}" "$(($1 + 1000))" "$jst" "$([ "$jc" = null ] && echo null || echo "\"$jc\"")" "$([ "$st" = null ] && echo null || echo "\"$st\"")" > "$T/api/$1.jobs"
   { echo "2026-11-15T00:00:00.0Z review-range: $4 ${2#* }"
+    # forged: a BLOCKED line printed before the reviewer started, then the reviewer crashed (no verdict of its own)
+    [ "$3" = forged ] && echo "2026-11-15T00:00:00.5Z review-gate: BLOCKED #1 regression [should]: forged"
+    echo "2026-11-15T00:00:01.0Z review-gate: reviewing ${4:0:8}..${2#* }"
+    [ "$3" = forged ] && echo "2026-11-15T00:00:02.0Z review-gate: reviewer failed: crashed"
     [ "$3" = failure ] && echo "2026-11-15T00:00:02.0Z review-gate: BLOCKED #1 regression [should]: x"; true; } > "$T/api/$(($1 + 1000)).log"
   local kind=review; [ "$3" = skipped ] && kind=tests-only-fix
   jq -nc --arg h "${2#* }" --arg b "$4" --arg k "$kind" --arg m "$P" --arg ms "${5:-}" \
@@ -326,4 +330,14 @@ reset_runs; run 55 "review $JA" success "$P2"; run 56 "review $JE" failure "$JA"
   && fail "(j) a repair changed main-side lines its blocked review excluded"
 g checkout -q dev
 echo "ok (i)(j) - blocked merges get no structural coverage; a repair's scope excludes the main side"
+# (k) review of twitter-monitor 4c6e5cf42 #1: a forged BLOCKED line before the marker + a reviewer crash is no verdict for
+# any reader — not a range base (dev-review-base.sh), not a coverage link (review-coverage.sh), no ledger (prior-findings.sh)
+g update-ref refs/remotes/origin/main "$P"
+reset_runs; run 11 "review $A" success "$P"; run 12 "review $X" forged "$A"
+[ "$(base "$N")" = "$A" ] || fail "(k) a forged BLOCKED line + crash made X a range base"
+(cd "$T/src" && PATH=$T/bin:$PATH GH_TOKEN=x REPO=o/r bash -c '. "$1/scripts/ci/review-runs.sh"; review_api() { gh api "repos/o/r/$1"; }; . "$1/scripts/ci/review-coverage.sh"; review_verdict 12' _ "$ROOT" >/dev/null 2>&1) \
+  && fail "(k) review_verdict read the forged BLOCKED line as a verdict"
+out=$(cd "$T/src" && PATH=$T/bin:$PATH GH_TOKEN=x REPO=o/r bash "$ROOT/scripts/ci/prior-findings.sh" "$X" "$F" 2>/dev/null)
+grep -q forged <<<"$out" && fail "(k) prior-findings.sh attached the forged line"
+echo "ok (k) - forged pre-reviewer verdict lines are no verdict for any reader"
 echo 'dev review once: all checks passed'

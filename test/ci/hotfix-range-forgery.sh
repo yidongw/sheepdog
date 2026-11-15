@@ -65,7 +65,7 @@ run() {
   n=$((n + 1))
   RUNS=("{\"id\":$n,\"display_title\":\"recheck $h\",\"event\":\"$ev\",\"head_branch\":\"$br\",\"path\":\"$wp\",\"status\":\"completed\",\"conclusion\":\"$jc\"}" "${RUNS[@]}")
   echo "{\"jobs\":[{\"name\":\"sheepdog / tests\",\"conclusion\":\"success\"},{\"name\":\"sheepdog / review\",\"id\":$((n + 1000)),\"conclusion\":\"$jc\",\"steps\":[{\"name\":\"Reviewed range\",\"conclusion\":\"success\"},{\"name\":\"Review (blocking; sheepdog's reviewer, this repository's diff)\",\"conclusion\":\"$sc\"}]}]}" > "$FX/jobs-$n.json"
-  [ "$sc" = failure ] && printf 'review-gate: BLOCKED #1 regression [blocker]: x\n' > "$FX/log-$((n + 1000)).txt"
+  [ "$sc" = failure ] && printf 'review-gate: reviewing x..y\nreview-gate: BLOCKED #1 regression [blocker]: x\n' > "$FX/log-$((n + 1000)).txt"
   echo "{\"artifacts\":[{\"name\":\"review-attestation\",\"id\":$n,\"expired\":false}]}" > "$FX/artifacts-$n.json"
   echo "{\"head\":\"$h\",\"base\":\"$b\"}" > "$FX/attest-$n.json"
   publish

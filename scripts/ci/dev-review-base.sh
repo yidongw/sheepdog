@@ -94,8 +94,9 @@ verdict() { # verdict <sha> → "pass <run id>" | "blocked <run id>" | "fixes <r
       failure)
         jid=$(jq -r '.id // empty' <<<"$j" 2>/dev/null || true)
         [ -n "$jid" ] || continue
-        log=$(api "actions/jobs/$jid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' || true)
-        grep -qE '^review-gate: BLOCKED #[0-9]+' <<<"$log" || continue
+        log=$(api "actions/jobs/$jid/logs" 2>/dev/null || true)
+        # the reviewer's own section of a step that ran (review-evidence.sh) — never a whole-log scan
+        review_blocked_verdict "$jobs" "$log" || continue
         echo "blocked $id"; return ;;
     esac
   done

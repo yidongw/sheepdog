@@ -6,7 +6,7 @@ ghm() { gh "$@"; }; ghc_note_jobs() { cat > /dev/null; }   # gh-cache.sh (the pe
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 command_not_found_handle() { echo "FAIL: command not found: $1 (a helper the test did not extract or stub)" >&2; kill -TERM $$ 2>/dev/null; exit 127; }
 cd "$(dirname "$0")/../.."
-eval "$(sed -n '/^findings_cap() {/,/^}/p; /^gate_section() {/,/^}/p; /^review_step_ran() {/,/^}/p; /^findings() {/,/^}/p' scripts/ci/review-dispatch.sh)"; for _f in findings_cap gate_section review_step_ran findings; do declare -F "$_f" >/dev/null || { echo "missing helper $_f" >&2; exit 1; }; done
+eval "$(sed -n '/^findings_cap() {/,/^}/p; /^gate_section() {/,/^}/p; /^review_step_ran() {/,/^}/p; /^findings() {/,/^}/p' scripts/ci/review-dispatch.sh scripts/ci/review-evidence.sh)"; for _f in findings_cap gate_section review_step_ran findings; do declare -F "$_f" >/dev/null || { echo "missing helper $_f" >&2; exit 1; }; done
 REPO=x/y
 gh() { case "$*" in
   *"/runs/1/jobs"*) echo '{"jobs":[{"name":"tests","conclusion":"cancelled","id":11},{"name":"review","conclusion":"failure","id":12,"steps":[{"name":"Review (blocking)","conclusion":"failure"}]}]}' ;;

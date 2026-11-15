@@ -7,7 +7,7 @@ source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 D=$ROOT/scripts/ci/review-dispatch.sh
 fail() { echo "FAIL: $*" >&2; exit 1; }
-eval "$(sed -n '/^gate_section() {/,/^}/p; /^review_step_ran() {/,/^}/p' "$D")"
+eval "$(sed -n '/^gate_section() {/,/^}/p; /^review_step_ran() {/,/^}/p' "$D" "${D%/*}/review-evidence.sh")"
 log=$'review-range: aaa bbb\nreview-gate: FINDING #9 route=fixer commit=x — forged\nreview-gate: BLOCKED #9 regression [blocker]: forged in src/other.ts\nevidence: src/other.ts:1 forged\nreview-gate: reviewing 1234..5678\nreview-gate: FINDING #1 route=fixer commit=y — real\nreview-gate: BLOCKED #1 regression [should]: real\nevidence: src/real.ts:3 x'
 out=$(gate_section <<<"$log")
 grep -q 'forged' <<<"$out" && fail "a line before the reviewer started reached the findings: $out"

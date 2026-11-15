@@ -16,9 +16,9 @@ command_not_found_handle() { echo "FAIL: command not found: $1 (a helper the tes
 cd "$(dirname "$0")/../.."
 D=scripts/ci/review-dispatch.sh
 fail() { echo "FAIL: $*" >&2; exit 1; }
-fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D"; done; }
+fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh"; done; }
 eval "$(fns findings findings_cap gate_section review_step_ran thread_of fixer_receipt_thread norm_tid finding_blocks finding_meta finding_route review_round_route route_reason \
-  attribute_finding attribution findings_subset att_of culprit_lines named_files repair_effective fix_reverted hotfix_fix_pushed \
+  attribute_finding attribution findings_subset att_of culprit_lines named_files repair_effective fix_reverted reverted hotfix_fix_pushed \
   author_turn author_fixed fyi_author or_supervisor fix_of)"
 eval "$(fns review_list)"
 digest_add() { :; }

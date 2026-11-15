@@ -74,7 +74,7 @@ run() { # run <id> <title> <tests concl> <blocking step concl|-> [<attest base> 
   [ "$st" = - ] || steps="[{\"name\":\"Review (blocking; sheepdog's reviewer, this repository's diff)\",\"conclusion\":\"$st\"}]"
   [ "$st" = failure ] && rc=failure
   echo "{\"jobs\":[{\"name\":\"${JOB_PREFIX:-}tests\",\"conclusion\":\"$tc\"},{\"name\":\"${JOB_PREFIX:-}review\",\"id\":$((id + 1000)),\"conclusion\":\"$rc\",\"steps\":$steps}]}" > "$FX/jobs-$id.json"
-  [ -n "$blk" ] && printf 'review-range: %s %s\nreview-gate: BLOCKED #1 regression [blocker]: x\n' "${base:-0000000000000000000000000000000000000000}" "${title#* }" > "$FX/log-$((id + 1000)).txt"
+  [ -n "$blk" ] && printf 'review-range: %s %s\nreview-gate: reviewing x..y\nreview-gate: BLOCKED #1 regression [blocker]: x\n' "${base:-0000000000000000000000000000000000000000}" "${title#* }" > "$FX/log-$((id + 1000)).txt"
   [ -n "$base" ] && echo "{\"head\":\"${title#* }\",\"base\":\"$base\"${kind:+,\"kind\":\"$kind\"}${ATT_MAIN:+,\"main\":\"$ATT_MAIN\"}}" > "$FX/attest-$id.json"
   local concl=success; [ "$tc" = success ] && [ "$rc" = success ] || concl=failure
   RUNS=("{\"id\":$id,\"display_title\":\"$title\",\"status\":\"completed\",\"conclusion\":\"$concl\"${RUN_EVENT:+,\"event\":\"$RUN_EVENT\"}${RUN_BRANCH:+,\"head_branch\":\"$RUN_BRANCH\"}}" "${RUNS[@]}")

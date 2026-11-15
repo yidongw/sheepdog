@@ -99,6 +99,8 @@ git -C "$TRUSTED" checkout -q --detach origin/$MAIN
 CI_SCRIPTS=$SHEEPDOG_CI
 
 source "$(dirname "${BASH_SOURCE[0]}")/review-notify.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/review-evidence.sh"   # gate_section / review_step_ran: the one evidence reader
+source "$(dirname "${BASH_SOURCE[0]}")/review-repair.sh"   # reverted: the one repair-revert rule (fix_reverted)
 source "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machinery_files: what a tests-only approval never lands
 
 # Delivery failures stay retryable, but must never stop dispatch or fixer launch. With notify_outbox=<episode sha> set, a notice
@@ -189,23 +191,6 @@ findings_cap() { # stdin: review-gate lines → every line of the first FINDINGS
     /^evidence:/ && cur != "" { if (cur in kept) print; next }
     { cur = ""; if (no++ < 20) print }
     END { if (nd) print "(" nd " more findings not listed, see the run)" }'
-}
-gate_section() { # stdin: a review job log (timestamps stripped) → only what the trusted gate itself reported: the lines
-  # after the LAST "review-gate: reviewing" marker (review-gate.ts prints it when the reviewer starts); without a marker
-  # (the reviewer never ran) only the commit-gate errors and the gate's own infrastructure lines. Anything printed before
-  # the reviewer started is not a finding (review of sheepdog ee6b3ea74 #1: forged FINDING/BLOCKED lines before the
-  # marker selected unrelated dev commits for an automatic revert).
-  # [<ran>]: 0 when the jobs answer shows the blocking step "Review (blocking …" did NOT run (review_step_ran): then no
-  # "review-gate:" line can be the gate's — a lone forged marker opens nothing; only commit-gate errors remain (review of
-  # vpn-sub 6eedb3535 #1).
-  awk -v ran="${1:-1}" '{ l[NR] = $0 } /^review-gate: reviewing / { m = NR }
-    END { if (ran != 0 && m) { for (i = m + 1; i <= NR; i++) print l[i] }
-          else { for (i = 1; i <= NR; i++) if (l[i] ~ (ran != 0 ? "^(\\[gates .*ERROR|review-gate: (reviewer|no parseable|crashed))" : "^\\[gates .*ERROR")) print l[i] } }'
-}
-review_step_ran() { # stdin: a run's jobs answer → 1 when its review job's blocking step "Review (blocking …" ran to a
-  # conclusion (success / failure), 0 when it was skipped, cancelled or never started
-  jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] | [.steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] // ""
-    | if . == "success" or . == "failure" then 1 else 0 end' 2>/dev/null || echo 0
 }
 finding_jobs() { ghm api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null; }   # routing/notification snapshot only, never approval evidence
 findings() { # findings <run id> [<its jobs answer, already read>] → text (blocking findings only: the reviewer's NIT lines are notes, see notes_of)
@@ -777,27 +762,15 @@ dev_carries_fix() { # dev_carries_fix <S> <files (newline separated)> [<exclude 
   dupfix_why="the author's ${c:0:9} changed the named files after ${s:0:9} and a newer $DEV round is in review"
   return 0
 }
-fix_reverted() { # <R> <ref>... → 0 for a standing direct revert or ANY later merge revert on a ref containing R
-  # A revert X of R counts only while X itself stands: a revert of X restores R (re-check of e3aca30fd #8), so each X is
-  # checked the same way, recursively. Past 64 levels the answer is unknown: _fix_reverted_unsure=1 and repair_effective
-  # treats the repair as absent (fail closed; re-check of 0b463b6c0 #8: a 6-level cut answered "not reverted").
-  local r=$1 ref x undos d=${_fix_reverted_depth:-0}; shift
-  if [ "$d" -ge 64 ]; then _fix_reverted_unsure=1; return 1; fi
+fix_reverted() { # <R> <ref>... → 0 when R is reverted on a ref that contains it: review-repair.sh reverted(), THE one rule
+  # (a standing direct revert, recursively; ANY later merge revert — conservative by policy, docs/contract.md; past 64
+  # levels or on a git error: reverted, fail closed). Each ref judged on its own; "^<sha>" refs are exclusions, skipped.
+  local r=$1 ref; shift
+  _fix_reverted_unsure=0
   for ref in "$@"; do
-    case "$ref" in ^*) continue ;; esac   # an excluded ref (repair_effective's "^<sha>")
+    case "$ref" in ^*) continue ;; esac
     git -C "$SRC" merge-base --is-ancestor "$r" "$ref" 2>/dev/null || continue
-    # Same conservative merge-revert rule as review-repair.sh reverted():
-    # the marker names a containing merge, so a direct-R lookup misses its
-    # removed repair. No retained-contribution/restoration proofs here either.
-    # Check the whole range before direct-revert recursion to avoid parity
-    # turning an uncertain undo into a standing repair.
-    if ! undos=$(git -C "$SRC" log --format=%H -i -E --grep='^This reverts commit [0-9a-f]{7,40}, reversing' "$r..$ref" 2>/dev/null); then
-      _fix_reverted_unsure=1; return 1
-    fi
-    [ -z "$undos" ] || return 0
-    for x in $(git -C "$SRC" log --format=%H -F --grep="This reverts commit $r" "$r..$ref" 2>/dev/null || true); do
-      _fix_reverted_depth=$((d + 1)) fix_reverted "$x" "$ref" || return 0   # X stands → R is reverted
-    done
+    (cd "$SRC" && reverted "$r" "$ref") && return 0
   done
   return 1
 }

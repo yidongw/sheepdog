@@ -12,7 +12,7 @@ command_not_found_handle() { echo "FAIL: command not found: $1 (a helper the tes
 cd "$(dirname "$0")/../.."
 D=scripts/ci/review-dispatch.sh
 fail() { echo "FAIL: $*" >&2; exit 1; }
-fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D"; done; }
+fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh"; done; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 SRC=$T/src STATE=$T/state MAIN=main DEV=dev REPO=test/repo FIXER_GATE=$T/state/fixer-gate SUPERVISOR_THREAD=import:claudeAgent:sup key_prefix=""
 mkdir -p "$STATE/sent" "$FIXER_GATE/queue"
@@ -20,7 +20,7 @@ LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 source scripts/ci/review-notify.sh   # digest_add / digest_file / steer_thread / the real notify (kept as real_notify below)
 eval "real_$(declare -f notify)"
 eval "$(fns findings_cap gate_section review_step_ran thread_of fixer_receipt_thread norm_tid finding_blocks finding_meta finding_route attribute_finding attribution findings_subset \
-  att_of named_files repair_effective fix_reverted fix_of launch_failed)"
+  att_of named_files repair_effective fix_reverted reverted fix_of launch_failed)"
 helpers=$(python3 - "$D" <<'PY'
 import sys
 s = open(sys.argv[1]).read()
