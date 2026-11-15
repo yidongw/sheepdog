@@ -6,7 +6,9 @@
 # invocation. T3 and the wake relay are stubs (nothing real is reached).
 #   · run 1 (cold) and run 2 (a minute later, same state) stay within their call budgets (gh-cache.sh: a per-run memo of
 #     the dispatcher's routing reads, completed jobs' logs kept by job id; approval evidence is always read from GitHub —
-#     18 / 5; 16 / 4 with the earlier cross-run cache that also served approvals, 32 / 14 before any);
+#     22 / 5 since 11-16: completing a passed main head is review-passed.sh's own answer over the complete listing (+4,
+#     once per head: review of sheepdog 9ce09a6e2 #5/#7) — before: 18 / 5; 16 / 4 with the earlier cross-run cache that
+#     also served approvals, 32 / 14 before any);
 #   · within a run the dispatcher asks none of its own reads twice (review-passed.sh / merge-branch.sh always read
 #     GitHub themselves); run 2 fetches no completed job's log again and lists each filter set once;
 #   · the answers are the same as without the memo: the blocked re-check's findings reach the same notices;
@@ -172,7 +174,7 @@ grep -q 'artifacts' "$T/approval.1" || fail "fixture: review-passed.sh made no r
 dispatch 3
 grep -q "^api repos/o/r/actions/runs/$RH2/jobs" "$T/calls.3" || fail "run 3 did not ask the re-check's jobs again: $(cat "$T/calls.3")"
 find "$STATE/ghcache" -type f | grep -v '/ghcache/logs/' && fail "the dispatcher left something other than job logs in its cache"
-[ "$(count 1)" -le "${API_BUDGET_COLD:-18}" ] || fail "run 1: $(count 1) gh calls (budget ${API_BUDGET_COLD:-18})"
+[ "$(count 1)" -le "${API_BUDGET_COLD:-22}" ] || fail "run 1: $(count 1) gh calls (budget ${API_BUDGET_COLD:-22})"
 [ "$(count 2)" -le "${API_BUDGET_WARM:-5}" ] || fail "run 2: $(count 2) gh calls (budget ${API_BUDGET_WARM:-5})"
 grep -q "MAIN ${H2:0:9}: finding(s) 1 → owner" "$STATE/dispatch.log" || fail "the blocked re-check's finding was not read: $(cat "$STATE/dispatch.log")"
-echo "dispatcher API budget: run 1 $(count 1) calls, run 2 $(count 2) calls (budgets ${API_BUDGET_COLD:-18} / ${API_BUDGET_WARM:-5})"
+echo "dispatcher API budget: run 1 $(count 1) calls, run 2 $(count 2) calls (budgets ${API_BUDGET_COLD:-22} / ${API_BUDGET_WARM:-5})"

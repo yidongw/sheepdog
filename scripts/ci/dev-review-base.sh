@@ -75,7 +75,7 @@ load_runs() {
 review_job() { # review_job <jobs JSON> → the review job (with or without the called workflow's "<caller job> / " prefix)
   jq -c '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] // empty' <<<"$1" 2>/dev/null || true
 }
-verdict() { # verdict <sha> → "pass <run id>" | "blocked <run id>" | "fixes <run id>": THE verdict of <sha> — its FIRST
+verdict() { # verdict <sha> → "<pass|blocked|fixes> <run id> <that attempt's attestation JSON, or ->": THE verdict of <sha> — its FIRST
   # completed, attested verdict in run id / run_attempt order (review-evidence.sh review_first_verdict; a later run or
   # rerun never changes it: owner 11-16); "unknown <run id>" when an earlier run is unreadable or not finished yet
   # (fail closed: no base, no repair target, blocked for a repair round's own commits); "" when none.
@@ -83,8 +83,8 @@ verdict() { # verdict <sha> → "pass <run id>" | "blocked <run id>" | "fixes <r
   local rc=0
   review_first_verdict "$1" any || rc=$?
   case "$rc" in
-    0) echo "$rfv_kind $rfv_id" ;;
-    2) echo "unknown ${rfv_id:-0}" ;;
+    0) echo "$rfv_kind $rfv_id ${rfv_att:--}" ;;
+    2) echo "unknown ${rfv_id:-0} -" ;;
   esac
   return 0
 }
@@ -118,11 +118,13 @@ clean_merge() { # clean_merge <m> → 0 when m has two parents and its tree is e
   [ "${t%%$'\n'*}" = "$(git rev-parse "$1^{tree}")" ]
 }
 
-target_range() { # target_range <T> <run id> → the commits T's blocked review actually reviewed: its attested base..T
+target_range() { # target_range <T> <its verdict line> → the commits T's blocked review actually reviewed: the attested
+  # base..T OF THAT VERY ATTEMPT (review_first_verdict binds the attestation to the attempt: review of 9ce09a6e2 #3)
   # minus the attested main side (main's commits a main→dev merge brought were not in that review's diff — review of
   # 1b2f4484e #4)
   local att b m
-  att=$(review_attestation "$2" "$1") || return 1
+  read -r _ _ att <<<"$2"
+  [ -n "$att" ] && [ "$att" != - ] || return 1
   b=$(jq -r .base <<<"$att"); m=$(jq -r '.mainside // ""' <<<"$att")
   if [ -n "$m" ]; then
     [[ "$m" =~ ^[0-9a-f]{40}$ ]] || return 1
@@ -181,7 +183,7 @@ only_fixes() { # only_fixes <base> <head>
         # repairs of this round wrote) — touching other reviewed or older code (review of fb6bb396e #1/#2: a "repair"
         # reverting a passing commit's auth fix) is a full review of the repair commits
         # (no readable attestation: nothing is admitted — a pure addition still is a repair)
-        tr=$(target_range "$t" "${v##* }") || tr=""
+        tr=$(target_range "$t" "$v") || tr=""
         printf '%s\n' $tr >> "$TMPF.allowed"
       fi
     done
@@ -231,7 +233,9 @@ case "${1:-}" in
 esac
 
 usable_base() { # usable_base <c> <verdict> → 0 when c's completed review is a range base (readable proof, producer mode)
-  case "${2%% *}" in pass|blocked|fixes) review_link "${2##* }" "$1" "$mb" "$head" 0 "${2%% *}" ;; *) return 1 ;; esac
+  local k id a
+  read -r k id a <<<"$2"; [ "$a" != - ] || a=""
+  case "$k" in pass|blocked|fixes) review_link "$id" "$1" "$mb" "$head" 0 "$k" "$a" ;; *) return 1 ;; esac
 }
 head=$(git rev-parse "${1:-HEAD}^{commit}")
 mb=$(git merge-base "$MAINREF" "$head")
@@ -256,7 +260,7 @@ if parent=$(git rev-parse -q --verify "$head^1^{commit}") && ! git merge-base --
           usable_base "$c" "$v" && { base=$c; break; }
         fi
       fi
-      [ -z "$v" ] || echo "dev-review-base: the review of ${c:0:12} (run ${v##* }) has no usable coverage chain — not a base, its commits are reviewed again" >&2
+      [ -z "$v" ] || echo "dev-review-base: the review of ${c:0:12} (run $(cut -d' ' -f2 <<<"$v")) has no usable coverage chain — not a base, its commits are reviewed again" >&2
     done
   fi
 fi

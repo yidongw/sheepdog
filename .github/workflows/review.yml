@@ -245,6 +245,8 @@ jobs:
         run: |
           S=../.sheepdog/scripts/ci
           kind=review
+          # this run is no evidence about itself: the verdict reader skips this unfinished attempt (review of 9ce09a6e2 #1/#2)
+          export REVIEW_SELF_RUN="$GITHUB_RUN_ID $GITHUB_RUN_ATTEMPT"
           # one default-branch boundary for this run's range scripts and its attestation
           main=$(git rev-parse "origin/$MAIN_BRANCH^{commit}"); export DEV_REVIEW_MAIN_REF=$main
           if [ "$HEAD_BRANCH" = "$MAIN_BRANCH" ]; then
@@ -343,8 +345,10 @@ jobs:
         working-directory: candidate
         run: |
           mkdir -p ../attest
+          # run_id / run_attempt bind it to this attempt (review of 9ce09a6e2 #3: a rerun must not lend its range to another attempt)
           jq -nc --arg head "$(git rev-parse HEAD)" --arg base "$REVIEW_BASE" --arg kind "$KIND" --arg main "$REVIEW_MAIN" --arg ms "${REVIEW_MAINSIDE:-}" \
-            '{head: $head, base: $base, kind: $kind, main: $main} + (if $ms == "" then {} else {mainside: $ms} end)' > ../attest/review-attestation.json
+            --arg rid "$GITHUB_RUN_ID" --arg ra "$GITHUB_RUN_ATTEMPT" \
+            '{head: $head, base: $base, kind: $kind, main: $main} + {run_id: $rid, run_attempt: $ra} + (if $ms == "" then {} else {mainside: $ms} end)' > ../attest/review-attestation.json
           cat ../attest/review-attestation.json
         env:
           KIND: ${{ steps.range.outputs.kind }}
@@ -388,7 +392,7 @@ jobs:
       - if: ${{ !cancelled() && steps.attest.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: review-attestation
+          name: review-attestation-${{ github.run_attempt }}
           path: attest/review-attestation.json
           retention-days: 90
 

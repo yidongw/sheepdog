@@ -14,6 +14,7 @@ cd "$(dirname "$0")/../.."
 D=scripts/ci/review-dispatch.sh
 fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh"; done; }
 declare -F review_list >/dev/null || eval "$(fns review_list)"; eval "$(fns review_first_verdict review_attempt_verdict review_attested_kind review_verdict_load review_blocked_verdict review_log_lines gate_section review_step_ran)"; eval "$(fns review_api review_verdict_list)"   # THE verdict reader the dispatcher's helpers call (review_first_verdict)
+hotfix_pass_confirmed() { :; }   # the completion gate (review-passed.sh REVIEW_PASSED_MODE=recheck): review-first-verdict.sh / the API budget run test it
 eval "$(fns findings findings_cap gate_section review_step_ran thread_of fixer_receipt_thread norm_tid finding_blocks finding_meta finding_route review_round_route route_reason \
   attribute_finding attribution findings_subset att_of culprit_lines named_files repair_effective fix_reverted reverted hotfix_fix_pushed \
   author_turn author_fixed fyi_author or_supervisor fix_of)"

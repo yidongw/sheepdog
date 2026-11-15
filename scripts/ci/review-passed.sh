@@ -52,7 +52,10 @@ covered() { review_covered "$1" "$2" "$sha" "${3:-0}"; }
 # later pass never stands over a blocked (or unknown) first verdict, and only a Review-Fix-Of: repair — a commit of its
 # own, approved in turn — clears a block. Its review step is judged on that attempt; its trusted tests on the run's
 # latest attempt (a rerun of red tests), and the run as a whole must have concluded success.
-rc=0; review_first_verdict "$sha" any || rc=$?
+# REVIEW_PASSED_MODE=recheck (the dispatcher completing a main head): its MAIN verdict only — the first "recheck <sha>".
+mode=${REVIEW_PASSED_MODE:-any}
+case "$mode" in any|recheck) ;; *) echo "REVIEW_PASSED_MODE must be any or recheck" >&2; exit 2 ;; esac
+rc=0; review_first_verdict "$sha" "$mode" || rc=$?
 case "$rc" in
   1) echo "no completed trusted review of ${sha:0:12}" >&2; exit 1 ;;
   2) echo "the verdict of ${sha:0:12} is unknown (run ${rfv_id:-?}: unreadable or not finished) — refused (fail closed)" >&2; exit 1 ;;

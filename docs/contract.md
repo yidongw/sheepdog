@@ -63,7 +63,15 @@ what gets deployed. The workflow is [.github/workflows/review.yml](../.github/wo
   unknown, which is treated as blocked (fail closed; the next dispatcher run asks again). Later runs and reruns never
   change a verdict: a blocked commit is cleared only by an effective `Review-Fix-Of:` repair. Main's own verdict of a
   commit (its first "recheck <sha>") is the separate after-the-fact check: its block routes to a main fix chain and
-  withdraws a tests-only approval (rule (g)).
+  withdraws a tests-only approval (rule (g)). Each attempt uploads its own attestation (`review-attestation-<attempt>`,
+  with `run_id` / `run_attempt` inside): a verdict is bound to its attempt's range, and a legacy run-wide
+  `review-attestation` counts only for a run that was never rerun. A run is never evidence about itself: the review job
+  reading verdicts skips its own unfinished attempt (`REVIEW_SELF_RUN`). The dispatcher completes a main head only on
+  `review-passed.sh`'s answer for its main verdict (`REVIEW_PASSED_MODE=recheck`: every page of the listing, the run
+  concluded success, its tests passed); an unknown main verdict waits for the next run.
+- **A commit with nothing of its own is covered from what it equals**: no non-merge commit beyond the anchor and a tree
+  identical to the anchor-side commit it contains (a "merge main into dev" with main's tree) — whatever its own review
+  said; the dispatcher's merge-only rule (tralyx e964c6539, 11-15).
 - **A reverted repair repairs nothing** (`review-repair.sh`, also the dispatcher's `fix_reverted`): a standing direct
   revert of the repair, or ANY merge revert after it. Conservative by policy: any merge revert after a repair forces a
   full review instead of trusting the repair; it costs one extra review and never approves unreviewed code.
