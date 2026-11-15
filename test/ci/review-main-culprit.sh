@@ -18,7 +18,8 @@
 #       is bound to the approving review, (k2) also when its log cannot be read (review of dev 8a8373271 #1); (l) receipts
 #       name the review attempt (review of pawx 7f0dbbc8f #1/#2); (m) a repository-local review-passed.sh's pass is a plain
 #       pass, never main-only; (n) DRY previews without a receipt (review of main 9b7ece173 #1-#3); (l2) one jobs answer
-#       binds classification, text and receipt (review of dev 84ada34cc #3)
+#       binds classification, text and receipt (review of dev 84ada34cc #3); (o) one log read for classification and
+#       record, (p) a repository-local checker's main-only head is routed as an ordinary blocked head (review of 76fdca743)
 set -uo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 cd "$(dirname "$0")/../.."
@@ -125,6 +126,11 @@ RP() { (cd "$SRC" && bash "$ROOT/scripts/ci/review-passed.sh" "$H" o/r >/dev/nul
 ghm() { # the routing memo: the real (fake) gh; with $T/ghm-logs-fail present, job-log reads fail (an unavailable read)
   # (its content, if any: only that job's log fails)
   if [ -e "$T/ghm-logs-fail" ] && [[ "$*" == *"/jobs/$(cat "$T/ghm-logs-fail")"*"/logs"* ]]; then return 1; fi
+  # $T/ghm-log-nth = "<job id> <n>": only the n-th read of that job's log fails (counted in $T/ghm-log-count)
+  if [ -e "$T/ghm-log-nth" ] && [[ "$*" == *"/jobs/$(cut -d' ' -f1 "$T/ghm-log-nth")/logs"* ]]; then
+    echo x >> "$T/ghm-log-count"
+    [ "$(wc -l < "$T/ghm-log-count")" = "$(cut -d' ' -f2 "$T/ghm-log-nth")" ] && return 1
+  fi
   # $T/swap-jobs = "<run id> <file>": right after the first read of that run's jobs, the run is rerun (jobs replaced)
   if [ -e "$T/swap-jobs" ] && [[ "$*" == *"/runs/$(cut -d' ' -f1 "$T/swap-jobs")/jobs"* ]]; then
     gh "$@"; local rc=$?; cp "$(cut -d' ' -f2 "$T/swap-jobs")" "$FX/jobs-$(cut -d' ' -f1 "$T/swap-jobs").json"; rm -f "$T/swap-jobs"; return $rc
@@ -135,7 +141,7 @@ STATE=$T/state MAIN=main DEV=dev TRUSTED=$T/trusted WORK=$T/work OUTBOX=$T/state
 DEV_REVERT_AFTER_SEC=3600 DEV_REVERT_WARN_SEC=900 key_prefix="" SUPERVISOR_THREAD=sup DISPATCH_THREAD=disp
 mkdir -p "$STATE/sent" "$OUTBOX"; LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 git -C "$SRC" worktree add -q --detach "$TRUSTED" origin/main
-eval "$(sed -n '/^review_list() {/,/^}/p; /^dev_round_noop() {/,/^}/p; /^dev_merge_only() {/,/^}/p; /^review_infra_reason() {/,/^}/p; /^run_verdict() {/,/^}/p; /^dev_verdict_run() {/,/^}/p; /^named_files() {/p; /^findings_cap() {/,/^}/p; /^findings() {/,/^}/p; /^notes_of() {/,/^}/p; /^findings_subset() {/,/^}/p; /^main_culprits_api() /p; /^main_culprit_hint() {/,/^}/p; /^dev_split_main() {/,/^}/p; /^record_approving_main() {/,/^}/p; /^thread_of() /p; /^range_threads() {/,/^}/p' "$D")"
+eval "$(sed -n '/^review_list() {/,/^}/p; /^dev_round_noop() {/,/^}/p; /^dev_merge_only() {/,/^}/p; /^review_infra_reason() {/,/^}/p; /^run_verdict() {/,/^}/p; /^dev_verdict_run() {/,/^}/p; /^named_files() {/p; /^findings_cap() {/,/^}/p; /^findings() {/,/^}/p; /^notes_of() {/,/^}/p; /^findings_subset() {/,/^}/p; /^main_culprits_api() /p; /^main_culprit_hint() {/,/^}/p; /^dsm_api() {/,/^}/p; /^dev_split_main() {/,/^}/p; /^record_approving_main() {/,/^}/p; /^thread_of() /p; /^range_threads() {/,/^}/p' "$D")"
 source "$ROOT/scripts/ci/review-main-culprits.sh"
 source "$ROOT/scripts/ci/review-machinery.sh"
 for f in review_list findings findings_subset main_culprit_hint dev_split_main record_approving_main main_culprits_api review_main_culprits dev_verdict_run; do
@@ -494,4 +500,33 @@ grep -q "DRY merge dev ${H:0:9}" <<<"$out" || fail "(n) DRY did not preview the 
 ! landed || fail "(n) DRY landed"
 test ! -s "$STATE/open-findings.log" || fail "(n) DRY wrote a record"
 echo "ok - (n) DRY previews a main-only merge without a receipt and writes nothing"
+# ── review of sheepdog main 76fdca743 #1: classification and record come from ONE log read. The head loop's first read of
+#    the approving job's log works, dev_split_main's own read fails: no receipt, no landing this run ──
+fixture_log "$T/log" "$C" 0
+scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+reset_dev; rm -f "$T/ghm-log-count"; echo "$JID 2" > "$T/ghm-log-nth"
+( cd "$ROOT" && merged_one=0 && DRY="" && eval "$loop" ) >/dev/null 2>&1; g fetch -q origin
+rm -f "$T/ghm-log-nth" "$T/ghm-log-count"
+! landed || fail "(o) landed although dev_split_main's log read failed"
+! ls "$STATE/sent/" | grep -q mainfindings || fail "(o) a receipt from a failed read: $(ls "$STATE/sent")"
+! grep -q "BLOCKED #" "$STATE/open-findings.log" 2>/dev/null || fail "(o) recorded from a failed read"
+echo "ok - (o) a failed log read inside the classification: no receipt, no landing"
+
+# ── review of sheepdog main 76fdca743 #2: a repository-local checker never approves main-only, and a head blocked only by
+#    main findings is then an ORDINARY blocked head: its findings are routed (never "neither landed nor routed") ──
+cat > "$LEG/review-passed.sh" <<'RP'
+#!/usr/bin/env bash
+# a repository-local checker (receipt-capable or not): with REVIEW_MAIN_FINDINGS=0 a blocked review is not approved
+echo "${REVIEW_MAIN_FINDINGS:-unset}" >> "$FX/legacy-rp-main"
+exit 1
+RP
+fixture_log "$T/log" "$C" 0
+scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+rm -f "$FX/legacy-rp-main"; reset_dev
+( cd "$ROOT" && merged_one=0 && DRY="" && CI_SCRIPTS=$LEG && approval_named=0 && eval "$loop" ) >/dev/null 2>&1; g fetch -q origin
+! landed || fail "(p) a repository-local checker's head landed main-only"
+grep -q "^dev_blocked $H" "$T/calls" 2>/dev/null || fail "(p) the head was neither landed nor routed: $(cat "$LOG")"
+[ "$(routed_nums)" = "1 2" ] || fail "(p) routed '$(routed_nums)', want 1 2 (all findings, as an ordinary blocked head)"
+! grep -qv '^0$' "$FX/legacy-rp-main" || fail "(p) the repository-local checker was asked with main findings allowed"
+echo "ok - (p) a repository-local checker: no main-only approval; the head is routed as an ordinary blocked head"
 echo "main-culprit checks passed"
