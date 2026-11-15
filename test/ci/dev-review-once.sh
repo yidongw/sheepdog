@@ -257,6 +257,25 @@ g checkout -q -b auth3 "$HE"; echo repaired > "$T/src/e"; echo new > "$T/src/e2"
 base --only-fixes "$HE" "$HG" || fail "(h) a repair of E's own lines is not tests-only"
 run 35 "review $HG" skipped "$HE"
 rp "$HG" o/r "$P2" || fail "(h) the plain repair of E is not approved"
+# review of 79a7b2f6e #1: a repair that only prepends a line (hunk "@@ -0,0 +1 @@") is a repair; #2: verbatim paths
+g checkout -q -b auth4 "$HE"; { echo "import math"; cat "$T/src/e"; } > "$T/src/e.new"; mv "$T/src/e.new" "$T/src/e"
+g add -A; g commit -q -m "prepend an import" -m "Review-Fix-Of: $HE"; HI=$(g rev-parse HEAD)
+base --only-fixes "$HE" "$HI" || fail "(h) a prepend-only repair is not tests-only"
+for name in 'file with space' $'tab\there' 'quo"te' 'ünï'; do
+  g checkout -q -b "odd$RANDOM" "$HD"; printf 'bad\n' > "$T/src/$name"; g add -A; g commit -q -m "blocked: adds $name"; HB=$(g rev-parse HEAD)
+  printf 'fixed\n' > "$T/src/$name"; g add -A; g commit -q -m "repairs $name" -m "Review-Fix-Of: $HB"; HBF=$(g rev-parse HEAD)
+  run 37 "review $HB" failure "$HD"
+  base --only-fixes "$HB" "$HBF" || fail "(h) the repair of '$name' is not tests-only"
+done
+# a multi-line hunk "@@ -2,2 +2,2 @@" is checked in full: E's line 2 and D's line 3 changed together → full review
+g checkout -q -b auth5 "$HD"; printf 'one\nREQUIRE_AUTH=1\n' > "$T/src/auth.conf"; g add -A; g commit -q -m "D2: second auth line (passed)"; H2D=$(g rev-parse HEAD)
+printf 'one\ntwo\nREQUIRE_AUTH=1\n' > "$T/src/auth.conf"; g add -A; g commit -q -m "E2 (blocked)"; H2E=$(g rev-parse HEAD)
+g checkout -q -b auth7 "$H2E"
+printf 'one\nTWO\nREQUIRE_AUTH=0\n' > "$T/src/auth.conf"; g add -A; g commit -q -m "repairs E2 and flips auth" -m "Review-Fix-Of: $H2E"; H2F=$(g rev-parse HEAD)
+[ -n "$(g diff -U0 "$H2E" "$H2F" | grep -E '^@@ -2,2 ')" ] || fail "(h) fixture: no two-line hunk"
+run 40 "review $H2D" success "$HD"; run 41 "review $H2E" failure "$H2D"
+if base --only-fixes "$H2E" "$H2F"; then fail "(h) the second line of a two-line hunk was not checked"; fi
+g checkout -q auth3
 # main's re-check of the landed fix blocked → its tests-only approval no longer stands
 run 36 "recheck $HG" failure "$P2"
 if rp "$HG" o/r "$P2"; then fail "(h) a tests-only fix approved although main's re-check of it blocked"; fi

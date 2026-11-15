@@ -138,31 +138,31 @@ target_range() { # target_range <T> <run id> → the commits T's blocked review 
 }
 touches_only() { # touches_only <fix commit> <allowed commits file> → 0 when every line the commit removes or changes was
   # introduced by an allowed commit (blame at its parent); never for a merge, a revert or a binary change
-  local c=$1 p f a n sha
+  local c=$1 p f a n sha line
   p=$(git rev-parse -q --verify "$c^1") || return 1
   [ "$(git rev-list --parents -n1 "$c" | wc -w)" = 2 ] || return 1
   # a revert is never a repair of its own: it removes reviewed work wholesale
   git show -s --format=%B "$c" > "$TMPF.msg"
   ! grep -qiE '^This reverts commit [0-9a-f]{7,40}' "$TMPF.msg" || return 1
-  ! head -1 "$TMPF.msg" | grep -qi '^Revert "' || return 1
-  ! git diff --numstat --no-renames "$p" "$c" | grep -q '^-' || return 1   # binary
-  git diff -U0 --no-renames --no-color "$p" "$c" > "$TMPF.diff" || return 1
-  f=""
-  while IFS= read -r line; do
-    case "$line" in
-      "--- a/"*) f=${line#--- a/} ;;
-      "--- /dev/null") f="" ;;
-      "@@ "*)
-        [ -n "$f" ] || continue
-        a=$(sed -nE 's/^@@ -([0-9]+)(,([0-9]+))? .*/\1 \3/p' <<<"$line")
-        n=${a#* }; a=${a%% *}; [ -n "$n" ] && [ "$n" != "$a" ] || n=1
-        [ "$n" -gt 0 ] || continue
-        git blame --porcelain -L "$a,+$n" "$p" -- "$f" > "$TMPF.blame" 2>/dev/null || return 1
-        for sha in $(grep -E '^[0-9a-f]{40} [0-9]+ [0-9]+' "$TMPF.blame" | cut -d' ' -f1 | sort -u); do
-          grep -qx "$sha" "$2" || return 1
-        done ;;
-    esac
-  done < "$TMPF.diff"
+  ! [[ "$(sed -n 1p "$TMPF.msg")" =~ ^[Rr][Ee][Vv][Ee][Rr][Tt]\ \" ]] || return 1
+  git diff --numstat --no-renames "$p" "$c" > "$TMPF.num" || return 1   # buffered: no SIGPIPE under pipefail
+  ! grep -q '^-' "$TMPF.num" || return 1   # a binary change
+  # files from -z (verbatim paths: spaces, tabs, quotes, non-ASCII — review of 79a7b2f6e #2), hunks per file
+  git diff --no-renames --name-only -z "$p" "$c" > "$TMPF.files" || return 1
+  while IFS= read -r -d '' f; do
+    git diff -U0 --no-renames --no-color --no-ext-diff "$p" "$c" -- ":(literal)$f" > "$TMPF.diff" || return 1
+    while IFS= read -r line; do
+      # "@@ -a[,n] +…": n absent means one line, n = 0 means nothing removed (review of 79a7b2f6e #1)
+      [[ "$line" =~ ^@@\ -([0-9]+)(,([0-9]+))?\  ]] || continue
+      a=${BASH_REMATCH[1]}; n=${BASH_REMATCH[3]:-1}
+      [ "$n" -gt 0 ] || continue
+      git blame --porcelain -L "$a,+$n" "$p" -- ":(literal)$f" > "$TMPF.blame" 2>/dev/null \
+        || git blame --porcelain -L "$a,+$n" "$p" -- "$f" > "$TMPF.blame" 2>/dev/null || return 1
+      for sha in $(grep -E '^[0-9a-f]{40} [0-9]+ [0-9]+' "$TMPF.blame" | cut -d' ' -f1 | sort -u); do
+        grep -qx "$sha" "$2" || return 1
+      done
+    done < "$TMPF.diff"
+  done < "$TMPF.files"
   return 0
 }
 only_fixes() { # only_fixes <base> <head>
