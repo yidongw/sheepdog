@@ -147,17 +147,18 @@ touches_only() { # touches_only <fix commit> <allowed commits file> → 0 when e
   ! [[ "$(sed -n 1p "$TMPF.msg")" =~ ^[Rr][Ee][Vv][Ee][Rr][Tt]\ \" ]] || return 1
   git diff --numstat --no-renames "$p" "$c" > "$TMPF.num" || return 1   # buffered: no SIGPIPE under pipefail
   ! grep -q '^-' "$TMPF.num" || return 1   # a binary change
-  # files from -z (verbatim paths: spaces, tabs, quotes, non-ASCII — review of 79a7b2f6e #2), hunks per file
+  # files from -z (verbatim paths: spaces, tabs, quotes, non-ASCII — review of 79a7b2f6e #2), hunks per file (diff: literal pathspecs; blame: the file name itself)
   git diff --no-renames --name-only -z "$p" "$c" > "$TMPF.files" || return 1
   while IFS= read -r -d '' f; do
-    git diff -U0 --no-renames --no-color --no-ext-diff "$p" "$c" -- ":(literal)$f" > "$TMPF.diff" || return 1
+    git --literal-pathspecs diff -U0 --no-renames --no-color --no-ext-diff "$p" "$c" -- "$f" > "$TMPF.diff" || return 1
     while IFS= read -r line; do
       # "@@ -a[,n] +…": n absent means one line, n = 0 means nothing removed (review of 79a7b2f6e #1)
       [[ "$line" =~ ^@@\ -([0-9]+)(,([0-9]+))?\  ]] || continue
       a=${BASH_REMATCH[1]}; n=${BASH_REMATCH[3]:-1}
       [ "$n" -gt 0 ] || continue
-      git blame --porcelain -L "$a,+$n" "$p" -- ":(literal)$f" > "$TMPF.blame" 2>/dev/null \
-        || git blame --porcelain -L "$a,+$n" "$p" -- "$f" > "$TMPF.blame" 2>/dev/null || return 1
+      # blame takes a file NAME after -- (not a pathspec): the exact path, nothing else (review of dd1625786 #1: a
+      # ":(literal)<name>" argument named an attacker's sibling file)
+      git blame --porcelain -L "$a,+$n" "$p" -- "$f" > "$TMPF.blame" 2>/dev/null || return 1
       for sha in $(grep -E '^[0-9a-f]{40} [0-9]+ [0-9]+' "$TMPF.blame" | cut -d' ' -f1 | sort -u); do
         grep -qx "$sha" "$2" || return 1
       done

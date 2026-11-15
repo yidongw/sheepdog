@@ -267,6 +267,12 @@ for name in 'file with space' $'tab\there' 'quo"te' 'ünï'; do
   run 37 "review $HB" failure "$HD"
   base --only-fixes "$HB" "$HBF" || fail "(h) the repair of '$name' is not tests-only"
 done
+# review of dd1625786 #1: a blocked commit adding a decoy named ":(literal)auth.conf" does not let a repair change the
+# real auth.conf (lines a passing review wrote)
+g checkout -q -b decoy "$HD"; printf 'REQUIRE_AUTH=1\n' > "$T/src/:(literal)auth.conf"; g add -A; g commit -q -m "blocked: decoy"; HDC=$(g rev-parse HEAD)
+printf 'REQUIRE_AUTH=0\n' > "$T/src/auth.conf"; g add -A; g commit -q -m "repair flips the real auth.conf" -m "Review-Fix-Of: $HDC"; HDF=$(g rev-parse HEAD)
+run 42 "review $HDC" failure "$HD"
+if base --only-fixes "$HDC" "$HDF"; then fail "(h) a decoy file let a repair change lines outside its blocked range"; fi
 # a multi-line hunk "@@ -2,2 +2,2 @@" is checked in full: E's line 2 and D's line 3 changed together → full review
 g checkout -q -b auth5 "$HD"; printf 'one\nREQUIRE_AUTH=1\n' > "$T/src/auth.conf"; g add -A; g commit -q -m "D2: second auth line (passed)"; H2D=$(g rev-parse HEAD)
 printf 'one\ntwo\nREQUIRE_AUTH=1\n' > "$T/src/auth.conf"; g add -A; g commit -q -m "E2 (blocked)"; H2E=$(g rev-parse HEAD)
