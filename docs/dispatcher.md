@@ -38,7 +38,12 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   findings are routed (`dev_split_main`). Blocked only by such findings, the head lands like a passing review (the train
   and the head loop ask `review-passed.sh`, which decides from the trusted runs with the same rule; the train asks it for
   every sha with a completed blocked review and classifies no single run itself, so a newer run whose reviewer failed
-  never hides an older qualifying one), and its tests are not cancelled when the review fails. There is no cross-chain "same problem" matching: main's own chain owns the finding.
+  never hides an older qualifying one), and its tests are not cancelled when the review fails. It lands only after the
+  approving review attempt's main findings are recorded (`review-passed.sh` names that attempt in `REVIEW_APPROVAL_OUT`;
+  the classification and the record come from one read of its jobs and log; any read or write failure → not landed that
+  run, retried). Only sheepdog's own contract scripts approve main-only: a repository that still uses repository-local
+  contract scripts (no `.github/sheepdog.yml`) gets plain passes only, and a head of it blocked only by main findings is
+  an ordinary blocked head — its findings are routed like any other. There is no cross-chain "same problem" matching: main's own chain owns the finding.
 - **Open findings**: findings whose fix rounds are spent are kept in `$STATE/open-findings.log`, which the review job
   passes to the reviewer (`open-findings-file`) so repeats are recognised as pre-existing.
 

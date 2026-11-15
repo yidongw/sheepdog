@@ -193,13 +193,14 @@ findings_cap() { # stdin: review-gate lines → every line of the first FINDINGS
     { cur = ""; if (no++ < 20) print }
     END { if (nd) print "(" nd " more findings not listed, see the run)" }'
 }
-findings() { # findings <run id> [<its jobs answer, already read>] → text (blocking findings only: the reviewer's NIT lines are notes, see notes_of)
+findings() { # findings <run id> [<its jobs answer, already read> [<its review job's log, already read>]] → text (blocking
+  # findings only: the reviewer's NIT lines are notes, see notes_of)
   local run=$1 jobs=${2:-} tests_ok rid
   if [ -n "$jobs" ]; then ghc_note_jobs <<<"$jobs"; else jobs=$(ghm api "repos/$REPO/actions/runs/$run/jobs"); fi
   tests_ok=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "tests") | .conclusion' <<<"$jobs")
   rid=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "review") | .id' <<<"$jobs")
   if [ -n "$rid" ]; then
-    ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' \
+    if [ -n "${3+x}" ]; then printf '%s\n' "$3"; else ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null; fi | sed -E 's/^[^ ]+ //' \
       | grep -E '^(review-gate: (BLOCKED|FINDING|ROUTE|reviewer|no parseable|crashed|NOTE)|evidence:|\[gates .*ERROR)' | findings_cap || true
   fi
   # a CANCELLED tests job is never a code finding: the dispatcher cancels it itself once the review blocked ("tests no
@@ -1109,26 +1110,38 @@ main_culprit_hint() { # main_culprit_hint <S> <findings> → 0 when some FINDING
   done
   return 1
 }
+dsm_api() { # dev_split_main's view of GitHub: its one review-job log read is served again, everything else is a routing read
+  if [ "$1" = "actions/jobs/${dsm_jid:-x}/logs" ]; then printf '%s\n' "$dsm_log"; else main_culprits_api "$1"; fi
+}
 dev_split_main() { # dev_split_main <S> <run id> <findings> → sets dev_f (the findings left for $DEV: the main findings removed),
   # main_nums / dev_nums, and main_only=1 when EVERY blocking finding is a main finding (review_main_culprits: the run's
   # own log and attestation); the main findings are recorded once per S and review attempt (receipt main_receipt =
   # $STATE/sent/<S>.<run>.<run attempt>.<review job id>.mainfindings, touched only after the append succeeded). Unreadable evidence → nothing is removed, main_only=0. A record that cannot be
   # written → the proven main findings are still removed from dev_f (never routed on $DEV), but main_only stays 0, so no
   # caller approves through the main-findings path that run (review of sheepdog main 725a2adc1 #1 / 6b9031dfb #1).
-  local s=$1 run=$2 f=$3 cls rc=0 n att jobs
+  local s=$1 run=$2 f=$3 cls rc=0 n att jobs dsm_log dsm_jid
   dev_f=$f main_nums="" dev_nums="" main_only=0 main_receipt=""
+  # a repository-local checker never approves main-only (approval_named=0), so its heads keep every finding: an ordinary
+  # blocked head, routed as before — never "neither landed nor routed" (review of sheepdog main 76fdca743 #2)
+  [ "${approval_named:-1}" = 1 ] || return 0
   main_culprit_hint "$s" "$f" || return 0
-  # ONE jobs answer for the classification, the recorded text and the receipt's attempt / job identity: a rerun between
-  # separate reads could otherwise mark the new attempt recorded with the old attempt's findings (review of 84ada34cc #3)
+  # ONE jobs answer and ONE read of its review job's log for the classification, the recorded / routed text and the
+  # receipt's attempt / job identity (reviews of 84ada34cc #3, 76fdca743 #1): any read failure → nothing removed, no
+  # receipt, no main-only approval this run
   jobs=$(main_culprits_api "actions/runs/$run/jobs" 2>/dev/null) || return 0
   att=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] // {} | "\(.run_attempt // 1).\(.id // "")"' <<<"$jobs" 2>/dev/null || true)
   [[ "$att" =~ ^[0-9]+\.[0-9]+$ ]] || return 0
-  f=$(findings "$run" "$jobs"); dev_f=$f
-  cls=$(cd "$SRC" && review_main_culprits main_culprits_api "$run" "$s" "$jobs") || rc=$?
+  dsm_jid=${att#*.}
+  dsm_log=$(main_culprits_api "actions/jobs/$dsm_jid/logs" 2>/dev/null) || return 0
+  [ -n "$dsm_log" ] || return 0
+  cls=$(cd "$SRC" && review_main_culprits dsm_api "$run" "$s" "$jobs") || rc=$?
   [ "$rc" -le 1 ] && [ -n "$cls" ] || return 0
   main_nums=$(awk '$2 == "main" {printf "%s ", $1}' <<<"$cls"); main_nums=${main_nums% }
   dev_nums=$(awk '$2 != "main" {printf "%s ", $1}' <<<"$cls"); dev_nums=${dev_nums% }
   [ -n "$main_nums" ] || return 0
+  f=$(findings "$run" "$jobs" "$dsm_log")
+  for n in $main_nums; do grep -q "^review-gate: BLOCKED #$n " <<<"$f" || { main_nums="" dev_nums=""; return 0; }; done
+  dev_f=$f
   # the proven split holds whatever happens to the record: main findings never reach $DEV's fixer / revert path
   # (review of sheepdog main 6b9031dfb #1); only main_only — the approval — waits for the record
   # shellcheck disable=SC2086 # finding numbers, one word each
