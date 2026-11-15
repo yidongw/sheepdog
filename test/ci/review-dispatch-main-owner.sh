@@ -19,7 +19,7 @@ mkdir -p "$STATE/sent" "$FIXER_GATE/queue"
 LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 source scripts/ci/review-notify.sh   # digest_add / digest_file / steer_thread / the real notify (kept as real_notify below)
 eval "real_$(declare -f notify)"
-eval "$(fns findings_cap thread_of fixer_receipt_thread norm_tid finding_blocks finding_meta finding_route attribute_finding attribution findings_subset \
+eval "$(fns findings_cap gate_section thread_of fixer_receipt_thread norm_tid finding_blocks finding_meta finding_route attribute_finding attribution findings_subset \
   att_of named_files repair_effective fix_reverted fix_of launch_failed)"
 helpers=$(python3 - "$D" <<'PY'
 import sys
@@ -51,7 +51,7 @@ FIXER_DONE=""; fixer_ended() { [ -n "$FIXER_DONE" ] && [ -e "$1" ] && { echo end
 fix_budget_ok() { return 1; }        # a spent dev budget means nothing on main (owner 11-13: no budget on main)
 FIX_ROUNDS_MAX=0
 reset() { rm -rf "$STATE/sent" "$T/sent" "$T/woken" "$T"/task-* "$T"/msg-*; mkdir -p "$STATE/sent"; }
-blocked() { printf 'review-gate: FINDING #1 route=fixer commit=- — x\nreview-gate: BLOCKED #1 regression [%s]: %s\nevidence: %s:1 proof\n' "$1" "$2" "$3"; }
+blocked() { printf 'review-gate: reviewing a..b\nreview-gate: FINDING #1 route=fixer commit=- — x\nreview-gate: BLOCKED #1 regression [%s]: %s\nevidence: %s:1 proof\n' "$1" "$2" "$3"; }
 age() { local m=$1 st; st=$(head -1 "$m"); echo "${st%% *} $(( ${st#* } - $2 ))" > "$m"; }   # move a mark's clock back
 
 # 1. a first fix is needed (culprit carries no Review-Fix-Of:) → the owner gets a normal send; no fixer
@@ -247,7 +247,7 @@ echo 'refused strongest-fixer launches: escalated, retried'
 reset; rm -f "$STATE/preexisting-findings.log"
 GHLOG=ok
 gh() { case "$*" in *runs/77/jobs*) echo '{"jobs":[{"name":"review","id":78}]}' ;;
-  *jobs/78/logs*) [ "$GHLOG" = ok ] || return 1; echo '2026-11-13T03:40:00.1234567Z review-gate: NIT (non-blocking): regression: [pre-existing] One owner can close a batch (x.sh:1)'; echo '2026-11-13T03:40:00.1Z review-gate: NIT (non-blocking): ducktape: a plain nit' ;; esac; }
+  *jobs/78/logs*) [ "$GHLOG" = ok ] || return 1; echo '2026-11-13T03:40:00.1Z review-gate: reviewing a..b'; echo '2026-11-13T03:40:00.1234567Z review-gate: NIT (non-blocking): regression: [pre-existing] One owner can close a batch (x.sh:1)'; echo '2026-11-13T03:40:00.1Z review-gate: NIT (non-blocking): ducktape: a plain nit' ;; esac; }
 GHLOG=fail; preexisting_record "$H6" 77
 test ! -e "$STATE/sent/$H6.preexisting-77" || fail "a failed log fetch marked the run processed"
 GHLOG=ok; preexisting_record "$H6" 77

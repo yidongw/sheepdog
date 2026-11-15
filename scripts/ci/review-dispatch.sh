@@ -49,8 +49,10 @@ MAIN=${MAIN_BRANCH:-main}          # the default branch (main, master, …)
 # exported: the child scripts (merge-branch.sh, review-passed.sh) check the same repo + branch
 export REPO MAIN_BRANCH="$MAIN" REVIEW_DEFAULT_BRANCH="${REVIEW_DEFAULT_BRANCH:-$MAIN}"
 TRUSTED=$STATE/trusted                   # the repository's main (refreshed every run): the clone review-passed.sh checks ancestry in
-# The contract scripts (review-passed.sh, merge-branch.sh): sheepdog's own copy, next to this file, for a repository that
-# adopted sheepdog (.github/sheepdog.yml on its main); a repository not yet migrated keeps its own scripts/ci/ copies.
+# The contract scripts (review-passed.sh, merge-branch.sh, review-covered.sh): ALWAYS sheepdog's own copy, next to this
+# file — one coverage contract for the train, the branch-head landing and the devfix landing. A repository's own
+# scripts/ci/ copies are never run as the approval authority (review of sheepdog ee6b3ea74 #3/#6: an older local copy
+# could land a head without the coverage chain, or a failed main-only review).
 SHEEPDOG_CI=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORK=$STATE/rebase
 LOG=$STATE/dispatch.log
@@ -94,7 +96,7 @@ if ghc_init "$STATE"; then trap ghc_done EXIT; else log "gh memo unavailable: un
 git -C "$SRC" fetch -q --prune origin
 [ -d "$TRUSTED" ] || git -C "$SRC" worktree add -q --detach "$TRUSTED" origin/$MAIN
 git -C "$TRUSTED" checkout -q --detach origin/$MAIN
-if [ -f "$TRUSTED/.github/sheepdog.yml" ]; then CI_SCRIPTS=$SHEEPDOG_CI; else CI_SCRIPTS=$TRUSTED/scripts/ci; fi
+CI_SCRIPTS=$SHEEPDOG_CI
 
 source "$(dirname "${BASH_SOURCE[0]}")/review-notify.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machinery_files: what a tests-only approval never lands
@@ -188,13 +190,22 @@ findings_cap() { # stdin: review-gate lines → every line of the first FINDINGS
     { cur = ""; if (no++ < 20) print }
     END { if (nd) print "(" nd " more findings not listed, see the run)" }'
 }
+gate_section() { # stdin: a review job log (timestamps stripped) → only what the trusted gate itself reported: the lines
+  # after the LAST "review-gate: reviewing" marker (review-gate.ts prints it when the reviewer starts); without a marker
+  # (the reviewer never ran) only the commit-gate errors and the gate's own infrastructure lines. Anything printed before
+  # the reviewer started is not a finding (review of sheepdog ee6b3ea74 #1: forged FINDING/BLOCKED lines before the
+  # marker selected unrelated dev commits for an automatic revert).
+  awk '{ l[NR] = $0 } /^review-gate: reviewing / { m = NR }
+    END { if (m) { for (i = m + 1; i <= NR; i++) print l[i] }
+          else { for (i = 1; i <= NR; i++) if (l[i] ~ /^(\[gates .*ERROR|review-gate: (reviewer|no parseable|crashed))/) print l[i] } }'
+}
 findings() { # findings <run id> [<its jobs answer, already read>] → text (blocking findings only: the reviewer's NIT lines are notes, see notes_of)
   local run=$1 jobs=${2:-} tests_ok rid
   if [ -n "$jobs" ]; then ghc_note_jobs <<<"$jobs"; else jobs=$(ghm api "repos/$REPO/actions/runs/$run/jobs"); fi
   tests_ok=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "tests") | .conclusion' <<<"$jobs")
   rid=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "review") | .id' <<<"$jobs")
   if [ -n "$rid" ]; then
-    ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' \
+    ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' | gate_section \
       | grep -E '^(review-gate: (BLOCKED|FINDING|ROUTE|reviewer|no parseable|crashed|NOTE)|evidence:|\[gates .*ERROR)' | findings_cap || true
   fi
   # a CANCELLED tests job is never a code finding: the dispatcher cancels it itself once the review blocked ("tests no
@@ -212,7 +223,7 @@ notes_of() { # notes_of <run id> → the reviewer's non-blocking notes ("" when 
   local rid n
   rid=$(ghm api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null | jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "review") | .id' | head -1)
   [ -n "$rid" ] || return 0
-  n=$(ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' \
+  n=$(ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' | gate_section \
     | grep -E '^review-gate: (NOTE|NIT)' | sed -E 's/^review-gate: NOTE \(non-blocking\): //; s/^review-gate: NIT \(non-blocking\): /nit: /' | head -8 || true)
   [ -n "$n" ] && printf '\nreview notes (non-blocking): %s' "$n"
   return 0
@@ -1624,7 +1635,7 @@ preexisting_record() { # preexisting_record <H> <run id> [<its jobs answer, alre
   if [ -z "$rid" ]; then touch "$m"; return 0; fi   # no review job: nothing to record
   jlog=$(ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null) || return 0
   [ -n "$jlog" ] || return 0
-  p=$(sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^ ]+ //' <<<"$jlog" | grep -E '^review-gate: (NIT|NOTE) \(non-blocking\): .*\[pre-existing\]' | head -20 || true)
+  p=$(sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^ ]+ //' <<<"$jlog" | gate_section | grep -E '^review-gate: (NIT|NOTE) \(non-blocking\): .*\[pre-existing\]' | head -20 || true)
   if [ -n "$p" ]; then { echo "[$(date -u +%FT%TZ)] main ${1:0:9} (run $2):"; printf '%s\n' "$p"; echo; } >> "$STATE/preexisting-findings.log" || return 0; fi
   touch "$m"
 }
