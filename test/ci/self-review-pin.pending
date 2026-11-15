@@ -2,4 +2,3 @@
 #   <suite file name> <the 40-char pin sha> <the protection that is not in the pinned snapshot yet>
 # Allowed only for that exact pin: a pin bump runs every suite against the new pin again. Keep this list empty whenever
 # the newest reviewed main carries the protection — bump the pin instead (docs/self-review.md).
-dev-review-once.sh 79973426c425acb6eb1ad1e3c0a0c43b3b6507b2 the strict run listing treats the 20-page horizon as complete (review of 39380773c #1/#2); the pin bump follows this Hotfix

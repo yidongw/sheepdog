@@ -12,9 +12,9 @@ name: Review
 # reviewed with the sheepdog diff it ships (docs/self-review.md): on dev by the pinned (old) reviewer, as a Hotfix: on
 # main by the new pin (main's file). The pinned snapshot must pass this tree's review-flow suites
 # (test/ci/self-review-pin.sh — review of ad09c0b50 #1/#2: a pin that lacks the current protections is the reviewer that
-# actually runs). Pin: 79973426c (the owner's dev rule: every dev commit reviewed exactly once — the range starts at the
+# actually runs). Pin: c97994c98 (the owner's dev rule: every dev commit reviewed exactly once — the range starts at the
 # last completed dev review of any verdict, main's side excluded; landing gated on the coverage chain; tests-only repairs
-# stay inside their blocked range, blocked merges get no structural coverage, an unreadable verdict counts as blocked, one evidence reader, three-state revert answers; before it 43721cf57).
+# stay inside their blocked range, blocked merges get no structural coverage, an unreadable verdict counts as blocked, one evidence reader, three-state revert answers, complete strict run listings; before it 6d73688be).
 # Runners: `tests` on GitHub-hosted ubuntu (this repository is public: free minutes, read-only token, no secrets);
 # `review` + `status` on the self-hosted cx43 runner cx43-sheepdog-review (labels cx43, sheepdog-review), whose
 # job-started hook admits only workflow_run jobs of main's self-review.yml — a fork's pull request runs its own workflow
@@ -37,7 +37,7 @@ concurrency:
 
 jobs:
   sheepdog:
-    uses: yidongw/sheepdog/.github/workflows/review.yml@79973426c425acb6eb1ad1e3c0a0c43b3b6507b2
+    uses: yidongw/sheepdog/.github/workflows/review.yml@c97994c98a943f097e99606afb905fb0a02d5af8
     with:
       tests-runs-on: '["ubuntu-24.04"]'
       review-runs-on: '["self-hosted","cx43","sheepdog-review"]'
