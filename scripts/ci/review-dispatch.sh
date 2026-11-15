@@ -95,11 +95,6 @@ git -C "$SRC" fetch -q --prune origin
 [ -d "$TRUSTED" ] || git -C "$SRC" worktree add -q --detach "$TRUSTED" origin/$MAIN
 git -C "$TRUSTED" checkout -q --detach origin/$MAIN
 if [ -f "$TRUSTED/.github/sheepdog.yml" ]; then CI_SCRIPTS=$SHEEPDOG_CI; else CI_SCRIPTS=$TRUSTED/scripts/ci; fi
-# No checker ever approves a blocked review here: a repository-local copy of sheepdog's review-passed.sh from a036e7a60..
-# 6fa9325f9 approves a dev review blocked only by main findings unless REVIEW_MAIN_FINDINGS=0. That path is removed (a
-# finding whose culprit is on main is a non-blocking note of the reviewer now, docs/contract.md Findings); exported for
-# review-passed.sh and merge-branch.sh (review of dev 820120f40 #3).
-export REVIEW_MAIN_FINDINGS=0
 
 source "$(dirname "${BASH_SOURCE[0]}")/review-notify.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machinery_files: what a tests-only approval never lands
@@ -199,12 +194,7 @@ findings() { # findings <run id> [<its jobs answer, already read>] → text (blo
   tests_ok=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "tests") | .conclusion' <<<"$jobs")
   rid=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "review") | .id' <<<"$jobs")
   if [ -n "$rid" ]; then
-    # ONE log read; once the gate started ("review-gate: reviewing <base8>..<head8>"), only the gate's own lines after its
-    # LAST such line count — earlier steps (commit gates, an extra gate) print candidate text, which never becomes a
-    # routed finding or a file named for a revert (review of dev 98df48e71 #1). A log without that line (the reviewer step
-    # never ran) keeps the earlier steps' gate errors.
     ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' \
-      | awk '/^review-gate: reviewing [0-9a-f]+[.][.][0-9a-f]+$/ { n = 0; next } { L[++n] = $0 } END { for (i = 1; i <= n; i++) print L[i] }' \
       | grep -E '^(review-gate: (BLOCKED|FINDING|ROUTE|reviewer|no parseable|crashed|NOTE)|evidence:|\[gates .*ERROR)' | findings_cap || true
   fi
   # a CANCELLED tests job is never a code finding: the dispatcher cancels it itself once the review blocked ("tests no

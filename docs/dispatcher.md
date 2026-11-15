@@ -32,16 +32,12 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   The supervisor is told once per failed review attempt (notice key `infra.dev.<run>.<review job id>`: a rerun is a new
   job; repeated scans never repeat it; an undelivered alert is retried, a gone supervisor falls back to the CI owner),
   with the `gh run rerun <id> --failed` command; the next push to dev re-triggers the review too.
-- **Findings whose culprit is already on main, in a dev review** (contract, Findings): the reviewer reports them as
-  non-blocking `[pre-existing]` notes (review-gate.ts converts them mechanically), so a dev review blocked only by them
-  never happens with a current pin. The dispatcher has no main-culprit path of its own: it routes the gate's BLOCKED
-  findings as they are — from ONE read of the review job's log, only the lines after the gate's last
-  `review-gate: reviewing …` line (the same text for routing, notices and the files a revert names) — and lands only
-  what `review-passed.sh` approves on the plain path. It exports
-  `REVIEW_MAIN_FINDINGS=0`, which keeps the main-only approval of an older repository-local `review-passed.sh` (sheepdog
-  a036e7a60..6fa9325f9) off. `test/ci/review-dispatch-main-culprit.sh`.
 - **Open findings**: findings whose fix rounds are spent are kept in `$STATE/open-findings.log`, which the review job
   passes to the reviewer (`open-findings-file`) so repeats are recognised as pre-existing.
+- **Main-side findings on dev**: a dev review blocks on every finding it reports, including one whose culprit commit is
+  already on the default branch. A main-side finding that keeps blocking dev is escalated to the owner; there is no
+  automatic bypass (owner decision 2026-11-15: the main-culprit landing of `a036e7a60` and its successors was rolled
+  back).
 
 ## GitHub API budget
 

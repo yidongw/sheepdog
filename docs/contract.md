@@ -83,19 +83,6 @@ reviewer marks `preexisting` (not introduced or worsened by the range) never blo
 dispatcher's list of findings whose fix rounds are spent) are passed to the reviewer so a repeat is recognised as
 pre-existing. Each blocking finding names a route (`fixer` or `author`) and, when it can, the culprit commit.
 
-**Findings whose culprit is already on main, in a dev review** (owner 11-15; tralyx and sheepdog dev were blocked for
-good by main's own findings, which a dev review sees through main→dev merges): the default branch's sha when the review
-started is handed to the reviewer (`review.yml` exports `REVIEW_DEV_MAIN` for a dev head only; `review-gate.ts
---dev-main`). The trusted reviewer instructions say that a problem whose culprit commit is reachable from it is the
-default branch's own, reported with its full sha as `preexisting`; and `review-gate.ts` enforces it mechanically: a
-blocking finding whose `commit` is a full 40-hex sha that is an ancestor of that sha becomes a `[pre-existing]` note
-(`review-gate: NIT (non-blocking): …`, plus `review-gate: culprit <sha> is on the default branch …`), whatever the
-reviewer said. It does not fail the verdict; a dev review whose only findings are such notes passes like any other
-(normal approval, landing and coverage — no special path in `review-passed.sh`, `merge-branch.sh` or
-`review-coverage.sh`). Never for a missing, `-` or abbreviated commit, or one off the default branch. A re-check of the
-default branch gets no `--dev-main`: there such a finding blocks as always, and main's own chain repairs it.
-
 `review-gate.ts` prints `review-gate: ROUTE …`, then per finding `review-gate: FINDING #n route=… commit=…`,
-`review-gate: BLOCKED #n …` and `evidence: …`; the dispatcher reads those lines from the job log — only those after the
-gate's last `review-gate: reviewing <base>..<head>` line (earlier steps print candidate text) — together with the
+`review-gate: BLOCKED #n …` and `evidence: …`; the dispatcher reads those lines from the job log, together with the
 `review-range: <base> <head>` line of the range step.

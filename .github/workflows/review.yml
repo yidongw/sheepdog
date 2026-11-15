@@ -242,7 +242,6 @@ jobs:
         run: |
           S=../.sheepdog/scripts/ci
           kind=review
-          dev_main=""   # a dev review: the default branch's sha, for the gate's pre-existing rule (--dev-main)
           # one default-branch boundary for this run's range scripts and its attestation
           main=$(git rev-parse "origin/$MAIN_BRANCH^{commit}"); export DEV_REVIEW_MAIN_REF=$main
           if [ "$HEAD_BRANCH" = "$MAIN_BRANCH" ]; then
@@ -253,7 +252,6 @@ jobs:
             gate_base=$base
           elif [ "$HEAD_BRANCH" = "$DEV_BRANCH" ]; then
             cover=$(bash "$S/dev-review-base.sh" HEAD)
-            dev_main=$main
             echo "dev review: covers from ${cover:0:12} (the last completed dev review that passed or was repaired; else $MAIN_BRANCH)"
             if bash "$S/dev-review-base.sh" --only-fixes "$cover" HEAD; then kind=tests-only-fix; fi
             # Clean merges can shorten the code diff; their new commits still need all commit gates.
@@ -266,7 +264,7 @@ jobs:
           echo "review-range: $base $(git rev-parse HEAD)"
           echo "review-kind: $kind"
           git log --oneline -n 50 "$base..HEAD"
-          { echo "REVIEW_BASE=$base"; echo "GATE_BASE=$gate_base"; echo "REVIEW_MAIN=$main"; echo "REVIEW_DEV_MAIN=$dev_main"; } >> "$GITHUB_ENV"
+          { echo "REVIEW_BASE=$base"; echo "GATE_BASE=$gate_base"; echo "REVIEW_MAIN=$main"; } >> "$GITHUB_ENV"
           echo "kind=$kind" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -377,11 +375,7 @@ jobs:
           if [ -n "${PIN_TO:-}" ]; then
             pin=(--pin-repo "$SHEEPDOG_REPO" --pin-from "$PIN_FROM" --pin-to "$PIN_TO" --pin-diff "$RUNNER_TEMP/sheepdog-pin/sheepdog-pin.diff" --pin-log "$RUNNER_TEMP/sheepdog-pin/sheepdog-pin.log")
           fi
-          # a dev review: a finding whose culprit commit is already on the default branch is a pre-existing note there
-          # (re-checks of the default branch keep blocking on it)
-          devmain=()
-          if [ -n "${REVIEW_DEV_MAIN:-}" ]; then devmain=(--dev-main "$REVIEW_DEV_MAIN"); fi
-          node ../.sheepdog/reviewer/src/review-gate.ts --base "$REVIEW_BASE" --head HEAD --prior "$RUNNER_TEMP/prior-findings.txt" --known-open "$RUNNER_TEMP/known-open.txt" "${pin[@]}" "${devmain[@]}"
+          node ../.sheepdog/reviewer/src/review-gate.ts --base "$REVIEW_BASE" --head HEAD --prior "$RUNNER_TEMP/prior-findings.txt" --known-open "$RUNNER_TEMP/known-open.txt" "${pin[@]}"
         env:
           REVIEWER_ENV_FILE: ${{ inputs.reviewer-env-file }}
           SHEEPDOG_REPO: ${{ inputs.sheepdog-repository }}
