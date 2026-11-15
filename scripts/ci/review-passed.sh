@@ -125,6 +125,12 @@ for entry in $ids; do
     fi
   fi
   [ -z "${REVIEW_KIND_OUT:-}" ] || { [ "$st" = skipped ] && echo tests-only-fix || echo review; } > "$REVIEW_KIND_OUT"
+  # REVIEW_APPROVAL_OUT=<file>: the exact approving review attempt — "<run id> <run attempt> <review job id> <pass|main>"
+  # ("main": approved as a dev review blocked only by pre-existing main findings). The dispatcher records THAT attempt's
+  # main findings before it lands the sha (review of pawx-twitter-poller 7f0dbbc8f #1/#2).
+  if [ -n "${REVIEW_APPROVAL_OUT:-}" ]; then
+    jq -r --arg id "$id" --arg how "$how" '[.jobs[] | select((.name | sub("^.* / "; "")) == "review")][0] // {} | "\($id) \(.run_attempt // 1) \(.id // "-") \($how)"' <<<"$jobs" > "$REVIEW_APPROVAL_OUT"
+  fi
   echo "trusted tests + review passed for ${sha:0:12} (run $id)"; exit 0
 done
 done
