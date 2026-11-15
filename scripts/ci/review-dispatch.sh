@@ -96,8 +96,9 @@ git -C "$SRC" fetch -q --prune origin
 git -C "$TRUSTED" checkout -q --detach origin/$MAIN
 if [ -f "$TRUSTED/.github/sheepdog.yml" ]; then CI_SCRIPTS=$SHEEPDOG_CI; else CI_SCRIPTS=$TRUSTED/scripts/ci; fi
 # No checker ever approves a blocked review here: a repository-local copy of sheepdog's review-passed.sh from a036e7a60..
-# 6fa9325f9 approves a dev review blocked only by main findings unless REVIEW_MAIN_FINDINGS=0 (that path is removed; the
-# dispatcher no longer records for it — review of dev 820120f40 #3). Exported for review-passed.sh and merge-branch.sh.
+# 6fa9325f9 approves a dev review blocked only by main findings unless REVIEW_MAIN_FINDINGS=0. That path is removed (a
+# finding whose culprit is on main is a non-blocking note of the reviewer now, docs/contract.md Findings); exported for
+# review-passed.sh and merge-branch.sh (review of dev 820120f40 #3).
 export REVIEW_MAIN_FINDINGS=0
 
 source "$(dirname "${BASH_SOURCE[0]}")/review-notify.sh"
@@ -198,7 +199,12 @@ findings() { # findings <run id> [<its jobs answer, already read>] → text (blo
   tests_ok=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "tests") | .conclusion' <<<"$jobs")
   rid=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "review") | .id' <<<"$jobs")
   if [ -n "$rid" ]; then
+    # ONE log read; once the gate started ("review-gate: reviewing <base8>..<head8>"), only the gate's own lines after its
+    # LAST such line count — earlier steps (commit gates, an extra gate) print candidate text, which never becomes a
+    # routed finding or a file named for a revert (review of dev 98df48e71 #1). A log without that line (the reviewer step
+    # never ran) keeps the earlier steps' gate errors.
     ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' \
+      | awk '/^review-gate: reviewing [0-9a-f]+[.][.][0-9a-f]+$/ { n = 0; next } { L[++n] = $0 } END { for (i = 1; i <= n; i++) print L[i] }' \
       | grep -E '^(review-gate: (BLOCKED|FINDING|ROUTE|reviewer|no parseable|crashed|NOTE)|evidence:|\[gates .*ERROR)' | findings_cap || true
   fi
   # a CANCELLED tests job is never a code finding: the dispatcher cancels it itself once the review blocked ("tests no
@@ -1089,64 +1095,15 @@ culprits_repaired() { # culprits_repaired <S> <attribution> → 0 (sets dupfix_w
   done
   dupfix_why=${why# }; return 0
 }
-# ── findings of a dev review whose culprit is already on main (contract, Findings). The reviewer reports those as
-#    [pre-existing] notes in a dev review (review-gate.ts --dev-main); a review by an older reviewer can still print them as
-#    BLOCKED. Such a finding is main's: main's own re-check chain owns it. It is appended once to open-findings.log (the
-#    next reviews' known-open list) and never routed on $DEV — no fixer, no fix round, no author notice, no fixfailed, no
-#    revert clock, no file named for a revert. Nothing here approves or lands anything: the head stays blocked until a
-#    review of a later head passes. Local only (the findings text the caller already read; no GitHub read). ──
-dev_main_split() { # dev_main_split <S> <run id> <findings> → dev_f = the findings left for $DEV, main_nums = the others' numbers
-  # A finding is main's when the GATE's own "FINDING #n … commit=" for it is a full 40-hex sha that is an ancestor of
-  # origin/$MAIN. The gate's lines are only those after its LAST "review-gate: reviewing <base8>..<S8>" line of the review
-  # job's log (commit gates and an extra gate print candidate text before the reviewer step: lines there never count), and
-  # they must be well formed — each FINDING #n once, directly followed by its BLOCKED #n (review of dev 820120f40 #1/#2).
-  # Anything else (an unreadable log, no marker, a duplicate or orphan line) → nothing is main's. No commit, "-", an
-  # abbreviated sha or a commit off main → it stays $DEV's.
-  local s=$1 run=$2 f=$3 n c keep="" rec m jobs rid gl
-  dev_f=$f main_nums=""
-  jobs=$(ghm api "repos/$REPO/actions/runs/$run/jobs" 2>/dev/null) || return 0
-  rid=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].id // empty' <<<"$jobs" 2>/dev/null) || return 0
-  [[ "$rid" =~ ^[0-9]+$ ]] || return 0
-  gl=$(ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^ ]+ //' \
-       | awk -v h="${s:0:8}" '$0 ~ ("^review-gate: reviewing [0-9a-f]+[.][.]" h "$") { n = 0; seen = 1; next } seen && /^review-gate: (FINDING|BLOCKED) #/ { L[++n] = $0 }
-           END { if (!seen) exit 1; for (i = 1; i <= n; i++) print L[i] }') || return 0
-  # well formed: FINDING #n lines unique, each directly followed by BLOCKED #n
-  awk '/^review-gate: FINDING #/ { match($0, /#[0-9]+/); k = substr($0, RSTART, RLENGTH); if (seen[k]++) bad = 1; want = k; next }
-       /^review-gate: BLOCKED #/ { match($0, /#[0-9]+/); if (want != "" && substr($0, RSTART, RLENGTH) != want) bad = 1; want = ""; next }
-       END { exit (bad || want != "") ? 1 : 0 }' <<<"$gl" || return 0
-  while read -r n c; do
-    [ -n "$n" ] || continue
-    if [[ "$c" =~ ^[0-9a-f]{40}$ ]] && git -C "$SRC" merge-base --is-ancestor "$c" "origin/$MAIN" 2>/dev/null; then main_nums+=" $n"; fi
-  done < <(sed -nE 's/^review-gate: FINDING #([0-9]+) route=[a-z]+ commit=([^ ]+)( .*)?$/\1 \2/p' <<<"$gl")
-  main_nums=${main_nums# }
-  [ -n "$main_nums" ] || return 0
-  for n in $(sed -nE 's/^review-gate: BLOCKED #([0-9]+) .*/\1/p' <<<"$f"); do
-    [[ " $main_nums " == *" $n "* ]] || keep+=" $n"
-  done
-  # shellcheck disable=SC2086 # finding numbers, one word each
-  dev_f=$(findings_subset "$f" 1 $keep)
-  # shellcheck disable=SC2086
-  rec=$(findings_subset "$f" 0 $main_nums)
-  m=$STATE/sent/$s.main-findings.$(printf '%s' "$rec" | sha1sum | cut -c1-12)
-  if [ -n "${DRY:-}" ]; then echo "DRY $DEV ${s:0:9}: finding(s) $main_nums of run $run — culprit on $MAIN: not routed on $DEV"; return 0; fi
-  [ ! -e "$m" ] || return 0
-  if { echo "[$(date -u +%FT%TZ)] ${s:0:9} ($DEV review, run $run): finding(s) $main_nums — culprit on $MAIN; pre-existing main finding(s), owned by $MAIN's own re-check chain, not routed on $DEV:"
-       printf '%s\n' "$rec"; echo; } >> "$STATE/open-findings.log"; then
-    touch "$m"; log "$DEV ${s:0:9}: finding(s) $main_nums of run $run name a culprit already on $MAIN — recorded (open-findings.log), not routed on $DEV"
-  fi
-  return 0
-}
-dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> <run url> <fixer task> [<ALL findings>] → the
-  # reviewer's route per finding (author groups, see dev_blocked_split); otherwise fixer first, authors only when it failed.
-  # <ALL findings>: the round's findings before dev_main_split removed main's — the dupfix shortcut below decides on the full
-  # set, so removing main findings never makes a dev finding disappear (review of dev 5061f8b91 #3).
-  local s=$1 f=$2 cul=$3 url=$4 why att task=$5 all=${6:-$2}
+dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> <run url> <fixer task> → the reviewer's route per
+  # finding (author groups, see dev_blocked_split); otherwise fixer first, authors only when it failed
+  local s=$1 f=$2 cul=$3 url=$4 why att task=$5
   att=$(attribution "$s" "$f")
   if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$s.findings" ]; then printf '%s\n' "$f" > "$STATE/sent/$s.findings"; fi   # for the FYI when its fix lands
   # Every blocking finding pinned on a culprit commit C that $DEV already repairs (an effective Review-Fix-Of: C beyond C):
   # this head is an older copy of an already-fixed bug — no fixer, no author, no budget (supervisor 11-12: fc8381277's
   # findings, fixed by ca1de4505, re-blocked every later head without it, each spending a full fix budget).
-  if culprits_repaired "$s" "$(if [ "$all" = "$f" ]; then printf '%s\n' "$att"; else attribution "$s" "$all"; fi)"; then
+  if culprits_repaired "$s" "$att"; then
     if [ -n "${DRY:-}" ]; then echo "DRY blocked ${s:0:9}: $DEV already repairs its culprit commit(s) ($dupfix_why) — no fixer"
     elif [ ! -e "$STATE/sent/$s.dupfix" ]; then log "blocked ${s:0:9}: $DEV already repairs its culprit commit(s) ($dupfix_why) — no fixer"; touch "$STATE/sent/$s.dupfix"; fi
     return 0
@@ -2004,16 +1961,12 @@ if [ -z "${DRY:-}" ] && git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/
        && ! dev_round_noop "$bsha" "$brid" failure; then   # a merge-only round is never blocked
       bf=$(findings "$brid")
       if binfra=$(review_infra_reason "$bf"); then dev_infra "$bsha" "$brid" "$binfra"; else
-      # findings whose culprit is already on main are main's (dev_main_split): recorded, never routed on $DEV
-      ball=$bf; dev_main_split "$bsha" "$brid" "$bf"; bf=$dev_f
-      if [ -n "$(tr -d '[:space:]' <<<"$bf")" ]; then
       bcul=$(culprit_threads "$bsha" "$bf")
       # reviewer → fixer → author: the fixer gets it; the authors only when it failed (dev_blocked)
       dev_blocked "$bsha" "$bf" "$bcul" "https://github.com/$REPO/actions/runs/$brid" "Task: the blocking review stopped $DEV at ${bsha:0:9}. Findings:
 ${bf:-(none parsed; read the run)}
 Run: https://github.com/$REPO/actions/runs/$brid
-Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). Your worktree starts at origin/$DEV; first git reset --hard ${bsha} so the fix sits directly on the reviewed commit (later dev commits are NOT part of this fix). ONE commit with trailers Review-Fix-Of: ${bsha} and Hotfix: review fix of ${bsha:0:9}; push it with git push origin HEAD:refs/heads/devfix/${bsha:0:12} (NOT to $DEV, not to main). Once the trusted tests pass there, ${bsha:0:9} plus your fix land on main without a second review." "$ball"
-      fi
+Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). Your worktree starts at origin/$DEV; first git reset --hard ${bsha} so the fix sits directly on the reviewed commit (later dev commits are NOT part of this fix). ONE commit with trailers Review-Fix-Of: ${bsha} and Hotfix: review fix of ${bsha:0:9}; push it with git push origin HEAD:refs/heads/devfix/${bsha:0:12} (NOT to $DEV, not to main). Once the trusted tests pass there, ${bsha:0:9} plus your fix land on main without a second review."
       fi
     fi
   fi
@@ -2292,16 +2245,6 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
     f=$(findings "$rid")
     # the reviewer itself did not run: nothing was reviewed — no block, no fixer, no author notice, no revert clock
     if dinfra=$(review_infra_reason "$f"); then dev_infra "$sha" "$rid" "$dinfra"; continue; fi
-    # findings whose culprit is already on main are main's (dev_main_split): recorded, never routed on $DEV — and with
-    # nothing else left, nothing of $DEV's is blocked: no fixer, no round, no notice, no revert clock
-    fall=$f; dev_main_split "$sha" "$rid" "$f"; f=$dev_f
-    if [ -z "$(tr -d '[:space:]' <<<"$f")" ]; then
-      if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$sha.main-only.$rid" ]; then
-        log "$DEV ${sha:0:9}: run $rid blocked only by finding(s) $main_nums whose culprit is on $MAIN — nothing of $DEV's to route; not landed (a later passing review lands $DEV)"
-        touch "$STATE/sent/$sha.main-only.$rid"
-      fi
-      continue
-    fi
     since_f="$STATE/dev.blocked_since"
     if [ ! -s "$since_f" ]; then echo "$now" > "$since_f"; echo "$sha" > "$since_f.sha"; fi   # the episode's owner (dev_round_noop)
     since=$(cat "$since_f")
@@ -2310,7 +2253,7 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
 ${f:-(none parsed; read the run)}
 Run: $url
 Fix every finding at its source on $DEV (the commits not yet on main: git log origin/$MAIN..origin/$DEV). If a finding is wrong, dispute it (Review-Disputed: trailer, see below) instead of working around it.
-Your worktree starts at origin/$DEV; first git reset --hard ${sha} so the fix sits directly on the reviewed commit (later dev commits are NOT part of this fix). Change only what the findings name. Make it ONE commit carrying both trailers Review-Fix-Of: ${sha} and Hotfix: review fix of ${sha:0:9}. Push it with git push origin HEAD:refs/heads/devfix/${sha:0:12} (NOT to $DEV, not to main). Owner 11-10: once the trusted tests pass there, ${sha:0:9} plus your fix land on main without a second review (your fix is re-checked on main afterwards), so keep it tight and tested." "$fall"
+Your worktree starts at origin/$DEV; first git reset --hard ${sha} so the fix sits directly on the reviewed commit (later dev commits are NOT part of this fix). Change only what the findings name. Make it ONE commit carrying both trailers Review-Fix-Of: ${sha} and Hotfix: review fix of ${sha:0:9}. Push it with git push origin HEAD:refs/heads/devfix/${sha:0:12} (NOT to $DEV, not to main). Owner 11-10: once the trusted tests pass there, ${sha:0:9} plus your fix land on main without a second review (your fix is re-checked on main afterwards), so keep it tight and tested."
     # the revert is about to hit the culprits' commits: they hear it ahead (once per block episode). Findings the reviewer
     # routed to an author: author window (60 min) → fixer → revert DEV_REVERT_AFTER_SEC after the fixer's turn began.
     revert_after=$(revert_after_for "$sha" "$since")

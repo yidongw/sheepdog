@@ -462,6 +462,21 @@ describe("default branch rule (a dev review)", () => {
       expect(parseVerdict(line(c), { onDefaultBranch: onMain })!.findings).toHaveLength(1);
     }
     expect(parseVerdict(line(m))!.findings).toHaveLength(1); // no option: a re-check blocks as always
+    // review of dev 98df48e71 #2: the same finding at the top level (main culprit) and listed (dev culprit) keeps blocking
+    const dup = (top: string, listed: string) => `VERDICT: ${JSON.stringify({ verdict: "regression", finding: "x", evidence: "e", severity: "blocker", commit: top, preexisting: false,
+      findings: [{ verdict: "regression", finding: "x", evidence: "e", severity: "blocker", commit: listed, preexisting: false }] })}`;
+    for (const [top, listed] of [[m, "b".repeat(40)], ["b".repeat(40), m], [m, m.slice(0, 12)]]) {
+      const v = parseVerdict(dup(top, listed), { onDefaultBranch: onMain })!;
+      expect(v.verdict).toBe("regression");
+      expect(v.findings).toHaveLength(1);
+    }
+    expect(parseVerdict(dup(m, m), { onDefaultBranch: onMain })!.verdict).toBe("clean"); // agreeing culprits on main: a note
+    expect(parseVerdict(dup(m, ""), { onDefaultBranch: onMain })!.verdict).toBe("regression"); // one copy names no culprit
+    expect(parseVerdict(dup("", m), { onDefaultBranch: onMain })!.verdict).toBe("regression");
+    // copies disagreeing on preexisting (no main culprit) stay blocking
+    const pre = `VERDICT: ${JSON.stringify({ verdict: "regression", finding: "x", evidence: "e", severity: "blocker", commit: "b".repeat(40), preexisting: true,
+      findings: [{ verdict: "regression", finding: "x", evidence: "e", severity: "blocker", commit: "b".repeat(40), preexisting: false }] })}`;
+    expect(parseVerdict(pre, { onDefaultBranch: onMain })!.verdict).toBe("regression");
     let asked = 0;
     parseVerdict(line(m.slice(0, 12)), { onDefaultBranch: () => { asked++; return true; } });
     expect(asked).toBe(0); // an abbreviated sha is never even looked up

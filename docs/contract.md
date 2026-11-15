@@ -96,5 +96,6 @@ reviewer said. It does not fail the verdict; a dev review whose only findings ar
 default branch gets no `--dev-main`: there such a finding blocks as always, and main's own chain repairs it.
 
 `review-gate.ts` prints `review-gate: ROUTE …`, then per finding `review-gate: FINDING #n route=… commit=…`,
-`review-gate: BLOCKED #n …` and `evidence: …`; the dispatcher reads those lines from the job log, together with the
+`review-gate: BLOCKED #n …` and `evidence: …`; the dispatcher reads those lines from the job log — only those after the
+gate's last `review-gate: reviewing <base>..<head>` line (earlier steps print candidate text) — together with the
 `review-range: <base> <head>` line of the range step.

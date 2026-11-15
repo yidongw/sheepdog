@@ -1,21 +1,17 @@
 #!/usr/bin/env bash
-# Findings of a dev review whose culprit is already on main (docs/contract.md, Findings; docs/dispatcher.md). The reviewer
-# reports them as [pre-existing] notes in a dev review (review-gate.ts --dev-main; reviewer/test/review-gate.test.ts); a
-# review by an older pinned reviewer can still print them as BLOCKED. The real case: the dev review of 0cd95ca42 (run
-# 43577623889, its log in lib/review-0cd95ca42.log with the shas as placeholders) blocked on FINDING #1/#2 whose commit was
-# already on main plus #3, the head's own. The dispatcher (dev_main_split, local only) never routes main's findings on
-# dev and never lands anything because of them:
-#   (a) only main findings → head loop and train: no fixer, no round, no notice, no block clock, nothing landed; the
-#       findings are appended ONCE to open-findings.log (the next reviews' known-open list)
-#   (b) mixed → only the dev finding (#3) is routed; dev_blocked's dupfix shortcut still sees the full set
-#   (c) culprit off main / "-" / abbreviated / no FINDING line → routed as before, nothing recorded
-#   (d) the overdue revert names only the dev findings' files: main's findings never reach it (review of sheepdog main
-#       03f6fcd72 #1 — whatever contract scripts are in use, migrated or repository-local, there is no other path)
-#   (e) a rerun of the same run whose log has other findings is classified from the findings read now (review of main
-#       03f6fcd72 #2: no receipt or stale attempt can route the old findings or drop the new dev one)
-#   (f) no landing machinery is left: review-passed.sh / merge-branch.sh / review-coverage.sh have no main-findings path
-#   (g) only the gate's own lines (after its LAST "reviewing" line, well formed) classify (review of dev 820120f40 #1/#2)
-#   (h) an older repository-local checker's main-only approval stays off: REVIEW_MAIN_FINDINGS=0 (review of 820120f40 #3)
+# Findings of a dev review whose culprit is already on main (docs/contract.md, Findings): the trusted reviewer reports them
+# as [pre-existing] notes in a dev review and review-gate.ts converts any BLOCKED one mechanically (--dev-main;
+# reviewer/test/review-gate.test.ts, test/ci/review-dev-main.sh). The dispatcher has NO main-culprit path of its own any
+# more (owner 11-15; the dispatcher-side landing drew new-edge findings round after round — reviews of 9b7ece173,
+# 76fdca743, 03f6fcd72, 820120f40, 98df48e71): it routes the gate's BLOCKED findings as they are, and lands only what
+# review-passed.sh approves on the plain path.
+#   (f) no landing machinery and no log classification is left in the contract scripts or the dispatcher
+#   (g) only the gate's own section of the ONE log read (after its LAST start line) is routed or named for a revert:
+#       candidate text printed by earlier steps never is (review of dev 98df48e71 #1; with no second read, #3's rerun race
+#       between two reads cannot happen)
+#   (h) an older repository-local checker's main-only approval stays off: the dispatcher exports REVIEW_MAIN_FINDINGS=0
+#       (review of dev 820120f40 #3) — with the real 0cd95ca42 log (main-culprit BLOCKED #1/#2 of an older reviewer)
+#       through the head loop and the train, nothing lands
 set -uo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 cd "$(dirname "$0")/../.."
@@ -89,6 +85,7 @@ Thread: mcp:${3:-11111111-1111-1111-1111-111111111111}"; g rev-parse HEAD; }
 B0=$(c base.txt base)
 g checkout -q -b dev
 D0=$(c scripts/ci/dev-review-base.sh "dev work on the file main's findings name" 33333333-3333-3333-3333-333333333333)
+DF=$(c scripts/ci/forged-only.sh "dev work only a forged line names" 44444444-4444-4444-4444-444444444444)
 D1=$(c scripts/ci/review-dispatch.sh "dev work" 22222222-2222-2222-2222-222222222222)
 g checkout -q main; C=$(c main.txt "fix(review): main's culprit (like 341cca4e9)")
 g push -q origin main
@@ -123,9 +120,9 @@ STATE=$T/state MAIN=main DEV=dev TRUSTED=$T/trusted WORK=$T/work OUTBOX=$T/state
 DEV_REVERT_AFTER_SEC=3600 DEV_REVERT_WARN_SEC=900 key_prefix="" SUPERVISOR_THREAD=sup DISPATCH_THREAD=disp
 mkdir -p "$STATE/sent" "$OUTBOX"; LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 git -C "$SRC" worktree add -q --detach "$TRUSTED" origin/main
-eval "$(sed -n '/^review_jobs() {/p; /^review_list() {/,/^}/p; /^dev_round_noop() {/,/^}/p; /^dev_merge_only() {/,/^}/p; /^review_infra_reason() {/,/^}/p; /^run_verdict() {/,/^}/p; /^dev_verdict_run() {/,/^}/p; /^named_files() {/p; /^findings_cap() {/,/^}/p; /^findings() {/,/^}/p; /^notes_of() {/,/^}/p; /^findings_subset() {/,/^}/p; /^dev_main_split() {/,/^}/p; /^thread_of() /p; /^range_threads() {/,/^}/p' "$D")"
+eval "$(sed -n '/^review_jobs() {/p; /^review_list() {/,/^}/p; /^dev_round_noop() {/,/^}/p; /^dev_merge_only() {/,/^}/p; /^review_infra_reason() {/,/^}/p; /^run_verdict() {/,/^}/p; /^dev_verdict_run() {/,/^}/p; /^named_files() {/p; /^findings_cap() {/,/^}/p; /^findings() {/,/^}/p; /^notes_of() {/,/^}/p; /^findings_subset() {/,/^}/p; /^thread_of() /p; /^range_threads() {/,/^}/p' "$D")"
 source "$ROOT/scripts/ci/review-machinery.sh"
-for f in review_list findings findings_subset dev_main_split dev_verdict_run; do declare -F "$f" >/dev/null || fail "helper $f not extracted"; done
+for f in review_list findings findings_subset dev_verdict_run; do declare -F "$f" >/dev/null || fail "helper $f not extracted"; done
 fixer_receipt_thread() { :; }
 dev_blocked() { echo "dev_blocked $1" >> "$T/calls"; printf '%s\n' "$2" > "$T/routed"; printf '%s\n' "${6:-}" > "$T/routed-all"; }
 wake_fixer() { echo "wake_fixer $1 $2" >> "$T/calls"; }
@@ -158,106 +155,36 @@ landed() { [ "$(g rev-parse origin/main)" != "$MAINSHA" ]; }
 routed_nums() { sed -nE 's/^review-gate: BLOCKED #([0-9]+) .*/\1/p' "$T/routed" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
 records() { if [ -f "$STATE/open-findings.log" ]; then grep -c 'pre-existing main finding' "$STATE/open-findings.log" || true; else echo 0; fi; }
 
-# ── (a) only main findings (#1/#2, culprit C on main) ──
-fixture_log "$T/log" "$C" 0; scenario
-run_head_loop
-! landed || fail "(a) a dev head blocked by main findings landed"
-! grep -qE '^(dev_blocked|wake_fixer|notify)' "$T/calls" 2>/dev/null || fail "(a) a dev fixer / notice for main's findings: $(cat "$T/calls")"
-test ! -e "$STATE/dev.blocked_since" || fail "(a) a dev block clock started for main's findings"
-[ "$(records)" = 1 ] || fail "(a) main findings not recorded once: $(cat "$LOG" 2>/dev/null)"
-grep -q "finding(s) 1 2 — culprit on main" "$STATE/open-findings.log" || fail "(a) record does not name #1 #2"
-[ "$(grep -c '^review-gate: BLOCKED #[12] ' "$STATE/open-findings.log")" = 2 ] || fail "(a) the known-open feed lacks the BLOCKED lines"
-head_loop; head_loop
-[ "$(records)" = 1 ] || fail "(a) recorded again on later runs"
-! grep -qE '^(dev_blocked|wake_fixer|notify)' "$T/calls" 2>/dev/null || fail "(a) later runs routed main's findings"
-run_train
-! landed || fail "(a) the train landed it"
-! grep -qE '^(dev_blocked|wake_fixer|notify)' "$T/calls" 2>/dev/null || fail "(a) the train's blocked path routed main's findings: $(cat "$T/calls")"
-[ "$(records)" = 1 ] || fail "(a) the train did not record main's findings once"
-grep -E '^review-gate: BLOCKED' "$STATE/open-findings.log" | sed -E 's/^review-gate: BLOCKED (#[0-9]+ )?//' | grep -q '^regression \[should, security\]: The path-scoped preservation proof' \
-  || fail "(a) known-open feed"
-echo "ok - (a) only main findings: nothing routed, nothing landed, no clock; recorded once"
-
-# ── (b) mixed: #1/#2 main + #3 the head's own ──
-fixture_log "$T/log" "$C" 1; scenario
-run_head_loop
-grep -q "^dev_blocked $H" "$T/calls" || fail "(b) the dev finding was not routed"
-[ "$(routed_nums)" = 3 ] || fail "(b) routed findings '$(routed_nums)', want only 3"
-grep -q "commit=$H" "$T/routed" && ! grep -q "commit=$C" "$T/routed" || fail "(b) routed text carries main's findings"
-grep -q "BLOCKED #1 " "$T/routed-all" && grep -q "BLOCKED #3 " "$T/routed-all" || fail "(b) dev_blocked did not get the full set (dupfix)"
-test -s "$STATE/dev.blocked_since" || fail "(b) the dev finding started no block clock"
-[ "$(records)" = 1 ] || fail "(b) main findings not recorded"
-run_train
-grep -q "^dev_blocked $H" "$T/calls" && [ "$(routed_nums)" = 3 ] || fail "(b) the train's blocked path routed '$(routed_nums)', want 3"
-! landed || fail "(b) landed"
-grep -q 'culprits_repaired "$s" "$(if \[ "$all" = "$f" \]' "$D" || fail "(b) dev_blocked's dupfix shortcut does not decide on the full set"
-echo "ok - (b) mixed: only the dev finding routed; the dupfix shortcut sees the full set"
-
-# ── (c) culprit not on main (D1) / "-" / abbreviated / no FINDING line: routed as before ──
-for variant in dev dash abbrev nofinding; do
-  if [ "$variant" = dev ]; then fixture_log "$T/log" "$D1" 0; else fixture_log "$T/log" "$C" 0; fi
-  case $variant in
-    dash) sed -i -E "s/FINDING #([12]) route=author commit=$C/FINDING #\1 route=author commit=-/" "$T/log" ;;
-    abbrev) sed -i -E "s/FINDING #([12]) route=author commit=$C/FINDING #\1 route=author commit=${C:0:12}/" "$T/log" ;;
-    nofinding) sed -i -E "/FINDING #[12] /d" "$T/log" ;;
-  esac
-  scenario; run_head_loop
-  [ "$(routed_nums)" = "1 2" ] || fail "(c $variant) routed '$(routed_nums)', want 1 2"
-  [ "$(records)" = 0 ] || { cat "$STATE/open-findings.log"; fail "(c $variant) recorded a dev finding as main's"; }
-done
-echo "ok - (c) culprit off main, '-', abbreviated, no FINDING line: routed as before"
-
-# ── (d) overdue: the revert names only the dev findings' files (03f6fcd72 #1). #1/#2 name dev-review-base.sh, which the
-#    dev commit D0 also touched; #3 names review-dispatch.sh ──
-overdue() { reset_dev; echo $(( $(date +%s) - 7200 )) > "$STATE/dev.blocked_since"; echo "$H" > "$STATE/dev.blocked_since.sha"; head_loop; }
-fixture_log "$T/log" "$C" 0; scenario; overdue
-[ "$(g rev-parse origin/dev)" = "$H" ] || fail "(d) main's findings reverted dev: $(g log --oneline -1 origin/dev)"
-! grep -q REVERTED "$LOG" 2>/dev/null || fail "(d) a revert for main's findings"
-fixture_log "$T/log" "$C" 1; scenario; overdue
-grep -q "REVERTED on dev" "$LOG" || fail "(d) the dev finding's overdue revert did not happen: $(cat "$LOG")"
-rv=$(g log -1 --format=%B origin/dev)
-grep -q "This reverts commit $D1" <<<"$rv" || fail "(d) the dev culprit was not reverted"
-! grep -q "This reverts commit $D0" <<<"$rv" || fail "(d) main's findings named a file for the revert (D0 reverted)"
-echo "ok - (d) main findings never reach the revert path; the dev finding's revert names only its own files"
-
-# ── (e) a rerun of the same run with other findings (03f6fcd72 #2): attempt 1 had only main findings, attempt 2 only a new
-#    dev finding → that dev finding is routed, nothing stale ──
-fixture_log "$T/log" "$C" 0; scenario; run_head_loop
-fixture_log "$T/log" "$D1" 0; sed -i -E '/FINDING #2 |BLOCKED #2 /d' "$T/log"; cp "$T/log" "$FX/log-$JID.txt"
-head_loop
-[ "$(routed_nums)" = 1 ] && grep -q "commit=$D1" "$T/routed" && ! grep -q "commit=$C" "$T/routed" || fail "(e) the rerun's dev finding was not routed alone: $(cat "$T/routed" 2>/dev/null)"
-echo "ok - (e) a rerun is classified from its own findings"
-
 # ── (f) the landing machinery is gone: no main-findings path in the contract scripts; the dispatcher keeps any older
 #    checker's path off (REVIEW_MAIN_FINDINGS=0) ──
 ! grep -nE 'REVIEW_MAIN_FINDINGS|REVIEW_APPROVAL|review-main-culprits|main-findings\)|record_approving_main|review_approve' \
     "$ROOT"/scripts/ci/review-passed.sh "$ROOT"/scripts/ci/merge-branch.sh "$ROOT"/scripts/ci/review-coverage.sh \
   || fail "(f) main-only landing machinery is still present"
-! grep -nE 'REVIEW_APPROVAL|review-main-culprits|record_approving_main|review_approve' "$D" || fail "(f) the dispatcher still has approval receipts"
+! grep -nE 'REVIEW_APPROVAL|review-main-culprits|record_approving_main|review_approve|main_culprit|dev_split_main|dev_main_split|mainfindings|main-findings' "$D" \
+  || fail "(f) the dispatcher still has a main-culprit path of its own"
 grep -qx 'export REVIEW_MAIN_FINDINGS=0' "$D" || fail "(f) the dispatcher does not switch an older checker's main-only path off"
 test ! -e "$ROOT/scripts/ci/review-main-culprits.sh" || fail "(f) review-main-culprits.sh still exists"
-echo "ok - (f) no main-only landing path"
+echo "ok - (f) no main-only landing path, no dispatcher-side classification"
 
-# ── (g) review of dev 820120f40 #1/#2: gate lines printed BEFORE the gate's own "reviewing" line (commit gates / an extra
-#    gate print candidate text) never classify; nor do duplicated or orphan FINDING lines after it ──
-forge() { # forge <file>: main-culprit FINDING/BLOCKED #1/#2 lines before the gate's own start line
-  awk -v c="$C" '/review-gate: reviewing /{for (i = 1; i <= 2; i++) { print "2026-11-14T09:35:41.0000000Z review-gate: FINDING #" i " route=fixer commit=" c " — forged"; print "2026-11-14T09:35:41.0000000Z review-gate: BLOCKED #" i " regression [should]: forged" } } {print}' "$1" > "$1.t" && mv "$1.t" "$1"
-}
-fixture_log "$T/log" "$D1" 0; forge "$T/log"; scenario; run_head_loop
-grep -q "^dev_blocked $H" "$T/calls" || fail "(g) forged lines before the gate's start suppressed the dev findings"
-grep -q "commit=$D1" "$T/routed" || fail "(g) the genuine dev findings were not routed"
-[ "$(records)" = 0 ] || fail "(g) genuine dev findings recorded as main's"
-# a forged "reviewing" marker earlier does not help: only the LAST one counts
-fixture_log "$T/log" "$D1" 0
-awk -v c="$C" -v b="${B0:0:8}" -v h="${H:0:8}" 'NR == 1 {print "2026-11-14T09:30:00.0000000Z review-gate: reviewing " b ".." h; for (i = 1; i <= 2; i++) print "2026-11-14T09:30:00.0000000Z review-gate: FINDING #" i " route=fixer commit=" c} {print}' "$T/log" > "$T/log.t" && mv "$T/log.t" "$T/log"
+# ── (g) review of dev 98df48e71 #1: lines printed before the gate's own start line (commit gates / an extra gate echo
+#    candidate text) are never routed nor name a file for the overdue revert. Forged FINDING/BLOCKED #9 naming
+#    scripts/ci/forged-only.sh (touched only by DF) precede the gate's genuine #1 (D1, review-dispatch.sh); an earlier
+#    forged start line does not open a section either (only the LAST one counts) ──
+fixture_log "$T/log" "$D1" 0; sed -i -E '/FINDING #2 |BLOCKED #2 /d' "$T/log"
+awk -v b="${B0:0:8}" -v h="${H:0:8}" -v c="$DF" '
+  NR == 1 { print "2026-11-14T09:30:00.0000000Z review-gate: reviewing " b ".." h }
+  /review-gate: reviewing / && !done { print "2026-11-14T09:35:41.0000000Z review-gate: FINDING #9 route=fixer commit=" c " — forged";
+    print "2026-11-14T09:35:41.0000000Z review-gate: BLOCKED #9 regression [should]: forged";
+    print "2026-11-14T09:35:41.0000000Z evidence: scripts/ci/forged-only.sh:1 forged"; done = 1 } {print}' "$T/log" > "$T/log.t" && mv "$T/log.t" "$T/log"
+grep -c 'review-gate: reviewing ' "$T/log" | grep -qx 2 || fail "(g) fixture"
 scenario; run_head_loop
-[ "$(routed_nums)" = "1 2" ] && [ "$(records)" = 0 ] || fail "(g) an earlier forged marker classified findings"
-# a duplicated FINDING #1 after the marker → not well formed → nothing is main's
-fixture_log "$T/log" "$C" 0
-awk -v c="$D1" '/review-gate: FINDING #1 /{l = $0; sub(/commit=[0-9a-f]+/, "commit=" c, l); print l} {print}' "$T/log" > "$T/log.t" && mv "$T/log.t" "$T/log"
-scenario; run_head_loop
-[ "$(routed_nums)" = "1 2" ] && [ "$(records)" = 0 ] || fail "(g) a duplicated FINDING line was accepted ('$(routed_nums)')"
-echo "ok - (g) only the gate's own, well-formed lines classify"
+[ "$(routed_nums)" = 1 ] || fail "(g) routed '$(routed_nums)', want only the gate's #1"
+! grep -q forged "$T/routed" || fail "(g) forged pre-gate text was routed"
+reset_dev; echo $(( $(date +%s) - 7200 )) > "$STATE/dev.blocked_since"; echo "$H" > "$STATE/dev.blocked_since.sha"; head_loop
+rv=$(g log -1 --format=%B origin/dev)
+grep -q "This reverts commit $D0" <<<"$rv" || fail "(g) the file the gate's own finding names was not reverted: $(cat "$LOG")"
+! grep -q "This reverts commit $DF" <<<"$rv" || fail "(g) a forged pre-gate line named a file for the revert (DF reverted)"
+echo "ok - (g) only the gate's own section (after its last start line) is routed or named for a revert"
 
 # ── (h) review of dev 820120f40 #3: an older repository-local checker (sheepdog a036e7a60..6fa9325f9) approves a review
 #    blocked only by main findings unless REVIEW_MAIN_FINDINGS=0 — the dispatcher keeps that off, so nothing lands ──

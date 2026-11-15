@@ -101,6 +101,8 @@ export interface ReviewFinding {
   preexisting?: boolean;
   /** Set by parseVerdict's onDefaultBranch: the culprit commit is already on the default branch (a dev review). */
   onDefaultBranch?: boolean;
+  /** The top-level verdict and its listed duplicate name different culprit commits: never converted. */
+  commitConflict?: boolean;
 }
 const SHA40 = /^[0-9a-f]{40}$/;
 const VALID_VERDICTS = new Set<ReviewVerdict>(["clean", "ducktape", "missed-class", "regression"]);
@@ -161,6 +163,9 @@ export function parseVerdict(stdout: string, opts: ParseOptions = {}): ParsedVer
           const rank: Record<FindingSeverity, number> = { blocker: 0, should: 1, nit: 2 };
           const top = obj.severity === undefined && duplicate === same[0] ? duplicate.severity : rank[duplicate.severity] < rank[head[0].severity] ? duplicate.severity : head[0].severity;
           Object.assign(head[0], classify({ severity: top, risk: head[0].risk || duplicate.risk }, finding, evidence));
+          // copies of one finding that do not name the same culprit (one empty counts): neither is trusted for the
+          // default-branch rule — it applies only when every copy agrees (fail closed; review of dev 98df48e71 #2)
+          if (head[0].commit !== duplicate.commit) head[0].commitConflict = true;
           // either side naming the author wins (the author's design intent is needed); the commit either side gives
           const a = head[0].route === "author" ? head[0] : duplicate.route === "author" ? duplicate : head[0];
           Object.assign(head[0], { route: a.route, routeReason: a.routeReason || head[0].routeReason || duplicate.routeReason, commit: head[0].commit || duplicate.commit });
@@ -172,7 +177,7 @@ export function parseVerdict(stdout: string, opts: ParseOptions = {}): ParsedVer
         const all = [...head, ...rest];
         if (opts.onDefaultBranch) {
           for (const f of all) {
-            if (f.severity !== "nit" && !f.preexisting && SHA40.test(f.commit) && opts.onDefaultBranch(f.commit)) {
+            if (f.severity !== "nit" && !f.preexisting && !f.commitConflict && SHA40.test(f.commit) && opts.onDefaultBranch(f.commit)) {
               f.preexisting = true;
               f.onDefaultBranch = true;
             }
