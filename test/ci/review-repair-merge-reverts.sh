@@ -100,4 +100,18 @@ for mainline in 1 2; do
   check RP "$K" o/r "$P"   # through the tests-only round G (a verified link)
   echo "exercised mainline $mainline: removed trailer repair, both gates, dispatcher, fresh repair"
 done
+# review of sheepdog ae795a369 / 43721cf57 #1: a git error deep in the revert recursion is UNKNOWN, never "the undo was
+# itself reverted" — the undone repair R does not count, for review-repair.sh and the dispatcher alike
+g checkout -q --detach "$P"
+S2=$(commit_file 'blocked S2' broken2 bug2)
+R2=$(commit_file 'repair R2' fixed2 bug2 "Review-Fix-Of: $S2")
+g revert --no-edit "$R2" >/dev/null; U2=$(git rev-parse HEAD)
+repair_state 1 "$S2" "$U2"                        # control: the plain undo is seen
+git() { case "$*" in *"This reverts commit $U2"*) return 128 ;; esac; command git "$@"; }
+check absent repaired "$S2" "$U2"
+rc=0; reverted "$R2" "$U2" || rc=$?
+[ "$rc" = 2 ] || { echo "FAIL: reverted() answered $rc, not unknown (2), on a git error" >&2; bad=1; }
+check absent repair_effective "$S2" '' "$U2"
+unset -f git
+echo "exercised: a git error in the nested revert query → unknown → no repair"
 [ "$bad" = 0 ] || fail 'merge-reverted trailer repair still eligible'

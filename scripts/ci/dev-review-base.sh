@@ -209,12 +209,12 @@ only_fixes() { # only_fixes <base> <head>
 
 main_side() { # main_side <cover base> <head> → merge-base(main, head) when the range brings it in, else nothing
   local m
-  m=$(git merge-base "$MAINREF" "$2" 2>/dev/null) || return 0
+  m=$(git merge-base "$MAINREF" "$2") || { echo "dev-review-base: merge-base($MAINREF, ${2:0:12}) failed — the main side is unknown" >&2; return 1; }
   git merge-base --is-ancestor "$m" "$1" 2>/dev/null || printf '%s\n' "$m"
 }
 diff_base() { # diff_base <cover base> <head>
   local b=$1 m t
-  m=$(main_side "$b" "$2")
+  m=$(main_side "$b" "$2") || return 1
   [ -n "$m" ] || { printf '%s\n' "$b"; return; }
   if t=$(git merge-tree --write-tree "$b" "$m" 2>/dev/null); then
     t=${t%%$'\n'*}

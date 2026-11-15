@@ -31,6 +31,17 @@ review_runs() { # review_runs [<status>] → the trusted Review runs, one JSON o
 # Usable proof of a completed review = its run still has the review-attestation artifact (not expired: 90 days; not lost
 # to a failed upload). review-passed.sh follows the coverage chain through these artifacts, so the range producers start
 # a range only at a review that has one — otherwise they fall back to an older base (a larger range, provable again).
+review_runs_strict() { # like review_runs, but exit 1 when any page could not be read (a partial list is no evidence of absence)
+  local p r n
+  for p in $(seq 1 20); do
+    r=$(review_api "actions/workflows/$REVIEW_WF/runs?event=workflow_run&branch=$REVIEW_BRANCH${1:+&status=$1}&per_page=100&page=$p" 2>/dev/null) || return 1
+    n=$(jq '.workflow_runs | length' <<<"$r" 2>/dev/null) || return 1
+    [ "${n:-0}" -gt 0 ] || return 0
+    jq -c --arg br "$REVIEW_BRANCH" ".workflow_runs[] | $REVIEW_TRUSTED_JQ" <<<"$r" || return 1
+    [ "$n" -ge 100 ] || return 0
+  done
+  return 1   # more than 20 pages: not all read
+}
 review_attested() { # review_attested <run id>
   local a
   a=$(review_api "actions/runs/$1/artifacts" 2>/dev/null) || return 1

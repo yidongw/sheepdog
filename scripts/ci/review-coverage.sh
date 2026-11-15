@@ -77,9 +77,9 @@ review_recheck_blocked() { # <sha> <candidate head> [titles: recheck|any] -> 0 w
   # net for a tests-only fix has spoken against it, or (any) <sha> is an explicitly blocked commit
   # Fail closed: a run whose verdict cannot be read, or no readable run listing at all, counts as blocked.
   local id v rc
-  [ -n "${review_completed_runs:-}" ] || review_completed_runs=$(review_runs completed)
-  [ -n "$review_completed_runs" ] || return 0
-  for id in $(jq -r --arg r "recheck $1" --arg a "${3:+review $1}" 'select(.display_title == $r or .display_title == $a) | .id' <<<"$review_completed_runs"); do
+  [ -n "${review_strict_runs:-}" ] || review_strict_runs=$(review_runs_strict completed) || { review_strict_runs=""; return 0; }
+  [ -n "$review_strict_runs" ] || return 0
+  for id in $(jq -r --arg r "recheck $1" --arg a "${3:+review $1}" 'select(.display_title == $r or .display_title == $a) | .id' <<<"$review_strict_runs"); do
     rc=0; v=$(review_verdict "$id" 2>/dev/null) || rc=$?
     if [ "$rc" = 2 ]; then return 0; fi
     [ "$v" = blocked ] || continue
