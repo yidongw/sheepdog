@@ -2,18 +2,20 @@
 # Shared usable-proof rule for range producers and approval consumers. Source review-runs.sh first;
 # callers pass only run ids from its trusted listing. Missing proof widens the range at production time.
 # review_api returns JSON, log text or artifact bytes using the caller's existing authenticated client.
-review_verdict() { # <run id> -> pass|blocked; setup failures, cancellation and skips are not verdicts
+review_verdict() { # <run id> -> pass|blocked; setup failures, cancellation and skips are not verdicts (exit 1);
+  # exit 2 when the evidence could not be READ (API / log failure): unknown, which a caller deciding that a commit is
+  # NOT blocked must treat as blocked (review of vpn-sub c3d6df140 #1)
   local jobs st jid log
-  jobs=$(review_api "actions/runs/$1/jobs") || return 1
+  jobs=$(review_api "actions/runs/$1/jobs") || return 2
   st=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review") | .steps[]?
-    | select(.name | startswith("Review (blocking")) | .conclusion][0] // ""' <<<"$jobs") || return 1
+    | select(.name | startswith("Review (blocking")) | .conclusion][0] // ""' <<<"$jobs") || return 2
   case "$st" in
     success) echo pass ;;
     failure)
       jid=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].id // empty' <<<"$jobs")
       [ -n "$jid" ] || return 1
       # Consume the whole log before matching: grep -q in a pipe can SIGPIPE curl under pipefail.
-      log=$(review_api "actions/jobs/$jid/logs") || return 1
+      log=$(review_api "actions/jobs/$jid/logs") || return 2
       grep -qE '^([^ ]+ )?review-gate: BLOCKED #[0-9]+' <<<"$log" || return 1
       echo blocked ;;
     *) return 1 ;;
@@ -72,10 +74,14 @@ review_fix_round() { # <run id> -> 0 when it is a completed tests-only fix round
 review_recheck_blocked() { # <sha> <candidate head> [titles: recheck|any] -> 0 when a completed review of <sha> ("recheck
   # <sha>"; with "any" also "review <sha>") BLOCKED and no effective repair of it is on <candidate head>: main's safety
   # net for a tests-only fix has spoken against it, or (any) <sha> is an explicitly blocked commit
-  local id
+  # Fail closed: a run whose verdict cannot be read, or no readable run listing at all, counts as blocked.
+  local id v rc
   [ -n "${review_completed_runs:-}" ] || review_completed_runs=$(review_runs completed)
+  [ -n "$review_completed_runs" ] || return 0
   for id in $(jq -r --arg r "recheck $1" --arg a "${3:+review $1}" 'select(.display_title == $r or .display_title == $a) | .id' <<<"$review_completed_runs"); do
-    [ "$(review_verdict "$id" 2>/dev/null || true)" = blocked ] || continue
+    rc=0; v=$(review_verdict "$id" 2>/dev/null) || rc=$?
+    if [ "$rc" = 2 ]; then return 0; fi
+    [ "$v" = blocked ] || continue
     repaired "$1" "$2" || return 0
   done
   return 1
