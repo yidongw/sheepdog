@@ -2,5 +2,3 @@
 #   <suite file name> <the 40-char pin sha> <the protection that is not in the pinned snapshot yet>
 # Allowed only for that exact pin: a pin bump runs every suite against the new pin again. Keep this list empty whenever
 # the newest reviewed main carries the protection — bump the pin instead (docs/self-review.md).
-dev-review-once.sh c97994c98a943f097e99606afb905fb0a02d5af8 one verdict precedence (newest completed verdict wins, a blocked repair inside a tests-only range blocks it; review of foxhole-backend 4162ba2c3 #1/#2): the pin bump follows this Hotfix
-dev-review-range.sh c97994c98a943f097e99606afb905fb0a02d5af8 one verdict precedence (newest completed verdict wins, a blocked repair inside a tests-only range blocks it; review of foxhole-backend 4162ba2c3 #1/#2): the pin bump follows this Hotfix
