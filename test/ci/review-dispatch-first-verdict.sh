@@ -58,6 +58,67 @@ print(s[a:s.index('\n  for tsha in ',a)])
 PY
 )
 g update-ref refs/remotes/origin/dev "$F"
+# 9ee489fe9 #2: historical review evidence and latest tests must stay separate in every routing caller.
+main_loop=$(python3 - "$D" <<'PYMAIN'
+import sys
+s=open(sys.argv[1]).read(); a=s.index('# ── hotfix commits on main')
+print(s[a:s.index('\ndone\n',a)+6])
+PYMAIN
+)
+if [[ "$mode" = all || "$mode" = tests-* ]]; then
+H=$(c later "later dev work")
+for route in head train main; do
+  [[ "$mode" = all || "$mode" = tests-$route ]] || continue
+  g update-ref refs/remotes/origin/dev "$F"
+  [ "$route" != train ] || g update-ref refs/remotes/origin/dev "$H"
+  for scenario in resolved current cancelled; do
+    reset
+    old=failure latest=success
+    case "$scenario" in current) old=success latest=failure ;; cancelled) latest=cancelled ;; esac
+    title=review; [ "$route" != main ] || title=recheck
+    listing 30 "$title $F" 2 completed failure
+    attempt 30 1 2 failure "$old"; attempt 30 2 2 success "$latest"
+    att 30 "$F" "$N" review 1; att 30 "$F" "$N" review 2
+    # Give historical and current test logs distinct identities, including called-workflow job names.
+    for pair in '30.a1 3010' '30 3020'; do
+      read -r file tid <<<"$pair"
+      jq --argjson id "$tid" '.jobs |= map(if .name == "tests" then .id=$id else . end | .name = ("sheepdog / " + .name))' \
+        "$T/api/$file.jobs" > "$T/jobs.tmp"
+      mv "$T/jobs.tmp" "$T/api/$file.jobs"
+    done
+    echo '2026-11-15T00:00:00Z FAIL src/historical.test.ts' > "$T/api/3010.log"
+    echo '2026-11-15T00:00:00Z FAIL src/current.test.ts' > "$T/api/3020.log"
+    run1 32 "$title $F" failure "$N"
+    # After verdict selection neither endpoint is available: callers must carry BOTH selected snapshots.
+    code='eval "$(declare -f review_first_verdict | sed "1s/review_first_verdict/select_original/")"
+      review_first_verdict() { select_original "$@"; rm -f "$T/api/30.a1.jobs" "$T/api/30.jobs"; }'
+    case "$route" in
+      head) body=$loop ;;
+      train) body=$train ;;
+      main)
+        # Exercise the real hotfix loop and reader; stub only candidate discovery and external routing actions.
+        code+=$'\nhotfix_candidates() { echo "'"$F"'"; }
+          hotfix_expiring() { :; }; recheck_run() { echo 32; }
+          recheck_reviewed() { return 0; }; recheck_base() { echo "'"$N"'"; }
+          preexisting_record() { :; }; main_blocked() { printf "%s\\n" "$2"; }'
+        body=$main_loop ;;
+    esac
+    out=$(dispatch_eval "$code"$'\n'"$body")
+    [[ "$out" == *'finding of run 30 attempt 1'* ]] || fail "$route/$scenario lost historical review findings: $out"
+    [[ "$out" != *'finding of run 32'* ]] || fail "$route/$scenario used a later review verdict"
+    [[ "$out" != *'historical.test.ts'* ]] || fail "$route/$scenario resurrected historical test logs: $out"
+    if [ "$scenario" = current ]; then
+      [[ "$out" == *'trusted tests job: failure'* && "$out" == *'FAIL src/current.test.ts'* ]] \
+        || fail "$route lost current test failure: $out"
+    else
+      [[ "$out" != *'trusted tests job:'* && "$out" != *'current.test.ts'* ]] \
+        || fail "$route/$scenario routed superseded or cancelled test failures: $out"
+    fi
+  done
+  echo "ok - $route preserves historical review findings and uses current test conclusions and logs"
+done
+g update-ref refs/remotes/origin/dev "$F"
+fi
 if [ "$mode" = all ] || [ "$mode" = routing ]; then
 for extra in no yes; do
   reset
