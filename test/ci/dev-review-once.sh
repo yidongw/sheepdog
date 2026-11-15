@@ -57,6 +57,7 @@ reset_runs() { : > "$T/api/list"; rm -f "$T/api/"*.jobs "$T/api/"*.zip "$T/api/"
 cat > "$T/bin/page" <<PAGE
 #!/usr/bin/env bash
 p=\$(sed -nE 's/.*[?&]page=([0-9]+).*/\1/p' <<<"\$1"); p=\${p:-1}
+[ "\$p" != "\${PAGE_FAIL:-0}" ] || exit 22
 st=\$(sed -nE 's/.*[?&]status=([a-z]+).*/\1/p' <<<"\$1")
 sed -n "\$(( (p - 1) * 100 + 1 )),\$(( p * 100 ))p" "$T/api/list" | jq -s --arg st "\$st" '{workflow_runs: [.[] | select(\$st == "" or \$st == "completed" or .conclusion == \$st)]}'
 PAGE
@@ -78,7 +79,7 @@ cat > "$T/bin/gh" <<GH
 url=\$2; q=""; [ "\${3:-}" = -q ] && q=\$4
 url=\${url#repos/o/r/}
 case "\$url" in
-  *workflows/review.yml/runs*) j=\$("$T/bin/page" "\$url") ;;
+  *workflows/review.yml/runs*) j=\$("$T/bin/page" "\$url") || exit 1 ;;
   */runs/*/jobs) id=\${url##*runs/}; j=\$(cat "$T/api/\${id%%/*}.jobs") || exit 1 ;;
   */jobs/*/logs) id=\${url%/logs}; cat "$T/api/\${id##*/}.log" 2>/dev/null; exit ;;
   */runs/*/artifacts) id=\${url##*runs/}; id=\${id%%/*}; if [ -e "$T/api/\$id.zip" ]; then j="{\"artifacts\":[{\"name\":\"review-attestation\",\"id\":\$id}]}"; else j='{"artifacts":[]}'; fi ;;
@@ -340,4 +341,12 @@ reset_runs; run 11 "review $A" success "$P"; run 12 "review $X" forged "$A"
 out=$(cd "$T/src" && PATH=$T/bin:$PATH GH_TOKEN=x REPO=o/r bash "$ROOT/scripts/ci/prior-findings.sh" "$X" "$F" 2>/dev/null)
 grep -q forged <<<"$out" && fail "(k) prior-findings.sh attached the forged line"
 echo "ok (k) - forged pre-reviewer verdict lines are no verdict for any reader"
+# (l) review of 39380773c #1/#2: the strict listing behind review_recheck_blocked — 2,000 completed runs (20 full pages,
+# the evidence horizon) are no failure; an unreadable page is (unknown → blocked → no tests-only approval)
+reset_runs; runs_dev; run 14 "review $F" skipped "$N"
+for i in $(seq 1 1996); do printf '{"id":%s,"path":".github/workflows/review.yml","display_title":"review %040d","status":"completed","conclusion":"success","event":"workflow_run","head_branch":"main"}\n' $((70000 + i)) "$i" >> "$T/api/list"; done
+[ "$(wc -l < "$T/api/list")" = 2000 ] || fail "(l) fixture: not 2,000 runs"
+rp "$F" o/r "$P" || fail "(l) 2,000 completed runs rejected a valid tests-only approval"
+PAGE_FAIL=7 rp "$F" o/r "$P" && fail "(l) an unreadable page of runs still approved the tests-only round"
+echo "ok (l) - the strict run listing: the 20-page horizon is complete, an unreadable page is unknown"
 echo 'dev review once: all checks passed'
