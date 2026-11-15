@@ -2018,9 +2018,18 @@ for hsha in $(hotfix_candidates); do
   [[ "$hltests" =~ ^[0-9]+$ ]] || hltests=0
   if { [ "$hv" = pass ] || { [ -z "$hv" ] && [ "$(gh api "repos/$REPO/actions/runs/$hrun" -q .conclusion 2>/dev/null)" = success ] \
          && [ "$(jq '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review" and .conclusion == "success") | .steps[] | select((.name | startswith("Review (blocking")) and .conclusion == "success")] | length' <<<"$hjobs")" -gt 0 ]; }; } \
-     && [ "$hltests" -gt 0 ] && hotfix_pass_confirmed "$hsha"; then
-    if [ -n "${DRY:-}" ]; then echo "DRY HOTFIX ${hsha:0:9} on main: review passed"
-    else log "HOTFIX ${hsha:0:9} on main: review passed (the controller deploys it)"; preexisting_record "$hsha" "$hrun" "$hjobs"; touch "$STATE/sent/$hsha.hotfix-complete"; fi
+     && [ "$hltests" -gt 0 ]; then
+    if hotfix_pass_confirmed "$hsha"; then
+      if [ -n "${DRY:-}" ]; then echo "DRY HOTFIX ${hsha:0:9} on main: review passed"
+      else log "HOTFIX ${hsha:0:9} on main: review passed (the controller deploys it)"; preexisting_record "$hsha" "$hrun" "$hjobs"; touch "$STATE/sent/$hsha.hotfix-complete"; fi
+    elif [ -z "${DRY:-}" ]; then
+      # review and tests passed, but the completion check refused (the run did not conclude success — e.g. its status job
+      # — or evidence unreadable): no code finding, no fixer (review of 0d193f527 #1); the head stays open, the
+      # supervisor hears it once, the next run asks again
+      [ -e "$STATE/sent/$hsha.completion-refused" ] || { log "HOTFIX ${hsha:0:9}: review and tests passed (run $hrun) but review-passed.sh refuses its main verdict — not complete, no fixer; supervisor told"
+        notify_best_effort "$hsha" completion-refused "$SUPERVISOR_THREAD" "[review-dispatch] main ${hsha:0:9}: its re-check passed review and tests (https://github.com/$REPO/actions/runs/$hrun) but review-passed.sh refuses it (run conclusion / unreadable evidence) — it stays open; please look at the run (a rerun of its failed job, e.g. the status job)."
+        touch "$STATE/sent/$hsha.completion-refused"; }
+    fi
   else
     hf=$(findings "$hrun" "$hjobs")
     preexisting_record "$hsha" "$hrun" "$hjobs"

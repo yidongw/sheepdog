@@ -114,6 +114,16 @@ grep -q "^$F" "$T/woken" && fail "an unknown main verdict was routed to a fixer"
 grep -q "HOTFIX ${F:0:9}: its main verdict is unknown" "$LOG" || { tail -5 "$LOG" >&2; fail "the unknown main verdict was not logged"; }
 rm -f "$T/f-nolog"
 echo 'ok - an unknown main verdict waits for the next run'
+# 2b. review of sheepdog 0d193f527 #1: review and tests passed but the completion check (review-passed.sh) refuses —
+#     e.g. the run concluded failure in its status job: no fixer, no finding, not complete; the supervisor hears it once
+rm -f "$STATE/sent/$F.hotfix-complete"; touch "$T/f-passed"; : > "$T/woken"; : > "$T/sent"
+hotfix_pass_confirmed() { return 1; }
+eval "$loop"; eval "$loop"
+test -e "$STATE/sent/$F.hotfix-complete" && fail "a refused completion check completed the head"
+grep -q "^$F" "$T/woken" && fail "a refused completion check launched a fixer"
+[ "$(grep -c "^$F completion-refused" "$T/sent")" = 1 ] || fail "the supervisor did not hear the refused completion exactly once: $(cat "$T/sent")"
+hotfix_pass_confirmed() { :; }
+echo 'ok - a refused completion check is no finding'
 # 2. a passed main re-check of the head completes it
 rm -f "$STATE/sent/$F.hotfix-complete"; touch "$T/f-passed"
 eval "$loop"
