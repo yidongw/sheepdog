@@ -218,15 +218,14 @@ findings_cap() { # stdin: review-gate lines → every line of the first FINDINGS
     END { if (nd) print "(" nd " more findings not listed, see the run)" }'
 }
 finding_jobs() { ghm api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null; }   # routing/notification snapshot only, never approval evidence
-findings() { # findings <run id> [<its jobs answer, already read>] → text (blocking findings only: the reviewer's NIT lines are notes, see notes_of)
-  local run=$1 jobs=${2:-} tests_ok rid gl review_available=0
+findings() { # findings <run id> [<review jobs, already read>] [<current tests jobs>] → text (blocking findings only: the reviewer's NIT lines are notes, see notes_of)
+  local run=$1 jobs=${2:-} tests_jobs tests_ok rid gl review_available=0
   if [ "$#" -ge 2 ]; then ghc_note_jobs <<<"$jobs"; else
     jobs=$(ghm api "repos/$REPO/actions/runs/$run/jobs") || { echo 'review-gate: reviewer failed: finding jobs unavailable'; return 0; }
   fi
   if ! jq -e '.jobs | type == "array"' >/dev/null 2>&1 <<<"$jobs"; then
     echo 'review-gate: reviewer failed: finding jobs unavailable'; return 0
   fi
-  tests_ok=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "tests") | .conclusion' <<<"$jobs")
   rid=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "review") | .id' <<<"$jobs")
   if [ -n "$rid" ]; then
     # Reject even a partial failed fetch, but keep independent trusted-test evidence below.
@@ -239,6 +238,12 @@ findings() { # findings <run id> [<its jobs answer, already read>] → text (blo
   else
     echo 'review-gate: reviewer failed: review job evidence unavailable'
   fi
+  # Review findings belong to the immutable verdict attempt; tests belong to the run's latest attempt.
+  # An explicitly unavailable current snapshot must never fall back to historical test failures.
+  tests_jobs=${3-$jobs}
+  jq -e '.jobs | type == "array"' >/dev/null 2>&1 <<<"$tests_jobs" || return 0
+  ghc_note_jobs <<<"$tests_jobs"
+  tests_ok=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "tests") | .conclusion' <<<"$tests_jobs")
   # a CANCELLED tests job is never a code finding: the dispatcher cancels it itself once the review blocked ("tests no
   # longer needed") or a newer head superseded it (11-13 01:44Z: that cancellation was handed to a fixer as a finding;
   # it disputed it and the round was reported as "fix failed")
@@ -246,7 +251,7 @@ findings() { # findings <run id> [<its jobs answer, already read>] → text (blo
   if [ "$review_available" = 0 ] && { [ -z "$tests_ok" ] || [ "$tests_ok" = null ]; }; then return 0; fi
   if [ "$tests_ok" != success ] && [ "$tests_ok" != cancelled ]; then
     echo "trusted tests job: ${tests_ok:-not run}"
-    local tid; tid=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "tests") | .id' <<<"$jobs")
+    local tid; tid=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "tests") | .id' <<<"$tests_jobs")
     [ -n "$tid" ] && ghm api "repos/$REPO/actions/jobs/$tid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //; s/\x1b\[[0-9;]*m//g' \
       | grep -E '^ *(FAIL |× |error TS|##\[error\])' | sort -u | head -15 || true
   fi
@@ -1217,12 +1222,12 @@ run_verdict() { # run_verdict <run id> → 0 when a job of that run failed / tim
 dev_verdict_run() { # <sha> <run id> <conclusion> → dev_verdict="<run id> <conclusion> <attempt|->", dev_verdict_jobs: the run AND attempt of
   # THE dev verdict of <sha> (review_first_verdict "review": its FIRST completed, attested verdict — a later rerun,
   # cancelled or passing, never hides or replaces it; re-check of 379550c9a #1, review of 9ce09a6e2 #6), else the given run
-  # Call without a subshell: both routing paths reuse this attempt's jobs without reconstructing them from a run id.
-  dev_verdict="" dev_verdict_jobs=""
+  # Call without a subshell: preserve review jobs AND dev_verdict_latest_jobs for current tests in both routing paths.
+  dev_verdict="" dev_verdict_jobs="" dev_verdict_latest_jobs=""
   if review_first_verdict "$1" review; then
     # the verdict's own attempt decides: a block is failure, a pass / tests-only round success (whatever a later attempt concluded)
     case "$rfv_kind" in blocked) dev_verdict="$rfv_id failure $rfv_attempt" ;; *) dev_verdict="$rfv_id success $rfv_attempt" ;; esac
-    dev_verdict_jobs=$rfv_jobs
+    dev_verdict_jobs=$rfv_jobs dev_verdict_latest_jobs=$rfv_latest_jobs
     return 0
   fi
   # no verdict readable yet: the given run — or, when it is a cancel without a verdict, the newest older completed run of
@@ -2025,13 +2030,13 @@ for hsha in $(hotfix_candidates); do
     elif [ -z "${DRY:-}" ]; then
       # review and tests passed, but the completion check refused (the run did not conclude success — e.g. its status job
       # — or evidence unreadable): no code finding, no fixer (review of 0d193f527 #1); the head stays open, the
-      # supervisor hears it once, the next run asks again
+      # notification helper records delivery and deduplicates; failed sends stay retryable, the next run asks again
       [ -e "$STATE/sent/$hsha.completion-refused" ] || { log "HOTFIX ${hsha:0:9}: review and tests passed (run $hrun) but review-passed.sh refuses its main verdict — not complete, no fixer; supervisor told"
         notify_best_effort "$hsha" completion-refused "$SUPERVISOR_THREAD" "[review-dispatch] main ${hsha:0:9}: its re-check passed review and tests (https://github.com/$REPO/actions/runs/$hrun) but review-passed.sh refuses it (run conclusion / unreadable evidence) — it stays open; please look at the run (a rerun of its failed job, e.g. the status job)."
-        touch "$STATE/sent/$hsha.completion-refused"; }
+      }
     fi
   else
-    hf=$(findings "$hrun" "$hjobs")
+    hf=$(findings "$hrun" "$hjobs" "$hljobs")
     preexisting_record "$hsha" "$hrun" "$hjobs"
     main_blocked "$hsha" "$hf" "$hbase" "$hrun"
   fi
@@ -2056,9 +2061,9 @@ if [ -z "${DRY:-}" ] && git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/
       dev_verdict_run "$bsha" "$brid" failure
       read -r brid bconcl _ <<<"$dev_verdict"
       if [ "$bconcl" = failure ]; then
-        bjobs=$dev_verdict_jobs
-        [ -n "$bjobs" ] || bjobs=$(finding_jobs "$brid") || bjobs=""
-        bf=$(findings "$brid" "$bjobs")
+        bjobs=$dev_verdict_jobs bljobs=$dev_verdict_latest_jobs
+        if [ -z "$bjobs" ]; then bjobs=$(finding_jobs "$brid") || bjobs=""; bljobs=$bjobs; fi
+        bf=$(findings "$brid" "$bjobs" "$bljobs")
         if binfra=$(review_infra_reason "$bf"); then dev_infra "$bsha" "$brid" "$binfra"
         elif dev_main_hold "$bsha" "$brid" "$bf" "$bjobs"; then :
         else
@@ -2365,9 +2370,9 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
     fi
   elif [ "$ref" = "$DEV" ]; then
     # the verdict's own attempt: its findings, not a later rerun's (review of 9ce09a6e2 #6)
-    djobs=$dev_verdict_jobs
-    [ -n "$djobs" ] || djobs=$(finding_jobs "$rid") || djobs=""
-    f=$(findings "$rid" "$djobs")
+    djobs=$dev_verdict_jobs dljobs=$dev_verdict_latest_jobs
+    if [ -z "$djobs" ]; then djobs=$(finding_jobs "$rid") || djobs=""; dljobs=$djobs; fi
+    f=$(findings "$rid" "$djobs" "$dljobs")
     # the reviewer itself did not run: nothing was reviewed — no block, no fixer, no author notice, no revert clock
     if dinfra=$(review_infra_reason "$f"); then dev_infra "$sha" "$rid" "$dinfra"; continue; fi
     if dev_main_hold "$sha" "$rid" "$f" "$djobs"; then continue; fi

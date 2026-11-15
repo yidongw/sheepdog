@@ -124,6 +124,31 @@ grep -q "^$F" "$T/woken" && fail "a refused completion check launched a fixer"
 [ "$(grep -c "^$F completion-refused" "$T/sent")" = 1 ] || fail "the supervisor did not hear the refused completion exactly once: $(cat "$T/sent")"
 hotfix_pass_confirmed() { :; }
 echo 'ok - a refused completion check is no finding'
+# 9ee489fe9 #1: use real notify receipts, with only the external delivery transport stubbed.
+# Two failed loop runs must both try delivery; recovery records a receipt and deduplicates later runs.
+(
+  source scripts/ci/review-notify.sh
+  eval "$(fns notify_best_effort)"
+  notify_outbox="" SUPERVISOR_THREAD=mcp:33333333-3333-3333-3333-333333333333
+  timeout() { shift; "$@"; }
+  t3() {
+    [ "$1 $2" = 'thread send' ] || fail "unexpected T3 call: $*"
+    cat >/dev/null; echo attempt >> "$T/completion-attempts"
+    [ ! -e "$T/notify-fails" ]
+  }
+  hotfix_pass_confirmed() { return 1; }
+  rm -f "$STATE/sent/$F.completion-refused"; touch "$T/notify-fails"
+  eval "$loop"; eval "$loop"
+  [ "$(wc -l < "$T/completion-attempts")" = 2 ] || fail 'failed completion-refusal delivery was not retried'
+  test ! -e "$STATE/sent/$F.completion-refused" || fail 'failed delivery wrote a receipt'
+  rm "$T/notify-fails"
+  eval "$loop"; eval "$loop"
+  [ "$(wc -l < "$T/completion-attempts")" = 3 ] || fail 'successful completion-refusal delivery was not deduplicated'
+  test -e "$STATE/sent/$F.completion-refused" || fail 'successful delivery did not write a receipt'
+  test ! -e "$STATE/sent/$F.hotfix-complete" || fail 'notification recovery completed the head'
+  test ! -s "$T/woken" || fail 'notification recovery launched a fixer'
+)
+echo 'ok - completion-refusal delivery retries failures and deduplicates success'
 # 2. a passed main re-check of the head completes it
 rm -f "$STATE/sent/$F.hotfix-complete"; touch "$T/f-passed"
 eval "$loop"
