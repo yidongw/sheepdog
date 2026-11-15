@@ -14,10 +14,10 @@ it guards.
   host. So a change to the reviewer, the gates or the workflow governs sheepdog's own review only after a pin bump in
   `self-review.yml`, and that bump is reviewed together with the sheepdog diff it ships (section 2): a bump on `dev`
   by the pinned (old) reviewer — dev runs use main's `self-review.yml` —, a `Hotfix:` bump on `main` by the new pin.
-  Pinned: `6d73688be` (the owner's dev rule: every dev commit is reviewed exactly once — the range starts at the last
+  Pinned: `c97994c98` (the owner's dev rule: every dev commit is reviewed exactly once — the range starts at the last
   completed dev review of any verdict, commits a main→dev merge brought are main's, landing needs the coverage chain,
   a tests-only repair stays inside its blocked range (main side excluded), a blocked merge gets no structural coverage,
-  an unreadable verdict counts as blocked, one evidence reader (review-evidence.sh), three-state revert answers; before it, `79973426c`).
+  an unreadable verdict counts as blocked, one evidence reader (review-evidence.sh), three-state revert answers, complete strict run listings; before it, `6d73688be`).
 - **The pin carries the current protections** (review of ad09c0b50 #1/#2: the pin e099da79f shipped the old range
   walker, so the reviewer that actually ran lacked the fix the candidate's tests demanded). `test/ci/self-review-pin.sh`
   runs every review-flow suite of the tree (all of `test/ci/` except the dispatcher's, which runs from the trusted main
