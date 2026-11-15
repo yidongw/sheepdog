@@ -355,6 +355,15 @@ reset_dev; mkdir "$STATE/open-findings.log"
 ( cd "$ROOT" && merged_one=0 && DRY="" && eval "$loop" ) || fail "(i) head loop failed"; g fetch -q origin
 ! landed || fail "(i) the head loop merged H with an unwritable open-findings.log: $(cat "$LOG")"
 grep -q "open-findings.log could not be written" "$LOG" || fail "(i) no log line for the failed record"
+! grep -qE '^(dev_blocked|wake_fixer|notify)' "$T/calls" 2>/dev/null || fail "(i) main findings were routed on dev after a failed record: $(cat "$T/calls")"
+test ! -e "$STATE/dev.blocked_since" || fail "(i) a dev block clock started for main's findings"
+# … also with an aged block clock (review of main 6b9031dfb #1): main's findings never reach dev's revert path
+dev_before=$(g rev-parse origin/dev); echo $(( $(date +%s) - 4000 )) > "$STATE/dev.blocked_since"; echo "$H" > "$STATE/dev.blocked_since.sha"
+( cd "$ROOT" && merged_one=0 && DRY="" && eval "$loop" ) >/dev/null 2>&1; g fetch -q origin
+[ "$(g rev-parse origin/dev)" = "$dev_before" ] || fail "(i) dev was rewritten (revert) for main's findings after a failed record"
+! landed || fail "(i) landed with an aged clock"
+! grep -qE '^(dev_blocked|wake_fixer)' "$T/calls" 2>/dev/null || fail "(i) routed with an aged clock: $(cat "$T/calls")"
+rm -f "$STATE/dev.blocked_since" "$STATE/dev.blocked_since.sha"
 ls "$STATE/sent/" | grep -q mainfindings && fail "(i) a receipt without a record"
 rmdir "$STATE/open-findings.log"
 echo "ok - (i) a record that cannot be written: no main-only approval, H not landed by the train or the head loop"
