@@ -72,57 +72,38 @@ review_fix_round() { # <run id> -> 0 when it is a completed tests-only fix round
     | [.steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] == "skipped")
     and ([.jobs[]? | select((.name | sub("^.* / "; "")) == "tests")][0].conclusion == "success")' <<<"$jobs" >/dev/null 2>&1
 }
-review_recheck_blocked() { # <sha> <candidate head> [titles: recheck|any] -> 0 when the NEWEST completed review of <sha>
-  # ("recheck <sha>"; with "any" also "review <sha>") BLOCKED and no effective repair of it is on <candidate head> — the
-  # one verdict precedence for every coverage link (review of foxhole-backend 4162ba2c3 #2, sheepdog 04d883525 #1).
-  # "Newest" is the review job's completion time (completed_at; a rerun's latest attempt is its run's verdict), never
-  # the listing order. Fail closed: an unreadable listing, jobs answer or log, or — when several runs carry a verdict —
-  # a missing or tied newest completion time, counts as blocked.
-  local id jobs j st t v log best_t="" best_v="" tie=0 unknown=0 n=0
-  [ -n "${review_strict_runs:-}" ] || review_strict_runs=$(review_runs_strict completed) || { review_strict_runs=""; return 0; }
-  [ -n "$review_strict_runs" ] || return 0
-  for id in $(jq -r --arg r "recheck $1" --arg a "${3:+review $1}" 'select(.display_title == $r or .display_title == $a) | .id' <<<"$review_strict_runs"); do
-    jobs=$(review_api "actions/runs/$id/jobs") || return 0
-    j=$(jq -c '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] // empty' <<<"$jobs") || return 0
-    [ -n "$j" ] || continue
-    st=$(jq -r '[.steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] // ""' <<<"$j") || return 0
-    case "$st" in
-      success) v=pass ;;
-      failure)
-        log=$(review_api "actions/jobs/$(jq -r '.id // empty' <<<"$j")/logs") || return 0
-        if review_blocked_verdict "$jobs" "$log"; then v=blocked; else continue; fi ;;   # a crash is no verdict
-      *) continue ;;
-    esac
-    n=$((n + 1))
-    t=$(jq -r '.completed_at // ""' <<<"$j")
-    if [ -z "$t" ] || [ "$t" = null ]; then unknown=1; continue; fi
-    if [ -z "$best_t" ] || [[ "$t" > "$best_t" ]]; then best_t=$t; best_v=$v; tie=0
-    elif [ "$t" = "$best_t" ]; then tie=1; [ "$v" = "$best_v" ] || best_v=blocked; fi
-  done
-  [ "$n" -gt 0 ] || return 1
-  if [ "$n" -eq 1 ] && [ "$unknown" = 1 ]; then best_v=$v; fi   # one verdict: no order needed
-  if [ "$n" -gt 1 ] && { [ "$unknown" = 1 ] || [ "$tie" = 1 ]; }; then best_v=blocked; fi
-  case "$best_v" in
-    pass) return 1 ;;
-    *) if repaired "$1" "$2"; then return 1; else return 0; fi ;;
+review_recheck_blocked() { # <sha> <candidate head> [any] -> 0 when <sha>'s verdict is BLOCKED (or unknown) and no effective
+  # repair of it is on <candidate head>. The verdict is THE one rule (review-evidence.sh review_first_verdict): the FIRST
+  # completed, attested verdict of its "recheck <sha>" runs (with "any": "review <sha>" too), in run id / run_attempt
+  # order. Later runs and reruns never change it; only a Review-Fix-Of: repair clears a block (owner 11-16; reviews of
+  # sheepdog 04d883525 #1/#2, 12fe19739 #1-#3). Unknown (unreadable evidence, an earlier run not finished) is blocked.
+  local rc=0 mode=recheck
+  [ -z "${3:-}" ] || mode=any
+  review_first_verdict "$1" "$mode" || rc=$?
+  case "$rc" in
+    1) return 1 ;;
+    0) [ "$rfv_kind" = blocked ] || return 1 ;;
   esac
+  if repaired "$1" "$2"; then return 1; else return 0; fi
 }
 # review_fix_links is transactional: a link (or a covered alternative) that fails restores what it had appended
-review_link() { # <run id> <link head> <anchor> <candidate head> <depth>
+review_link() { # <run id> <link head> <anchor> <candidate head> <depth> [<its verdict: pass|blocked|fixes> [<its validated
+  # attestation JSON>] (review_first_verdict)]
   local saved=$review_fix_links
   _review_link "$@" && return 0
   review_fix_links=$saved; return 1
 }
 _review_link() {
   local att v m k am
-  att=$(review_attestation "$1" "$2") || return 1
+  att=${7:-}; [ -n "$att" ] || att=$(review_attestation "$1" "$2") || return 1
   k=$(jq -r .kind <<<"$att")
   case "$k" in
     review)
-      v=$(review_verdict "$1") || return 1
+      v=${6:-}; [ -n "$v" ] || v=$(review_verdict "$1") || return 1
+      [ "$v" != fixes ] || return 1
       [ "$v" = pass ] || [ "${REVIEW_LINK_PRODUCER:-0}" = 1 ] || repaired "$2" "$4" || return 1 ;;
     tests-only-fix)
-      review_fix_round "$1" || return 1
+      case "${6:-}" in fixes) ;; "") review_fix_round "$1" || return 1 ;; *) return 1 ;; esac
       if [ "${REVIEW_LINK_PRODUCER:-0}" != 1 ]; then
         [ "${REVIEW_LINK_FIXES:-0}" = 1 ] || return 1
         ! review_recheck_blocked "$2" "$4" || return 1
@@ -148,21 +129,25 @@ review_covered() { # <base> <anchor (deployed or review-time main)> <candidate h
   review_fix_links=$saved; return 1
 }
 _review_covered() {
-  local b=$1 d=$2 h=$3 n=${4:-0} id
+  local b=$1 d=$2 h=$3 n=${4:-0} rc=0 vk vid vatt
   git merge-base --is-ancestor "$b" "$d" 2>/dev/null && return 0
   [ "$n" -lt 40 ] || return 1
-  [ -n "${review_completed_runs:-}" ] || review_completed_runs=$(review_runs completed)
-  # one verdict precedence for every link of <b>: a completed review of <b> that BLOCKED and is not repaired on the head
-  # vetoes every other run of <b> (an older pass, a tests-only round) and its structural coverage (review of
-  # foxhole-backend 4162ba2c3 #2). The dev range producer (REVIEW_LINK_PRODUCER) only asks for readable proof.
-  if [ "${REVIEW_LINK_PRODUCER:-0}" != 1 ] && review_recheck_blocked "$b" "$h" any; then return 1; fi
-  for id in $(jq -r --arg a "review $b" --arg r "recheck $b" '
-    select(.display_title == $a or .display_title == $r) | .id' <<<"$review_completed_runs"); do
-    review_link "$id" "$b" "$d" "$h" "$((n + 1))" && return 0
-  done
-  # structural coverage of a clean merge through its parents — never for a merge whose own review BLOCKED and is not
-  # repaired: the dev producer starts the next range at it, so nothing else reviews it again (review of 1b2f4484e #1/#2)
-  if review_clean_merge "$b" && ! review_recheck_blocked "$b" "$h" any; then
+  # THE verdict of <b> (review_first_verdict, "review <b>" or "recheck <b>"): its first completed, attested verdict is
+  # the only run that can link it — a later pass never stands over a block, a later block never revokes a pass. A
+  # blocked verdict links only with an effective repair on the head (the dev range PRODUCER takes any verdict as a
+  # base: its repair may come later); an unknown verdict links nothing (fail closed; retried on the next run).
+  review_first_verdict "$b" any || rc=$?
+  vk=$rfv_kind vid=$rfv_id vatt=$rfv_att   # (nested links overwrite rfv_*)
+  case "$rc" in
+    0)
+      review_link "$vid" "$b" "$d" "$h" "$((n + 1))" "$vk" "$vatt" && return 0
+      # a blocked, unrepaired verdict: no structural coverage either (review of 1b2f4484e #1/#2)
+      if [ "$vk" = blocked ] && [ "${REVIEW_LINK_PRODUCER:-0}" != 1 ] && ! repaired "$b" "$h"; then return 1; fi ;;
+    2) return 1 ;;
+  esac
+  # structural coverage of a clean merge through its parents — never for a merge whose own verdict is blocked and not
+  # repaired (above), nor an unknown one
+  if review_clean_merge "$b"; then
     review_covered "$(git rev-parse "$b^1")" "$d" "$h" "$((n + 1))" \
       && review_covered "$(git rev-parse "$b^2")" "$d" "$h" "$((n + 1))" && return 0
   fi

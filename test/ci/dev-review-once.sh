@@ -341,25 +341,10 @@ reset_runs; run 11 "review $A" success "$P"; run 12 "review $X" forged "$A"
 out=$(cd "$T/src" && PATH=$T/bin:$PATH GH_TOKEN=x REPO=o/r bash "$ROOT/scripts/ci/prior-findings.sh" "$X" "$F" 2>/dev/null)
 grep -q forged <<<"$out" && fail "(k) prior-findings.sh attached the forged line"
 echo "ok (k) - forged pre-reviewer verdict lines are no verdict for any reader"
-# (m) review of foxhole-backend 4162ba2c3 #2: a newer BLOCKED review of A vetoes an older passing run of A
+# (m) review of foxhole-backend 4162ba2c3 #2: the control chain. Which run is a commit's verdict when it has several runs
+# or reruns — the FIRST completed, attested one (run id / run_attempt; owner 11-16) — is test/ci/review-first-verdict.sh.
 reset_runs; run 11 "review $A" success "$P"; run 12 "review $X" failure "$A"; run 13 "review $N" success "$X"; run 14 "review $F" skipped "$N"
 rp "$F" o/r "$P" || fail "(m) control: F not approved"
-reset_runs; run 15 "review $A" failure "$P"; run 11 "review $A" success "$P"; run 12 "review $X" failure "$A"; run 13 "review $N" success "$X"; run 14 "review $F" skipped "$N"
-if rp "$F" o/r "$P"; then fail "(m) an older passing run of A covered it although its newer review blocked (unrepaired)"; fi
-# … and the newest verdict wins the other way: a newer pass of A stands over an older block
-reset_runs; run 17 "review $A" success "$P"; run 15 "review $A" failure "$P"; run 12 "review $X" failure "$A"; run 13 "review $N" success "$X"; run 14 "review $F" skipped "$N"
-rp "$F" o/r "$P" || fail "(m) a newer passing review of A did not stand over its older block"
-# review of sheepdog 04d883525 #1: run 14 is older but its (re)run blocked LAST; run 15 passed earlier although it is
-# listed first — the completion time decides, not the listing order; an equal time is blocked
-reset_runs; DONE_AT=2026-11-15T10:00:00Z run 15 "review $A" success "$P"; DONE_AT=2026-11-15T12:00:00Z run 14 "review $A" failure "$P"
-run 12 "review $X" failure "$A"; run 13 "review $N" success "$X"; run 20 "review $F" skipped "$N"
-if rp "$F" o/r "$P"; then fail "(m) the listing order let an earlier pass override a later blocking rerun"; fi
-reset_runs; DONE_AT=2026-11-15T12:00:00Z run 15 "review $A" success "$P"; DONE_AT=2026-11-15T10:00:00Z run 14 "review $A" failure "$P"
-run 12 "review $X" failure "$A"; run 13 "review $N" success "$X"; run 20 "review $F" skipped "$N"
-rp "$F" o/r "$P" || fail "(m) a pass completed after the block did not stand"
-reset_runs; DONE_AT=2026-11-15T12:00:00Z run 15 "review $A" success "$P"; DONE_AT=2026-11-15T12:00:00Z run 14 "review $A" failure "$P"
-run 12 "review $X" failure "$A"; run 13 "review $N" success "$X"; run 20 "review $F" skipped "$N"
-if rp "$F" o/r "$P"; then fail "(m) a tie between a pass and a block approved"; fi
 # (n) review of foxhole-backend 4162ba2c3 #1: X blocked; F repairs X but F's own review blocked; FF repairs X only →
 # F's block is unrepaired inside X..FF: no tests-only round
 g checkout -q -b nn "$X"; F1=$(c x "F1: repair of X (its own review blocked)" "Review-Fix-Of: $X"); FF=$(c x "FF: another repair of X" "Review-Fix-Of: $X"); g checkout -q dev

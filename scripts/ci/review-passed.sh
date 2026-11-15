@@ -23,18 +23,8 @@ BR=${REVIEW_DEFAULT_BRANCH:-${MAIN_BRANCH:-main}}
 review_api() { gh api "repos/$repo/$1"; }
 REVIEW_DEFAULT_BRANCH=$BR
 . "$(dirname "${BASH_SOURCE[0]}")/review-runs.sh"   # review_runs: the one provenance rule, every page (not only the newest 100)
-list_runs() { review_runs "$1"; }
-ids=$(list_runs success | jq -r --arg a "review $sha" --arg b "recheck $sha" 'select(.display_title == $a or .display_title == $b) | .id')
 # A workflow whose jobs were all skipped (CI failed, or not a push) still concludes
 # "success": require the review job itself to have run its blocking step successfully.
-attest_of_kind() { # attest_of_kind <run id> → "<head> <base> <main at review time, or -> <mainside, or -> <kind>" (kind "review" when the artifact has none); 1 when no usable artifact
-  local art tmpd
-  # sed prints the first result while draining the producer (head can cause SIGPIPE under pipefail).
-  art=$(gh api "repos/$repo/actions/runs/$1/artifacts" -q '.artifacts[] | select(.name == "review-attestation" and .expired != true) | .id' | sed -n '1p')
-  [ -n "$art" ] || return 1
-  tmpd=$(mktemp -d); gh api "repos/$repo/actions/artifacts/$art/zip" > "$tmpd/a.zip" && (cd "$tmpd" && unzip -q a.zip)
-  jq -r '"\(.head) \(.base) \(.main // "-") \(.mainside // "-") \(.kind // "review")"' "$tmpd/review-attestation.json"; rm -rf "$tmpd"
-}
 # Coverage by a chain of completed rounds (dev reviews cover only what no completed review covered, owner 11-12):
 # <base> is covered when it is an ancestor of (or equal to) <deployed>; or a completed review of <base> itself
 # ("review <base>" / "recheck <base>" from main's workflow whose blocking step ran to a verdict: success, or failure WITH
@@ -57,15 +47,32 @@ covered() { review_covered "$1" "$2" "$sha" "${3:-0}"; }
 #     Review-Fix-Of:, which starts a main re-check when it lands (review.yml), over all commits since the last completed
 #     main review.
 # A run whose review never ran for any other reason (cancelled, setup / gate failure) never passes.
+# WHICH run: THE verdict of <sha> (review-evidence.sh review_first_verdict, owner 11-16) — its FIRST completed, attested
+# verdict among its "review <sha>" / "recheck <sha>" runs in run id / run_attempt order. Only that run can approve: a
+# later pass never stands over a blocked (or unknown) first verdict, and only a Review-Fix-Of: repair — a commit of its
+# own, approved in turn — clears a block. Its review step is judged on that attempt; its trusted tests on the run's
+# latest attempt (a rerun of red tests), and the run as a whole must have concluded success.
+rc=0; review_first_verdict "$sha" any || rc=$?
+case "$rc" in
+  1) echo "no completed trusted review of ${sha:0:12}" >&2; exit 1 ;;
+  2) echo "the verdict of ${sha:0:12} is unknown (run ${rfv_id:-?}: unreadable or not finished) — refused (fail closed)" >&2; exit 1 ;;
+esac
+[ "$rfv_kind" != blocked ] || { echo "the verdict of ${sha:0:12} is blocked (run $rfv_id attempt $rfv_attempt): no later run clears it — its Review-Fix-Of: repair lands instead" >&2; exit 1; }
+# (a listing without the field — test fixtures — is judged by its jobs alone; null = not concluded yet)
+[ "$(jq -r 'if has("conclusion") then .conclusion // "pending" else "success" end' <<<"$rfv_run")" = success ] \
+  || { echo "run $rfv_id of ${sha:0:12} did not conclude success" >&2; exit 1; }
+ids=$rfv_id vjobs=$rfv_jobs ljobs=$rfv_latest_jobs
+# its attestation, validated by the reader (one download): "<head> <base> <main or -> <mainside or -> <kind>"
+vhb=$(jq -r '"\(.head) \(.base) \(.main // "-") \(.mainside // "-") \(.kind // "review")"' <<<"$rfv_att")
 # REVIEW_KIND_OUT=<file>: the kind of the approving run ("review" | "tests-only-fix") is written there (merge-branch.sh).
 for id in $ids; do
   review_fix_links=""   # this run's proof only
-  jobs=$(gh api "repos/$repo/actions/runs/$id/jobs")
-  tests=$(jq '[.jobs[] | select((.name | sub("^.* / "; "")) == "tests" and .conclusion == "success")] | length' <<<"$jobs")
+  tests=$(jq '[.jobs[] | select((.name | sub("^.* / "; "")) == "tests" and .conclusion == "success")] | length' <<<"$ljobs")   # the run's latest attempt
+  jobs=$vjobs   # the verdict's own attempt
   [ "${tests:-0}" -gt 0 ] || continue
   [ "$(jq '[.jobs[] | select((.name | sub("^.* / "; "")) == "review" and .conclusion == "success")] | length' <<<"$jobs")" -gt 0 ] || continue
   st=$(jq -r '[.jobs[] | select((.name | sub("^.* / "; "")) == "review") | .steps[] | select(.name | startswith("Review (blocking")) | .conclusion][0] // ""' <<<"$jobs")
-  hb=$(attest_of_kind "$id") || hb=""
+  hb=$vhb
   kind=${hb##* }
   case "$st" in
     success) [ "$kind" = tests-only-fix ] && { echo "run $id: a tests-only-fix attestation on a reviewed step" >&2; continue; } ;;
@@ -89,7 +96,7 @@ for id in $ids; do
     *) continue ;;
   esac
   if [ -n "${3:-}" ]; then
-    # (the attestation read above, attest_of_kind: one download per run)
+    # (the attestation the verdict reader validated: one download per run)
     # Runs made before the attestation step existed (review.yml before this change) carry no
     # artifact, so their reviewed range cannot be proven: never auto-deployable. That is a
     # one-time bootstrap: the commit that introduces the attestation is deployed by hand

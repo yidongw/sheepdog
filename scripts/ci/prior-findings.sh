@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # prior-findings <base> <head> — the review ledger's input (owner 11-12): for every sha a Review-Fix-Of: trailer in
-# base..head names, print the blocking findings of the newest failed Review run of that sha ("review <S>" on dev,
+# base..head names, print the blocking findings of that sha's blocked verdict (its FIRST completed verdict, review-evidence.sh) ("review <S>" on dev,
 # "recheck <S>" on main) — the findings the fixer was given. review-gate.ts --prior puts them, with the fixers'
 # Review-Disputed: trailers, into the re-review prompt. Read-only (GH_TOKEN with actions: read); prints nothing and
 # exits 0 when there is nothing to fetch or the API fails: the re-review then reads the fix commits instead.
@@ -24,15 +24,18 @@ done | awk '!seen[$0]++')
 review_api() { api "$1"; }
 . "$(dirname "${BASH_SOURCE[0]}")/review-runs.sh"
 . "$(dirname "${BASH_SOURCE[0]}")/review-evidence.sh"   # the one evidence reader   # only trusted runs' findings reach the reviewer's prompt; every page
-runs=$(review_runs completed | jq -s '{workflow_runs: .}')
 for s in $fixes; do
-  rid=$(jq -r --arg a "review $s" --arg b "recheck $s" \
-    '[.workflow_runs[]? | select((.display_title == $a or .display_title == $b) and .conclusion == "failure")][0].id // empty' <<<"$runs" 2>/dev/null)
-  [ -n "$rid" ] || { note "no failed review run found for ${s:0:12}"; continue; }
-  jid=$(api "actions/runs/$rid/jobs" | jq -r '.jobs[]? | select((.name | sub("^.* / "; "")) == "review") | .id' 2>/dev/null | sed -n '1p')
+  # THE verdict of S (review_first_verdict: its FIRST completed, attested verdict, run id / run_attempt order) — the
+  # blocked review the fix answers; a later rerun's findings are not the round the fixer was given. A main repair answers
+  # S's main verdict (its first "recheck S"), a separate check after S's dev verdict.
+  rc=0; review_first_verdict "$s" any || rc=$?
+  if ! { [ "$rc" = 0 ] && [ "$rfv_kind" = blocked ]; }; then rc=0; review_first_verdict "$s" recheck || rc=$?; fi
+  [ "$rc" = 0 ] && [ "$rfv_kind" = blocked ] || { note "no blocked verdict for ${s:0:12} (status $rc ${rfv_kind:-})"; continue; }
+  rid=$rfv_id
+  jid=$(jq -r '.jobs[]? | select((.name | sub("^.* / "; "")) == "review") | .id' <<<"$rfv_jobs" 2>/dev/null | sed -n '1p')
   [ -n "$jid" ] || { note "run $rid (${s:0:12}): no review job"; continue; }
   # the reviewer's own section of a step that ran only (review-evidence.sh)
-  out=$(api "actions/jobs/$jid/logs" | review_log_lines "$(api "actions/runs/$rid/jobs" | review_step_ran)" | grep -E '^(review-gate: (BLOCKED|NIT)|evidence:)')
+  out=$(api "actions/jobs/$jid/logs" | review_log_lines "$(review_step_ran <<<"$rfv_jobs")" | grep -E '^(review-gate: (BLOCKED|NIT)|evidence:)')
   if [ -n "$out" ]; then printf '== the review that blocked %s (run %s):\n%s\n' "$s" "$rid" "$out"; note "previous findings of ${s:0:12} attached (run $rid)"
   else note "run $rid (${s:0:12}): log unavailable or no findings in it"; fi
 done

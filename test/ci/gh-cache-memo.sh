@@ -202,9 +202,11 @@ echo "ok - review_verdict / review_attested read GitHub: a failed re-run in the 
 
 # review-passed.sh as the dispatcher runs it (a child, memo filled with the passed attempt 1, same dispatcher run)
 git init -q "$T/clone"; cd "$T/clone"
+BASE=$(git -c user.name=t -c user.email=t@t commit -q --allow-empty -m base && git rev-parse HEAD)
 SHA=$(git -c user.name=t -c user.email=t@t commit -q --allow-empty -m x && git rev-parse HEAD)
 jq --arg t "review $SHA" '.title = $t | .expired = false' "$FX/run.json" > "$T/r" && mv "$T/r" "$FX/run.json"
-jq -nc --arg h "$SHA" '{head: $h, base: $h, kind: "review"}' > "$T/review-attestation.json"; (cd "$T" && python3 -c "
+# a valid attestation (its base an ancestor of the head: an unattested pass is no verdict, review-evidence.sh)
+jq -nc --arg h "$SHA" --arg b "$BASE" '{head: $h, base: $b, kind: "review"}' > "$T/review-attestation.json"; (cd "$T" && python3 -c "
 import zipfile; z = zipfile.ZipFile('$FX/blob.bin', 'w'); z.write('review-attestation.json'); z.close()")
 for via in record page listing failed-write; do
   ghc_done; ghc_init "$STATE"
@@ -232,10 +234,14 @@ for f in "$ROOT"/scripts/ci/*.sh; do
   if grep -nE '\bghm\b|GHC_RUN_DIR|ghc_(api|fetch|out)' "$f"; then fail "$(basename "$f") reaches the memo (approval scripts read GitHub)"; fi
 done
 D=$ROOT/scripts/ci/review-dispatch.sh
-ALLOWED=" review_list all_runs_list dev_round_running finding_jobs findings notes_of recheck_base preexisting_record main_infra dev_infra "   # main_infra: the log excerpt of a supervisor notice; dev_infra: the review job id naming an alert
+ALLOWED=" review_list all_runs_list dev_round_running finding_jobs findings notes_of recheck_base preexisting_record main_infra dev_infra review_api "   # main_infra: the log excerpt of a supervisor notice; dev_infra: the review job id naming an alert
+# review_api (the verdict reader's client in the dispatcher): ONLY job logs through ghm — a log is stored only once its job
+# completed (by job id, byte for byte: a completed job's log never changes) and a log only tells a block from a crash
+# (neither completes anything); jobs answers and attestations are always the real gh (checked below)
 bad=$(awk -v ok="$ALLOWED" '/^[a-z_]+\(\) \{/ { fn = $1; sub(/\(\)$/, "", fn) } /^[^ #]/ && !/^[a-z_]+\(\) \{/ && !/^ / { fn = "" }
   /(^|[^a-z_])ghm / && !/^[[:space:]]*#/ { if (index(ok, " " fn " ") == 0) print NR ": " (fn == "" ? "(top level)" : fn) }' "$D")
 [ -z "$bad" ] || fail "ghm used outside the routing / notification readers of review-dispatch.sh: $bad"
+sed -n '/^review_api() {/,/^}/p' "$D" | grep -E '(^|[^a-z_])ghm ' | grep -qv 'actions/jobs/\*/logs) ghm api' && fail "review_api reads more than job logs through the memo"
 for fn in review-passed.sh merge-branch.sh run_verdict review_jobs; do
   grep -qE "ghm .*$fn|$fn.*ghm " "$D" && fail "$fn is wired to the memo"
 done

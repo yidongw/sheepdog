@@ -99,7 +99,25 @@ git -C "$TRUSTED" checkout -q --detach origin/$MAIN
 CI_SCRIPTS=$SHEEPDOG_CI
 
 source "$(dirname "${BASH_SOURCE[0]}")/review-notify.sh"
-source "$(dirname "${BASH_SOURCE[0]}")/review-evidence.sh"   # gate_section / review_step_ran: the one evidence reader
+source "$(dirname "${BASH_SOURCE[0]}")/review-evidence.sh"   # gate_section / review_step_ran / review_first_verdict: the one evidence reader
+# THE verdict of a commit (review_first_verdict: its FIRST completed, attested verdict, run id / run_attempt order; owner
+# 11-16) — read from the routing listing (review_list) with the real gh: what it decides (which run's findings a head is
+# judged by) is the same answer review-passed.sh / the range producers get
+# (a completed job's log never changes: read through the memo's log store, gh-cache.sh — the jobs answers, read with the
+# real gh, mark which logs are final; everything else the real gh. gh
+# 2.45 lists no run attempt: the reader takes it from the latest attempt's jobs answer)
+review_api() {
+  local j
+  case "$1" in
+    actions/jobs/*/logs) ghm api "repos/$REPO/$1" ;;
+    actions/runs/*/jobs) j=$(gh api "repos/$REPO/$1") || return; ! declare -F ghc_note_jobs >/dev/null || ghc_note_jobs <<<"$j"; printf '%s\n' "$j" ;;
+    *) gh api "repos/$REPO/$1" ;;
+  esac
+}
+review_verdict_list() {
+  review_list 100 databaseId,displayTitle,status,conclusion '.[] | {id: .databaseId, display_title: .displayTitle, status, conclusion}' | jq -c . 2>/dev/null
+}
+REVIEW_GIT_DIR=$SRC
 source "$(dirname "${BASH_SOURCE[0]}")/review-repair.sh"   # reverted: the one repair-revert rule (fix_reverted)
 source "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machinery_files: what a tests-only approval never lands
 
@@ -1189,9 +1207,19 @@ dev_merge_only() { # dev_merge_only <sha> → 0 when <sha> adds nothing to main:
 run_verdict() { # run_verdict <run id> → 0 when a job of that run failed / timed out (the run carries a verdict)
   [ "$(gh api "repos/$REPO/actions/runs/$1/jobs" -q '[.jobs[]? | select(.conclusion == "failure" or .conclusion == "timed_out")] | length' 2>/dev/null)" != 0 ]
 }
-dev_verdict_run() { # dev_verdict_run <sha> <run id> <conclusion> → "<run id> <conclusion>": the given run, or — when it is a cancel
-  # without a verdict — the newest older completed run of the same sha that has one (re-check of 379550c9a #1: a cancelled
-  # rerun must not hide an earlier genuine failure)
+dev_verdict_run() { # dev_verdict_run <sha> <run id> <conclusion> → "<run id> <conclusion>": the run of THE dev verdict of <sha>
+  # (review_first_verdict "review": its FIRST completed, attested verdict — a later rerun, cancelled or not, never hides
+  # or replaces it; re-check of 379550c9a #1), else the given run. One successful run of <sha> needs no lookup (API budget).
+  if [ "$3" = success ] && [ "$(review_list 60 databaseId,displayTitle "[.[] | select(.displayTitle == \"review $1\")] | length")" = 1 ]; then
+    echo "$2 $3"; return 0
+  fi
+  if review_first_verdict "$1" review; then
+    # the verdict's own attempt decides: a block is failure, a pass / tests-only round success (whatever a later attempt concluded)
+    case "$rfv_kind" in blocked) echo "$rfv_id failure" ;; *) echo "$rfv_id success" ;; esac
+    return 0
+  fi
+  # no verdict readable yet: the given run — or, when it is a cancel without a verdict, the newest older completed run of
+  # the same sha that has one (its findings are routed; approval is review-passed.sh's own reading)
   local id st c
   if [ "$3" != cancelled ] || run_verdict "$2"; then echo "$2 $3"; return 0; fi
   while read -r id st c; do
@@ -1416,7 +1444,8 @@ fi
 # A hotfix whose own reviewer was cancelled is covered by that batched run and handled there; the batched run's findings are
 # attributed per culprit commit over the whole range (attribution with att_base), so each author hears only their own.
 hotfix_runs=""
-recheck_run() { # recheck_run <sha> → the newest completed "recheck <sha>" run ("" when none)
+recheck_run() { # recheck_run <sha> → the newest completed "recheck <sha>" run ("" when none): which runs exist and completed
+  # (coverage, episodes, candidates). WHICH run judges a head is its first verdict (review_first_verdict, the hotfix loop).
   [ -n "$hotfix_runs" ] || hotfix_runs=$(review_list 100 databaseId,displayTitle,status . || true); [ -n "$hotfix_runs" ] || hotfix_runs='[]'
   jq -r --arg t "recheck $1" '[.[]? | select(.displayTitle == $t and .status == "completed")][0].databaseId // empty' <<<"$hotfix_runs" 2>/dev/null || true
 }
@@ -1933,6 +1962,7 @@ hotfix_expiring() { # hotfix_expiring <H> → an incomplete hotfix about to leav
 }
 # ── hotfix commits on main: their review runs after the push; a blocked one → main_blocked (owner first, or the strongest fixer) ──
 hn=0
+unset _rfv_memo _rfv_jobs_memo _rfv_run_memo _rfv_latest_memo _rfv_att_memo; review_verdict_listed=0   # verdicts are read afresh for this loop
 for hsha in $(hotfix_candidates); do
   hotfix_expiring "$hsha"
   hrun=$(recheck_run "$hsha")
@@ -1949,7 +1979,16 @@ for hsha in $(hotfix_candidates); do
   # its own reviewer never ran (cancelled while waiting: a newer main head's reviewer took the batch) → covered by that
   # batched re-check and handled there; not reviewed yet → wait
   # Judge this main re-check run itself (not a pre-landing dev run of the same sha): its jobs, read once, with the real gh
-  hjobs=$(review_jobs "$hrun" || echo '{}'); [ -n "$hjobs" ] || hjobs='{}'
+  # THE main verdict of hsha (review_first_verdict: the FIRST completed, attested verdict of its re-checks, run id /
+  # run_attempt order) judges it — its own attempt; a later run or rerun never turns a block into a pass or a pass into
+  # a block. No verdict yet: the newest completed run (infrastructure / superseded handling below); unknown: that
+  # earlier run, judged again next dispatcher run.
+  hv="" hrc=0; review_first_verdict "$hsha" recheck || hrc=$?
+  case "$hrc" in
+    0) hrun=$rfv_id hv=$rfv_kind hjobs=$rfv_jobs hljobs=$rfv_latest_jobs ;;
+    *) [ "$hrc" = 1 ] || [ -z "${rfv_id:-}" ] || hrun=$rfv_id
+       hjobs=$(review_jobs "$hrun" || echo '{}'); [ -n "$hjobs" ] || hjobs='{}'; hljobs=$hjobs ;;
+  esac
   if ! recheck_reviewed "$hrun" "$hjobs"; then
     if hcov=$(recheck_covering "$hsha"); then
       if [ -n "${DRY:-}" ]; then echo "DRY HOTFIX ${hsha:0:9}: covered by the batched re-check of ${hcov%% *} — handled there"
@@ -1963,9 +2002,12 @@ for hsha in $(hotfix_candidates); do
   fi
   hbase=$(recheck_base "$hrun" "$hsha" "$hjobs")
   # Same bar as review-passed.sh / autodeploy: the whole run succeeded (status job included) …
-  if [ "$(gh api "repos/$REPO/actions/runs/$hrun" -q .conclusion 2>/dev/null)" = success ] \
-     && [ "$(jq '[.jobs[]? | select((.name | sub("^.* / "; "")) == "tests" and .conclusion == "success")] | length' <<<"$hjobs")" -gt 0 ] \
-     && [ "$(jq '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review" and .conclusion == "success") | .steps[] | select((.name | startswith("Review (blocking")) and .conclusion == "success")] | length' <<<"$hjobs")" -gt 0 ]; then
+  # (a verdict "pass" is the attested passing step of that attempt; the trusted tests are the run's latest attempt)
+  hltests=$(jq '[.jobs[]? | select((.name | sub("^.* / "; "")) == "tests" and .conclusion == "success")] | length' <<<"$hljobs" 2>/dev/null) || hltests=0
+  [[ "$hltests" =~ ^[0-9]+$ ]] || hltests=0
+  if { [ "$hv" = pass ] || { [ -z "$hv" ] && [ "$(gh api "repos/$REPO/actions/runs/$hrun" -q .conclusion 2>/dev/null)" = success ] \
+         && [ "$(jq '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review" and .conclusion == "success") | .steps[] | select((.name | startswith("Review (blocking")) and .conclusion == "success")] | length' <<<"$hjobs")" -gt 0 ]; }; } \
+     && [ "$hltests" -gt 0 ]; then
     if [ -n "${DRY:-}" ]; then echo "DRY HOTFIX ${hsha:0:9} on main: review passed"
     else log "HOTFIX ${hsha:0:9} on main: review passed (the controller deploys it)"; preexisting_record "$hsha" "$hrun" "$hjobs"; touch "$STATE/sent/$hsha.hotfix-complete"; fi
   else
