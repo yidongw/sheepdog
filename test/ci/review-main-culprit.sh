@@ -682,27 +682,80 @@ if [ -z "${REVIEW_MAIN_REGRESSION:-}" ] || [ "$REVIEW_MAIN_REGRESSION" = ownersh
     ! landed || fail "(q) $checker landed a mixed review"
     [ "$(routed_nums)" = 3 ] || fail "(q) $checker mixed routed '$(routed_nums)', want only 3"
   done
+  # The actual historical checker also refuses when the tests failed. Only that tests failure belongs to dev;
+  # main's filenames must not select dev commits for automatic reversion.
+  git -C "$ROOT" show 76fdca743b72d1a0e481d5ca1a2cef1d47a176b7:scripts/ci/review-passed.sh > "$LEG/review-passed.sh"
+  fixture_log "$T/log" "$C" 0
+  scenario "review $H" failure "$STEPS_OK" "$MAINSHA"
+  reset_dev
+  ( cd "$ROOT" && CI_SCRIPTS=$LEG && merged_one=0 && DRY="" && eval "$loop" ) || fail "(q) historical failed-tests head loop failed"
+  ! landed || fail "(q) historical checker landed with failed tests"
+  [ -z "$(routed_nums)" ] || fail "(q) historical failed tests routed main findings '$(routed_nums)'"
+  grep -q '^trusted tests job: failure$' "$T/routed" || fail "(q) omitted failed tests from dev routing"
+  [ "$(grep -c '^review-gate: BLOCKED #[12] ' "$STATE/open-findings.log")" = 2 ] || fail "(q) failed tests lost main findings"
   echo "ok - (q) approval capability cannot route main findings or revert unrelated dev work; mixed reviews route only dev"
 fi
 
 # Main review of 03f6fcd72 #2: the rerun's successful snapshot must replace stale routing even with NO main findings.
 if [ -z "${REVIEW_MAIN_REGRESSION:-}" ] || [ "$REVIEW_MAIN_REGRESSION" = rerun-dev ]; then
+  for current_nums in 3 '1 2 3'; do
+    fixture_log "$T/log" "$C" 0
+    scenario "review $H" success "$STEPS_OK" "$MAINSHA"
+    RJID=$((JID + 7))
+    fixture_log "$T/rerun-log" "$H" 1
+    if [ "$current_nums" = 3 ]; then
+      awk '/review-gate: reviewing / || /review-gate: (FINDING|BLOCKED) #3 / || /evidence: scripts\/ci\/review-dispatch.sh:1114 /' "$T/rerun-log" > "$FX/log-$RJID.txt"
+    else
+      cp "$T/rerun-log" "$FX/log-$RJID.txt"
+    fi
+    echo "{\"jobs\":[{\"name\":\"sheepdog / tests\",\"conclusion\":\"success\",\"run_attempt\":2},{\"name\":\"sheepdog / review\",\"id\":$RJID,\"run_attempt\":2,\"conclusion\":\"failure\",\"steps\":[$STEPS_OK]}]}" > "$T/rerun-jobs.json"
+    reset_dev; touch "$T/swap-after-log"
+    ( cd "$ROOT" && merged_one=0 && DRY="" && eval "$loop" ) || fail "(r) rerun head loop failed"
+    g fetch -q origin
+    test ! -e "$T/swap-after-log" || fail "(r) fixture did not replace attempt 1 after the initial log read"
+    ! landed || fail "(r) landed with the rerun's dev finding"
+    [ "$(routed_nums)" = "$current_nums" ] || fail "(r) routed '$(routed_nums)', want current dev findings $current_nums"
+    grep -q "commit=$H" "$T/routed" && ! grep -q "commit=$C" "$T/routed" || fail "(r) routed text came from the obsolete attempt"
+    grep -q 'new rest fixer receipt is missing from lifecycle consumers' "$T/routed" || fail "(r) omitted current dev finding text"
+    test ! -s "$STATE/open-findings.log" || fail "(r) recorded obsolete main findings"
+    ! ls "$STATE/sent/" | grep -q mainfindings || fail "(r) certified obsolete main findings"
+  done
+  echo "ok - (r) rerun from main-only to dev-only findings routes every current dev defect"
+fi
+
+# Main review of c8d66ea9b #1/#2: a failed historical checker proves no receipt waiver. The empty approval must still
+# fail the recording guard; a later successful check establishes either receipt support or a legacy full-review pass.
+if [ -z "${REVIEW_MAIN_REGRESSION:-}" ] || [ "$REVIEW_MAIN_REGRESSION" = capability ]; then
+  LEG=$T/capability-ci; mkdir -p "$LEG"; cp "$ROOT/scripts/ci/"*.sh "$LEG/"
+  git -C "$ROOT" show 76fdca743b72d1a0e481d5ca1a2cef1d47a176b7:scripts/ci/review-passed.sh > "$T/historical-checker"
+  for reason in mixed failed-tests api-failure; do
+    cp "$T/historical-checker" "$LEG/review-passed.sh"
+    fixture_log "$T/log" "$C" 0
+    tests=success
+    case "$reason" in
+      mixed) fixture_log "$T/log" "$C" 1 ;;
+      failed-tests) tests=failure ;;
+      api-failure) { printf '#!/usr/bin/env bash\ngh() { return 1; }\n'; cat "$T/historical-checker"; } > "$LEG/review-passed.sh" ;;
+    esac
+    scenario "review $H" "$tests" "$STEPS_OK" "$MAINSHA"
+    for allow_main in 0 1; do
+      ( CI_SCRIPTS=$LEG; DRY=""
+        ! review_approve "$H" "$allow_main" "$STATE/capability.approval" || fail "(s) historical $reason approved"
+        ! record_approving_main "$H" "$STATE/capability.approval" || fail "(s) historical $reason waived the receipt after failure (allow_main=$allow_main)"
+      ) || fail "(s) failed historical check confused with a legacy full-review pass"
+    done
+  done
+  cp "$T/historical-checker" "$LEG/review-passed.sh"
   fixture_log "$T/log" "$C" 0
   scenario "review $H" success "$STEPS_OK" "$MAINSHA"
-  RJID=$((JID + 7))
-  fixture_log "$T/rerun-log" "$C" 1
-  awk '/review-gate: reviewing / || /review-gate: (FINDING|BLOCKED) #3 / || /evidence: scripts\/ci\/review-dispatch.sh:1114 /' "$T/rerun-log" > "$FX/log-$RJID.txt"
-  echo "{\"jobs\":[{\"name\":\"sheepdog / tests\",\"conclusion\":\"success\",\"run_attempt\":2},{\"name\":\"sheepdog / review\",\"id\":$RJID,\"run_attempt\":2,\"conclusion\":\"failure\",\"steps\":[$STEPS_OK]}]}" > "$T/rerun-jobs.json"
-  reset_dev; touch "$T/swap-after-log"
-  ( cd "$ROOT" && merged_one=0 && DRY="" && eval "$loop" ) || fail "(r) rerun head loop failed"
-  g fetch -q origin
-  test ! -e "$T/swap-after-log" || fail "(r) fixture did not replace attempt 1 after the initial log read"
-  ! landed || fail "(r) landed with the rerun's dev finding"
-  [ "$(routed_nums)" = 3 ] || fail "(r) routed '$(routed_nums)', want current dev finding 3"
-  grep -q "commit=$H" "$T/routed" && ! grep -q "commit=$C" "$T/routed" || fail "(r) routed text came from the obsolete attempt"
-  grep -q 'new rest fixer receipt is missing from lifecycle consumers' "$T/routed" || fail "(r) omitted current dev finding text"
-  test ! -s "$STATE/open-findings.log" || fail "(r) recorded obsolete main findings"
-  ! ls "$STATE/sent/" | grep -q mainfindings || fail "(r) certified obsolete main findings"
-  echo "ok - (r) rerun from main-only to dev-only findings routes the new attempt's dev defect only"
+  ( CI_SCRIPTS=$LEG; DRY=""
+    review_approve "$H" 1 "$STATE/capability.approval" || fail "(s) historical checker did not recover"
+    record_approving_main "$H" "$STATE/capability.approval" || fail "(s) recovered historical approval was not recorded"
+    [ "$(cat "$STATE/capability.approval")" = "$RID 1 $JID main" ] || fail "(s) historical retry omitted its receipt"
+    printf '#!/usr/bin/env bash\n[ "$REVIEW_MAIN_FINDINGS" = 0 ]\n' > "$LEG/review-passed.sh"
+    review_approve "$H" 1 "$STATE/capability.approval" || fail "(s) legacy full-review fallback did not recover"
+    record_approving_main "$H" "$STATE/capability.approval" || fail "(s) legacy full-review pass could not waive the receipt"
+  ) || fail "(s) successful approval compatibility changed"
+  echo "ok - (s) historical failure cannot waive receipts; historical receipt and legacy full-review retries recover"
 fi
 echo "main-culprit checks passed"

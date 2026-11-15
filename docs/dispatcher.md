@@ -115,8 +115,9 @@ receipt-capable checkers that declare support through `REVIEW_APPROVAL_OUT=<file
 `<run id> <run attempt> <review job id> <pass|main>`; a `main` approval lands only after that attempt's findings are
 recorded. If a checker approves without writing a receipt, the dispatcher requires a successful check with
 `REVIEW_MAIN_FINDINGS=0` before accepting a plain pass, and keeps main-only approval disabled when invoking its merge
-script. A nonempty but unreadable receipt is refused. A legacy checker that refuses approval keeps ordinary blocked-head
-routing; a declared receipt-capable checker retains the main/dev split when approval evidence is temporarily unavailable.
+script. A nonempty but unreadable receipt is refused. An unsuccessful check with no declaration or receipt leaves
+capability unknown; it cannot establish the receipt waiver for a legacy full-review pass. Approval failure never changes
+the proven main/dev split, including when a historical receipt-capable checker writes its sidecar only on success.
 
 ## A host wrapper (example)
 
