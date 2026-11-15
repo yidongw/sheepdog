@@ -95,6 +95,10 @@ git -C "$SRC" fetch -q --prune origin
 [ -d "$TRUSTED" ] || git -C "$SRC" worktree add -q --detach "$TRUSTED" origin/$MAIN
 git -C "$TRUSTED" checkout -q --detach origin/$MAIN
 if [ -f "$TRUSTED/.github/sheepdog.yml" ]; then CI_SCRIPTS=$SHEEPDOG_CI; else CI_SCRIPTS=$TRUSTED/scripts/ci; fi
+# Only sheepdog's own review-passed.sh names its approving attempt (REVIEW_APPROVAL_OUT), so only it may approve a dev
+# review as main-only: a repository-local contract script (an unmigrated repository) runs with REVIEW_MAIN_FINDINGS=0 and
+# its approval counts as a plain full-review pass (review of sheepdog main 9b7ece173 #1/#2).
+if [ "$CI_SCRIPTS" = "${SHEEPDOG_CI:-}" ]; then approval_named=1; else approval_named=0; fi
 
 source "$(dirname "${BASH_SOURCE[0]}")/review-notify.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machinery_files: what a tests-only approval never lands
@@ -1111,10 +1115,16 @@ dev_split_main() { # dev_split_main <S> <run id> <findings> → sets dev_f (the 
   # $STATE/sent/<S>.<run>.<run attempt>.<review job id>.mainfindings, touched only after the append succeeded). Unreadable evidence → nothing is removed, main_only=0. A record that cannot be
   # written → the proven main findings are still removed from dev_f (never routed on $DEV), but main_only stays 0, so no
   # caller approves through the main-findings path that run (review of sheepdog main 725a2adc1 #1 / 6b9031dfb #1).
-  local s=$1 run=$2 f=$3 cls rc=0 n att
+  local s=$1 run=$2 f=$3 cls rc=0 n att jobs
   dev_f=$f main_nums="" dev_nums="" main_only=0 main_receipt=""
   main_culprit_hint "$s" "$f" || return 0
-  cls=$(cd "$SRC" && review_main_culprits main_culprits_api "$run" "$s") || rc=$?
+  # ONE jobs answer for the classification, the recorded text and the receipt's attempt / job identity: a rerun between
+  # separate reads could otherwise mark the new attempt recorded with the old attempt's findings (review of 84ada34cc #3)
+  jobs=$(main_culprits_api "actions/runs/$run/jobs" 2>/dev/null) || return 0
+  att=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] // {} | "\(.run_attempt // 1).\(.id // "")"' <<<"$jobs" 2>/dev/null || true)
+  [[ "$att" =~ ^[0-9]+\.[0-9]+$ ]] || return 0
+  f=$(findings "$run" "$jobs"); dev_f=$f
+  cls=$(cd "$SRC" && review_main_culprits main_culprits_api "$run" "$s" "$jobs") || rc=$?
   [ "$rc" -le 1 ] && [ -n "$cls" ] || return 0
   main_nums=$(awk '$2 == "main" {printf "%s ", $1}' <<<"$cls"); main_nums=${main_nums% }
   dev_nums=$(awk '$2 != "main" {printf "%s ", $1}' <<<"$cls"); dev_nums=${dev_nums% }
@@ -1127,13 +1137,8 @@ dev_split_main() { # dev_split_main <S> <run id> <findings> → sets dev_f (the 
     [ -n "$dev_nums" ] || main_only=1
     echo "DRY $DEV ${s:0:9}: finding(s) $main_nums — culprit on $MAIN (pre-existing main finding): not routed on $DEV${dev_nums:+; routing $dev_nums}"; return 0
   fi
-  # the receipt names the exact review attempt (run id, run attempt, review job id): a rerun reporting other findings is
-  # recorded again (review of pawx-twitter-poller 7f0dbbc8f #2)
-  att=$(main_culprits_api "actions/runs/$run/jobs" 2>/dev/null | jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] // {} | "\(.run_attempt // 1).\(.id // "")"' 2>/dev/null || true)
-  if ! [[ "$att" =~ ^[0-9]+\.[0-9]+$ ]]; then
-    log "$DEV ${s:0:9}: run $run's review attempt could not be read — main finding(s) $main_nums not routed on $DEV, not approved as main-only this run (retried)"
-    return 0
-  fi
+  # the receipt names the exact review attempt (run id, run attempt, review job id) of that same jobs answer: a rerun
+  # reporting other findings is recorded again (review of pawx-twitter-poller 7f0dbbc8f #2)
   main_receipt=$STATE/sent/$s.$run.$att.mainfindings
   if [ ! -e "$main_receipt" ]; then
     # shellcheck disable=SC2086
@@ -1152,11 +1157,16 @@ record_approving_main() { # record_approving_main <S> <approval file of review-p
   # land: the approval is not a main-findings one, or the main findings of THAT approving attempt (run, attempt, review
   # job) are in open-findings.log — written now or before. The one guard of the train AND the branch-head landing path
   # (review of pawx-twitter-poller 7f0dbbc8f #1). Anything unreadable / mismatched → 1 (not landed; the next run retries).
+  # A repository-local script (approval_named=0) ran with REVIEW_MAIN_FINDINGS=0 and writes no file: its approval is a plain
+  # pass. sheepdog's own script always writes the file, so an empty one there is unreadable evidence.
   local run att jid how
+  if [ "${approval_named:-1}" != 1 ]; then return 0; fi
   read -r run att jid how < "$2" 2>/dev/null || return 1
   case "$how" in pass) return 0 ;; main) ;; *) return 1 ;; esac
   [[ "$run" =~ ^[0-9]+$ && "$att" =~ ^[0-9]+$ && "$jid" =~ ^[0-9]+$ ]] || return 1
   dev_split_main "$1" "$run" "$(findings "$run")"
+  # DRY never lands and writes no record: the classification alone decides the preview (review of 9b7ece173 #3)
+  if [ -n "${DRY:-}" ]; then [ "$main_only" = 1 ]; return; fi
   [ "$main_only" = 1 ] && [ "$main_receipt" = "$STATE/sent/$1.$run.$att.$jid.mainfindings" ] && [ -e "$main_receipt" ]
 }
 dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> <run url> <fixer task> [<ALL findings>] → the
@@ -2060,6 +2070,7 @@ Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). You
     done
     : > "$STATE/train.kind"
     : > "$STATE/train.approval"
+    [ "${approval_named:-1}" = 1 ] || rp_main=0
     (cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=$rp_main REVIEW_KIND_OUT="$STATE/train.kind" REVIEW_APPROVAL_OUT="$STATE/train.approval" bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" >/dev/null 2>&1) || continue
     # Approved by a review that blocked only on pre-existing main findings: THAT attempt's findings are recorded
     # (open-findings.log) BEFORE the sha lands, or it does not land this run (reviews of d9228afe7 #1, 625246776 #1,
@@ -2118,7 +2129,7 @@ Train-Merge: $tsha" >/dev/null 2>&1) \
       git -C "$SRC" worktree remove --force "$WORK" >/dev/null 2>&1 || true
       break
     fi
-    if out=$(cd "$TRUSTED" && bash "$CI_SCRIPTS/merge-branch.sh" "$DEV" "$tsha" 2>&1); then
+    if out=$(cd "$TRUSTED" && { [ "${approval_named:-1}" = 1 ] || export REVIEW_MAIN_FINDINGS=0; } && bash "$CI_SCRIPTS/merge-branch.sh" "$DEV" "$tsha" 2>&1); then
       merged_one=1; log "MERGED $DEV@${tsha:0:9} (train; $DEV head $(git -C "$SRC" rev-parse --short "origin/$DEV")): $out"
       git -C "$SRC" fetch -q origin "$MAIN"; rm -f "$STATE/dev.blocked_since"
       : # passed rounds notify nobody (owner 11-10: only blocks and fixes are news)
@@ -2311,6 +2322,7 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
     f=$(findings "$rid"); dev_split_main "$sha" "$rid" "$f"; [ "$main_only" = 1 ] || rp_main=0
   fi
   : > "$STATE/head.approval"
+  [ "${approval_named:-1}" = 1 ] || rp_main=0
   if (cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=$rp_main REVIEW_APPROVAL_OUT="$STATE/head.approval" bash "$CI_SCRIPTS/review-passed.sh" "$sha" "$REPO" >/dev/null 2>&1); then
     # the same guard as the train: a main-findings approval lands only after the APPROVING attempt's findings are recorded
     # (review of pawx-twitter-poller 7f0dbbc8f #1: the head loop checked the run it had selected, not the one approving)
@@ -2322,7 +2334,7 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
       [ $merged_one = 0 ] || continue
       if [ -n "${DRY:-}" ]; then echo "DRY merge $ref ${sha:0:9}"; merged_one=1; continue; fi
       [ "$ref" = "$DEV" ] && dev_threads=$(range_threads "$sha")
-      if out=$(cd "$TRUSTED" && bash "$CI_SCRIPTS/merge-branch.sh" "$ref" 2>&1); then
+      if out=$(cd "$TRUSTED" && { [ "${approval_named:-1}" = 1 ] || export REVIEW_MAIN_FINDINGS=0; } && bash "$CI_SCRIPTS/merge-branch.sh" "$ref" 2>&1); then
         merged_one=1; log "MERGED $ref ${sha:0:9}: $out"
         git -C "$SRC" fetch -q origin "$MAIN"
         if [ "$ref" = "$DEV" ]; then
