@@ -18,7 +18,7 @@ STATE=$T/state SRC=$T/src MAIN=main DEV=dev REPO=o/r LOG=$T/state/dispatch.log
 mkdir -p "$STATE/sent"
 log() { echo "$*" >> "$LOG"; }
 source scripts/ci/review-notify.sh
-eval "$(sed -n '/^notify_best_effort() /p; /^findings_cap() {/,/^}/p; /^gate_section() {/,/^}/p; /^review_step_ran() {/,/^}/p; /^findings() {/,/^}/p; /^notes_of() {/,/^}/p; /^obsolete_rule() {/,/^}/p' "$script")"; for _f in notify_best_effort findings_cap gate_section review_step_ran findings notes_of obsolete_rule; do declare -F "$_f" >/dev/null || { echo "missing helper $_f (not extracted from the dispatcher)" >&2; exit 1; }; done
+eval "$(sed -n '/^notify_best_effort() /p; /^findings_cap() {/,/^}/p; /^gate_section() {/,/^}/p; /^review_step_ran() {/,/^}/p; /^findings() {/,/^}/p; /^notes_of() {/,/^}/p; /^obsolete_rule() {/,/^}/p' "$script" "${script%/*}/review-evidence.sh")"; for _f in notify_best_effort findings_cap gate_section review_step_ran findings notes_of obsolete_rule; do declare -F "$_f" >/dev/null || { echo "missing helper $_f (not extracted from the dispatcher)" >&2; exit 1; }; done
 SUPERVISOR_THREAD=import:claudeAgent:00000000-0000-4000-8000-000000000051
 eval "$(sed -n '/^FIX_ROUNDS_MAX=/,/^# ── one fixer per repo/p' "$script")"
 eval "$(sed -n '/^fixer_phrase() {/,/^}/p' "$script")"; for _f in fixer_phrase; do declare -F "$_f" >/dev/null || { echo "missing helper $_f (not extracted from the dispatcher)" >&2; exit 1; }; done

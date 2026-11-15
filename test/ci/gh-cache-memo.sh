@@ -90,7 +90,7 @@ setrun() { # setrun <status> <conclusion|null> <updated> <attempt>
 calls() { grep -c "$1" "$FX/calls" || true; }
 STATE=$T/state; mkdir -p "$STATE"
 printf 'review-gate: PASS\n' > "$FX/log-12"
-printf 'review-gate: BLOCKED #1 regression [must]: x\n' > "$FX/log-22"
+printf 'review-gate: reviewing x..y\nreview-gate: BLOCKED #1 regression [must]: x\n' > "$FX/log-22"
 printf 'PK\003\004\000\001\377\000bin\000ary\r\n' > "$FX/blob.bin"
 LIST=(run list -R o/r -w review.yml -e workflow_run -b main -L 100 --json databaseId,displayTitle,status,conclusion)
 JOBS=repos/o/r/actions/runs/7/jobs

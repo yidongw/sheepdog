@@ -22,7 +22,8 @@ done | awk '!seen[$0]++')
 # 11-13: the review.yml step ran without GH_TOKEN — every call was a 404 on the private repo and nothing said why
 [ -n "${GH_TOKEN:-}" ] || { note "no GH_TOKEN — previous findings of $(tr '\n' ' ' <<<"$fixes")unavailable"; exit 0; }
 review_api() { api "$1"; }
-. "$(dirname "${BASH_SOURCE[0]}")/review-runs.sh"   # only trusted runs' findings reach the reviewer's prompt; every page
+. "$(dirname "${BASH_SOURCE[0]}")/review-runs.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/review-evidence.sh"   # the one evidence reader   # only trusted runs' findings reach the reviewer's prompt; every page
 runs=$(review_runs completed | jq -s '{workflow_runs: .}')
 for s in $fixes; do
   rid=$(jq -r --arg a "review $s" --arg b "recheck $s" \
@@ -30,7 +31,8 @@ for s in $fixes; do
   [ -n "$rid" ] || { note "no failed review run found for ${s:0:12}"; continue; }
   jid=$(api "actions/runs/$rid/jobs" | jq -r '.jobs[]? | select((.name | sub("^.* / "; "")) == "review") | .id' 2>/dev/null | sed -n '1p')
   [ -n "$jid" ] || { note "run $rid (${s:0:12}): no review job"; continue; }
-  out=$(api "actions/jobs/$jid/logs" | sed -E 's/^[^ ]+ //' | grep -E '^(review-gate: (BLOCKED|NIT)|evidence:)')
+  # the reviewer's own section of a step that ran only (review-evidence.sh)
+  out=$(api "actions/jobs/$jid/logs" | review_log_lines "$(api "actions/runs/$rid/jobs" | review_step_ran)" | grep -E '^(review-gate: (BLOCKED|NIT)|evidence:)')
   if [ -n "$out" ]; then printf '== the review that blocked %s (run %s):\n%s\n' "$s" "$rid" "$out"; note "previous findings of ${s:0:12} attached (run $rid)"
   else note "run $rid (${s:0:12}): log unavailable or no findings in it"; fi
 done

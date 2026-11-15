@@ -9,7 +9,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # completion check pass silently)
 command_not_found_handle() { echo "FAIL: command not found: $1 (a helper the test did not extract or stub)" >&2; kill -TERM $$ 2>/dev/null; exit 127; }
 for fn in review_job_state recheck_infra_failed recheck_reviewed main_infra infra_alert infra_episode_open findings findings_cap gate_section review_step_ran review_infra_reason; do
-  eval "$(sed -n "/^$fn() {/,/^}/p" "$D")"
+  eval "$(sed -n "/^$fn() {/,/^}/p" "$D" "${D%/*}/review-evidence.sh")"
   declare -F "$fn" >/dev/null || fail "missing $fn"
 done
 ghc_note_jobs() { cat > /dev/null; }

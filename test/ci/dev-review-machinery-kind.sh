@@ -26,7 +26,7 @@ mkdir -p "$T/bin" "$T/api"
 run() { # run <id> <sha> <blocking step: success|failure>
   printf '{"id":%s,"path":".github/workflows/review.yml","display_title":"review %s","status":"completed","conclusion":"%s","event":"workflow_run","head_branch":"main"}\n' "$1" "$2" "$3" >> "$T/api/list"
   printf '{"jobs":[{"name":"sheepdog / tests","conclusion":"success","steps":[]},{"name":"sheepdog / review","id":%s,"conclusion":"%s","steps":[{"name":"Review (blocking)","conclusion":"%s"}]}]}\n' "$(($1 + 1000))" "$3" "$3" > "$T/api/$1.jobs"
-  { echo "2026-11-13T00:00:00.0Z review-range: $P $2"; [ "$3" = failure ] && echo "2026-11-13T00:00:02.0Z review-gate: BLOCKED #1 regression [should]: x"; true; } > "$T/api/$(($1 + 1000)).log"
+  { echo "2026-11-13T00:00:00.0Z review-range: $P $2"; echo "2026-11-13T00:00:01.0Z review-gate: reviewing x..y"; [ "$3" = failure ] && echo "2026-11-13T00:00:02.0Z review-gate: BLOCKED #1 regression [should]: x"; true; } > "$T/api/$(($1 + 1000)).log"
   printf '{"head":"%s","base":"%s","kind":"review"}\n' "$2" "$P" > "$T/api/review-attestation.json"
   python3 -c 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1],"w"); z.write(sys.argv[2],"review-attestation.json"); z.close()' "$T/api/$1.zip" "$T/api/review-attestation.json"
 }

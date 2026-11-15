@@ -8,7 +8,7 @@ source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is u
 command_not_found_handle() { echo "FAIL: command not found: $1 (a helper the test did not extract or stub)" >&2; kill -TERM $$ 2>/dev/null; exit 127; }
 cd "$(dirname "$0")/../.."
 D=scripts/ci/review-dispatch.sh
-fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p" "$D"; done; }
+fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh"; done; }
 eval "$(fns main_arrivals main_arrival hotfix_candidates)"
 for f in main_arrivals main_arrival hotfix_candidates; do declare -F "$f" >/dev/null || { echo "missing helper $f" >&2; exit 1; }; done
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT

@@ -32,8 +32,8 @@ case "\$*" in *"Authorization: Bearer tok-123"*) ;; *) exit 22 ;; esac   # priva
 case "\$*" in
   *repos/o/r/actions/workflows/review.yml/runs*page=1*) echo '{"workflow_runs":[{"id":9,"display_title":"recheck $S","status":"completed","conclusion":"failure","event":"push","head_branch":"x","path":".github/workflows/review.yml"},{"id":7,"display_title":"recheck $S","status":"completed","conclusion":"failure","event":"workflow_run","head_branch":"main","path":".github/workflows/review.yml"}]}' ;;
   *repos/o/r/actions/workflows/review.yml/runs*) echo '{"workflow_runs":[]}' ;;
-  *repos/o/r/actions/runs/7/jobs*) echo '{"jobs":[{"name":"sheepdog / tests","id":9},{"name":"sheepdog / review","id":8}]}' ;;   # a called workflow's job names
-  *repos/o/r/actions/jobs/8/logs*) printf '2026-11-13T00:00:00Z review-gate: BLOCKED #1 regression [should]: the old bug\n2026-11-13T00:00:00Z evidence: a.ts:1 x\n' ;;
+  *repos/o/r/actions/runs/7/jobs*) echo '{"jobs":[{"name":"sheepdog / tests","id":9},{"name":"sheepdog / review","id":8,"steps":[{"name":"Review (blocking; x)","conclusion":"failure"}]}]}' ;;   # a called workflow's job names
+  *repos/o/r/actions/jobs/8/logs*) printf '2026-11-13T00:00:00Z review-gate: reviewing a..b\n2026-11-13T00:00:00Z review-gate: BLOCKED #1 regression [should]: the old bug\n2026-11-13T00:00:00Z evidence: a.ts:1 x\n' ;;
   *) exit 22 ;;
 esac
 CURL

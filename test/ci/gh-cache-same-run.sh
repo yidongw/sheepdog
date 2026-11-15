@@ -18,7 +18,7 @@ case "$*" in
   'api repos/o/r/actions/runs/7') cat "$FX/record" ;;
   'api repos/o/r/actions/runs/7/jobs') cat "$FX/jobs" ;;
   'api repos/o/r/actions/workflows/review.yml/runs') cat "$FX/page" ;;
-  'api repos/o/r/actions/jobs/72/logs') echo 'review-gate: BLOCKED #1 regression [should]: rerun failed' ;;
+  'api repos/o/r/actions/jobs/72/logs') printf '%s\n' 'review-gate: reviewing x..y' 'review-gate: BLOCKED #1 regression [should]: rerun failed' ;;
   *) exit 1 ;;
 esac
 BACKEND

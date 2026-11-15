@@ -52,6 +52,9 @@ what gets deployed. The workflow is [.github/workflows/review.yml](../.github/wo
   Main then reviews the fix under (a). Because no later dev review vouches for a blocked commit, approval does:
   landing a dev sha (`merge-branch.sh`, the merge train, a devfix landing) needs the coverage chain (c) from main to
   it, and a blocked review is a link of that chain only with an effective repair of it on the head.
+- **A reverted repair repairs nothing** (`review-repair.sh`, also the dispatcher's `fix_reverted`): a standing direct
+  revert of the repair, or ANY merge revert after it. Conservative by policy: any merge revert after a repair forces a
+  full review instead of trusting the repair; it costs one extra review and never approves unreviewed code.
 - **(c) Coverage is a chain of completed reviews.** Each review uploads an attestation `{head, base, kind, main}`
   (`mainside` too when a dev range brought main commits in). `review-passed.sh <sha> [repo] [deployed sha]` approves a
   sha only when its trusted tests passed, its review step passed (or it is a valid tests-only round), and — given the

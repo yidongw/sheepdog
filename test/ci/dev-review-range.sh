@@ -36,7 +36,7 @@ run() { # run <id> <title> <blocking step conclusion: success|failure|crash|skip
   printf '{"id":%s,"path":".github/workflows/review.yml","display_title":"%s","status":"completed","event":"workflow_run","head_branch":"main"}\n' "$1" "$2" >> "$T/api/list"
   printf '{"jobs":[{"name":"tests","conclusion":"success","steps":[]},{"name":"review","id":%s,"conclusion":"%s","steps":[{"name":"Review (blocking)","conclusion":"%s"}]}]}\n' \
     "$(($1 + 1000))" "$([ "$st" = success ] || { [ "$st" = skipped ] && [ -n "${KIND:-}" ]; } && echo success || echo failure)" "$st" > "$T/api/$1.jobs"
-  { [ -n "${5:-}" ] && echo "2026-11-13T00:00:00.0Z review-range: $5 ${2#* }"; echo "2026-11-13T00:00:01.0Z review-gate: reviewing"
+  { [ -n "${5:-}" ] && echo "2026-11-13T00:00:00.0Z review-range: $5 ${2#* }"; echo "2026-11-13T00:00:01.0Z review-gate: reviewing a..b"
     [ "$3" = failure ] && echo "2026-11-13T00:00:02.0Z review-gate: BLOCKED #1 regression [should]: x"
     [ "$3" = crash ] && echo "2026-11-13T00:00:02.0Z Error: reviewer exited 2"
     [ -n "${EXTRA:-}" ] && seq 1 "$EXTRA" | sed 's/^/2026-11-13T00:00:03.0Z evidence: line /'; true; } > "$T/api/$(($1 + 1000)).log"
