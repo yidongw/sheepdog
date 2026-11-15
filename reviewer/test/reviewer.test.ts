@@ -8,6 +8,7 @@ import {
   knownOpenData,
   buildReviewPrompt,
   buildPinBumpBlock,
+  buildDefaultBranchBlock,
   codexReadOnlyDockerArgs,
   isolatedProviderPort,
   sanitizeCodexConfig,
@@ -432,5 +433,37 @@ describe("sheepdog pin bump", () => {
     expect(buildPinBumpBlock({ ...pin, to: "main" })).toBe("");
     expect(buildPinBumpBlock({ ...pin, from: "a".repeat(39) })).toBe("");
     expect(buildPinBumpBlock({ ...pin, repo: "x; rm -rf /" })).toBe("");
+  });
+});
+
+describe("default branch rule (a dev review)", () => {
+  const m = "a".repeat(40);
+  it("the prompt names the default branch's sha and asks for full culprit shas", () => {
+    const p = buildReviewPrompt("h".repeat(40), "b".repeat(40), undefined, undefined, m);
+    expect(p).toContain(`DEFAULT BRANCH — this range is on the integration branch. When this review started, the default branch was at ${m}.`);
+    expect(p).toContain(`git merge-base --is-ancestor <commit> ${m}`);
+    expect(p).toContain(`"preexisting": true`);
+    expect(p).toContain(`"commit": the full 40-character sha`);
+  });
+  it("no block without a full default-branch sha (a re-check, or a malformed value)", () => {
+    expect(buildReviewPrompt("h".repeat(40), "b".repeat(40))).not.toContain("DEFAULT BRANCH");
+    expect(buildReviewPrompt("h".repeat(40), "b".repeat(40), undefined, undefined, "main")).not.toContain("DEFAULT BRANCH");
+    expect(buildDefaultBranchBlock(m.slice(0, 12))).toBe("");
+  });
+  it("parseVerdict converts only blocking findings with a full sha on the default branch", () => {
+    const onMain = (c: string) => c === m;
+    const line = (commit: string) => `VERDICT: ${JSON.stringify({ verdict: "regression", finding: "x", evidence: "e", severity: "should", commit, preexisting: false })}`;
+    const conv = parseVerdict(line(m), { onDefaultBranch: onMain })!;
+    expect(conv.verdict).toBe("clean");
+    expect(conv.findings).toHaveLength(0);
+    expect(conv.nits[0].finding).toBe("[pre-existing] x");
+    expect(conv.nits[0].onDefaultBranch).toBe(true);
+    for (const c of ["", "-", m.slice(0, 12), "b".repeat(40)]) {
+      expect(parseVerdict(line(c), { onDefaultBranch: onMain })!.findings).toHaveLength(1);
+    }
+    expect(parseVerdict(line(m))!.findings).toHaveLength(1); // no option: a re-check blocks as always
+    let asked = 0;
+    parseVerdict(line(m.slice(0, 12)), { onDefaultBranch: () => { asked++; return true; } });
+    expect(asked).toBe(0); // an abbreviated sha is never even looked up
   });
 });

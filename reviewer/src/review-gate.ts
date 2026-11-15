@@ -3,10 +3,15 @@
  * reviewer (reviewer.ts) and turn the verdict into an exit code.
  *
  *   node reviewer/src/review-gate.ts --base <sha> --head <sha> [--prior <file>] [--known-open <file>]
- *        [--pin-repo <owner/name> --pin-from <sha> --pin-to <sha> --pin-diff <file> --pin-log <file>]
+ *        [--pin-repo <owner/name> --pin-from <sha> --pin-to <sha> --pin-diff <file> --pin-log <file>] [--dev-main <sha>]
  *
  * --pin-*: the range moves the caller's sheepdog pin; the sheepdog diff from..to (prepared by review.yml from sheepdog's
  * history) is reviewed with the range.
+ *
+ * --dev-main: a DEV review; the default branch's full sha when the review started (review.yml's REVIEW_MAIN). A blocking
+ * finding whose culprit commit (a full 40-hex sha) is an ancestor of it is the default branch's own: it is reported as a
+ * non-blocking [pre-existing] note and does not fail the verdict (the reviewer is asked for that too; this enforces it).
+ * Re-checks of the default branch never pass it: there such a finding blocks as always.
  *
  * Exit codes: 0 clean · 1 the reviewer found a blocking problem (ducktape / missed-class / regression) · 2 no verdict
  * (the reviewer failed, timed out, or printed nothing parseable). 2 is deliberately a failure too: a review that did not
@@ -30,6 +35,11 @@ function flag(name: string): string | undefined {
 }
 
 const git = (...args: string[]) => execFileSync("git", args, { encoding: "utf8" }).trim();
+const succeeds = (...args: string[]) => {
+  try { execFileSync("git", args, { stdio: "ignore" }); return true; } catch { return false; }
+};
+const isCommit = (sha: string) => succeeds("cat-file", "-e", `${sha}^{commit}`);
+const isAncestor = (c: string, of: string) => isCommit(c) && succeeds("merge-base", "--is-ancestor", c, of);
 
 const tag = (f: ReviewFinding) => `[${f.severity}${f.risk ? `, ${f.risk}` : ""}]`;
 
@@ -80,19 +90,28 @@ async function main(): Promise<number> {
     }
     console.log(`review-gate: sheepdog pin bump ${pin.from.slice(0, 9)}..${pin.to.slice(0, 9)} — its diff is reviewed with the range`);
   }
-  let run = await runHeadlessReviewer(head, process.cwd(), timeoutMs, base, { prior, pin });
+  let devMain: string | undefined;
+  if (process.argv.includes("--dev-main")) {
+    devMain = flag("dev-main") ?? "";
+    if (!/^[0-9a-f]{40}$/.test(devMain) || !isCommit(devMain)) {
+      console.error("review-gate: --dev-main needs the full sha of a commit of this clone");
+      return 2;
+    }
+    console.log(`review-gate: dev review; the default branch is at ${devMain.slice(0, 12)} — findings whose culprit commit is on it are pre-existing (non-blocking)`);
+  }
+  let run = await runHeadlessReviewer(head, process.cwd(), timeoutMs, base, { prior, pin, devMain });
   // A model gateway's loop guard can end a turn after repeated identical tool results; that is not a verdict. One
   // fresh attempt.
   if (!run.error && !parseVerdict(run.stdout) && isGatewayLoopStop(run.stdout)) {
     console.error("review-gate: gateway stopped a polling loop, one fresh attempt");
-    run = await runHeadlessReviewer(head, process.cwd(), timeoutMs, base, { prior, pin });
+    run = await runHeadlessReviewer(head, process.cwd(), timeoutMs, base, { prior, pin, devMain });
   }
   if (run.error) {
     console.error(`review-gate: reviewer ${run.timedOut ? "timed out" : "failed"}: ${run.error}`);
     console.error(run.stdout.trim().slice(-800));
     return 2;
   }
-  const v = parseVerdict(run.stdout);
+  const v = parseVerdict(run.stdout, devMain ? { onDefaultBranch: (c) => isAncestor(c, devMain) } : {});
   if (!v) {
     console.error("review-gate: no parseable VERDICT line (not a pass). Reviewer output tail:");
     console.error(run.stdout.trim().slice(-1500));
@@ -103,6 +122,9 @@ async function main(): Promise<number> {
   const top = v.findings[0];
   const summary = `${v.verdict}${top ? ` ${tag(top)}` : ""}: ${v.finding}${v.evidence ? `\nevidence: ${v.evidence}` : ""}` +
     v.findings.slice(1).map((f, i) => `\nreview-gate: BLOCKED #${i + 2} ${f.verdict} ${tag(f)}: ${f.finding}${f.evidence ? `\nevidence: ${f.evidence}` : ""}`).join("");
+  for (const n of v.nits.filter((f) => f.onDefaultBranch)) {
+    console.log(`review-gate: culprit ${n.commit.slice(0, 12)} is on the default branch: ${n.verdict} [${n.severity}] reported as a pre-existing note`);
+  }
   // Advisory notes and nits never change the exit code; review-dispatch.sh relays them as non-blocking notes.
   if (v.notes) console.log(`review-gate: NOTE (non-blocking): ${v.notes.replace(/\s+/g, " ")}`);
   for (const n of v.nits) {

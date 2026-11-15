@@ -98,7 +98,6 @@ if [ -f "$TRUSTED/.github/sheepdog.yml" ]; then CI_SCRIPTS=$SHEEPDOG_CI; else CI
 
 source "$(dirname "${BASH_SOURCE[0]}")/review-notify.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machinery_files: what a tests-only approval never lands
-source "$(dirname "${BASH_SOURCE[0]}")/review-main-culprits.sh"   # review_main_culprits: pre-existing main findings of a dev review
 
 # Delivery failures stay retryable, but must never stop dispatch or fixer launch. With notify_outbox=<episode sha> set, a notice
 # goes to the outbox instead (terminal revert notices: delivered by revert_notices_flush, retried until delivered).
@@ -189,14 +188,13 @@ findings_cap() { # stdin: review-gate lines → every line of the first FINDINGS
     { cur = ""; if (no++ < 20) print }
     END { if (nd) print "(" nd " more findings not listed, see the run)" }'
 }
-findings() { # findings <run id> [<its jobs answer, already read> [<its review job's log, already read>]] → text (blocking
-  # findings only: the reviewer's NIT lines are notes, see notes_of)
+findings() { # findings <run id> [<its jobs answer, already read>] → text (blocking findings only: the reviewer's NIT lines are notes, see notes_of)
   local run=$1 jobs=${2:-} tests_ok rid
   if [ -n "$jobs" ]; then ghc_note_jobs <<<"$jobs"; else jobs=$(ghm api "repos/$REPO/actions/runs/$run/jobs"); fi
   tests_ok=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "tests") | .conclusion' <<<"$jobs")
   rid=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "review") | .id' <<<"$jobs")
   if [ -n "$rid" ]; then
-    if [ -n "${3+x}" ]; then printf '%s\n' "$3"; else ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null; fi | sed -E 's/^[^ ]+ //' \
+    ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' \
       | grep -E '^(review-gate: (BLOCKED|FINDING|ROUTE|reviewer|no parseable|crashed|NOTE)|evidence:|\[gates .*ERROR)' | findings_cap || true
   fi
   # a CANCELLED tests job is never a code finding: the dispatcher cancels it itself once the review blocked ("tests no
@@ -1087,129 +1085,43 @@ culprits_repaired() { # culprits_repaired <S> <attribution> → 0 (sets dupfix_w
   done
   dupfix_why=${why# }; return 0
 }
-# ── pre-existing MAIN findings in a dev review (supervisor 11-14: the dev review of 0cd95ca42, run 43577623889, blocked on
-#    FINDING #1/#2 commit=341cca4e9 — already on main, carried into the dev range by a main→dev merge; a dev fixer was woken,
-#    a round counted, fixfailed sent, and dev could never land). A blocking finding whose culprit (the reviewer's full-sha
-#    commit=) is on main as the review recorded it is main's: main's own re-check chain owns it. It is recorded once as a
-#    pre-existing main finding (open-findings.log → the next reviews' known-open list) and never routed on $DEV: no
-#    fixer, no fix round, no author notice, no revert clock. Blocked only by such findings, the head lands like a passing
-#    review — review-passed.sh decides that from the trusted run with the same rule (scripts/ci/review-main-culprits.sh).
-#    Classification needs review-main-culprits.sh; approval capability is negotiated separately by review_approve. ──
-main_culprits_api() { ghm api "repos/$REPO/$1"; }   # a routing read: the landing decision reads GitHub itself (the contract scripts)
-main_culprit_hint() { # main_culprit_hint <S> <findings> → 0 when some FINDING names a full-sha commit= on origin/$MAIN and S
-  # (local, no GitHub read: whether the trusted classification is worth asking for)
-  local c
-  [ -f "${CI_SCRIPTS:-}/review-main-culprits.sh" ] || return 1
-  for c in $(sed -nE 's/^review-gate: FINDING #[0-9]+ route=[a-z]+ commit=([0-9a-f]{40})( .*)?$/\1/p' <<<"$2" | sort -u); do
-    if git -C "$SRC" merge-base --is-ancestor "$c" "origin/$MAIN" 2>/dev/null && git -C "$SRC" merge-base --is-ancestor "$c" "$1" 2>/dev/null; then return 0; fi
-  done
-  return 1
-}
-dsm_api() { # dev_split_main's view of GitHub: its one review-job log read is served again, everything else is a routing read
-  if [ "$1" = "actions/jobs/${dsm_jid:-x}/logs" ]; then printf '%s\n' "$dsm_log"; else main_culprits_api "$1"; fi
-}
-dev_split_main() { # dev_split_main <S> <run id> <findings> → sets dev_f (the findings left for $DEV: the main findings removed),
-  # main_nums / dev_nums, and main_only=1 when EVERY blocking finding is a main finding (review_main_culprits: the run's
-  # own log and attestation); the main findings are recorded once per S and review attempt (receipt main_receipt =
-  # $STATE/sent/<S>.<run>.<run attempt>.<review job id>.mainfindings, touched only after the append succeeded). Unreadable evidence → nothing is removed, main_only=0. A record that cannot be
-  # written → the proven main findings are still removed from dev_f (never routed on $DEV), but main_only stays 0, so no
-  # caller approves through the main-findings path that run (review of sheepdog main 725a2adc1 #1 / 6b9031dfb #1).
-  local s=$1 run=$2 f=$3 cls rc=0 n att jobs dsm_log dsm_jid
-  dev_f=$f main_nums="" dev_nums="" main_only=0 main_receipt=""
-  main_culprit_hint "$s" "$f" || return 0
-  # ONE jobs answer and ONE read of its review job's log for the classification, the recorded / routed text and the
-  # receipt's attempt / job identity (reviews of 84ada34cc #3, 76fdca743 #1): any read failure → nothing removed, no
-  # receipt, no main-only approval this run
-  jobs=$(main_culprits_api "actions/runs/$run/jobs" 2>/dev/null) || return 0
-  att=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] // {} | "\(.run_attempt // 1).\(.id // "")"' <<<"$jobs" 2>/dev/null || true)
-  [[ "$att" =~ ^[0-9]+\.[0-9]+$ ]] || return 0
-  dsm_jid=${att#*.}
-  dsm_log=$(main_culprits_api "actions/jobs/$dsm_jid/logs" 2>/dev/null) || return 0
-  [ -n "$dsm_log" ] || return 0
-  # Refresh routing from this successful snapshot even if classification finds no main findings (a rerun may now
-  # contain only dev findings), or cannot classify it. Never leave dev_f pointing at the caller's obsolete attempt.
-  f=$(findings "$run" "$jobs" "$dsm_log"); dev_f=$f
-  cls=$(cd "$SRC" && review_main_culprits dsm_api "$run" "$s" "$jobs") || rc=$?
-  [ "$rc" -le 1 ] && [ -n "$cls" ] || return 0
-  main_nums=$(awk '$2 == "main" {printf "%s ", $1}' <<<"$cls"); main_nums=${main_nums% }
-  dev_nums=$(awk '$2 != "main" {printf "%s ", $1}' <<<"$cls"); dev_nums=${dev_nums% }
+# ── findings of a dev review whose culprit is already on main (contract, Findings). The reviewer reports those as
+#    [pre-existing] notes in a dev review (review-gate.ts --dev-main); a review by an older reviewer can still print them as
+#    BLOCKED. Such a finding is main's: main's own re-check chain owns it. It is appended once to open-findings.log (the
+#    next reviews' known-open list) and never routed on $DEV — no fixer, no fix round, no author notice, no fixfailed, no
+#    revert clock, no file named for a revert. Nothing here approves or lands anything: the head stays blocked until a
+#    review of a later head passes. Local only (the findings text the caller already read; no GitHub read). ──
+dev_main_split() { # dev_main_split <S> <run id> <findings> → dev_f = the findings left for $DEV, main_nums = the others' numbers
+  # A finding is main's when its "FINDING #n … commit=" is a full 40-hex sha that is an ancestor of origin/$MAIN. No
+  # commit, "-", an abbreviated sha or a commit off main → it stays $DEV's.
+  local s=$1 run=$2 f=$3 n c keep="" rec m
+  dev_f=$f main_nums=""
+  while read -r n c; do
+    [ -n "$n" ] || continue
+    if [[ "$c" =~ ^[0-9a-f]{40}$ ]] && git -C "$SRC" merge-base --is-ancestor "$c" "origin/$MAIN" 2>/dev/null; then main_nums+=" $n"; fi
+  done < <(sed -nE 's/^review-gate: FINDING #([0-9]+) route=[a-z]+ commit=([^ ]+)( .*)?$/\1 \2/p' <<<"$f")
+  main_nums=${main_nums# }
   [ -n "$main_nums" ] || return 0
-  for n in $main_nums; do grep -q "^review-gate: BLOCKED #$n " <<<"$f" || { main_nums="" dev_nums=""; return 0; }; done
-  # the proven split holds whatever happens to the record: main findings never reach $DEV's fixer / revert path
-  # (review of sheepdog main 6b9031dfb #1); only main_only — the approval — waits for the record
+  for n in $(sed -nE 's/^review-gate: BLOCKED #([0-9]+) .*/\1/p' <<<"$f"); do
+    [[ " $main_nums " == *" $n "* ]] || keep+=" $n"
+  done
   # shellcheck disable=SC2086 # finding numbers, one word each
-  dev_f=$(findings_subset "$f" 1 $dev_nums)
-  if [ -n "${DRY:-}" ]; then
-    [ -n "$dev_nums" ] || main_only=1
-    echo "DRY $DEV ${s:0:9}: finding(s) $main_nums — culprit on $MAIN (pre-existing main finding): not routed on $DEV${dev_nums:+; routing $dev_nums}"; return 0
+  dev_f=$(findings_subset "$f" 1 $keep)
+  # shellcheck disable=SC2086
+  rec=$(findings_subset "$f" 0 $main_nums)
+  m=$STATE/sent/$s.main-findings.$(printf '%s' "$rec" | sha1sum | cut -c1-12)
+  if [ -n "${DRY:-}" ]; then echo "DRY $DEV ${s:0:9}: finding(s) $main_nums of run $run — culprit on $MAIN: not routed on $DEV"; return 0; fi
+  [ ! -e "$m" ] || return 0
+  if { echo "[$(date -u +%FT%TZ)] ${s:0:9} ($DEV review, run $run): finding(s) $main_nums — culprit on $MAIN; pre-existing main finding(s), owned by $MAIN's own re-check chain, not routed on $DEV:"
+       printf '%s\n' "$rec"; echo; } >> "$STATE/open-findings.log"; then
+    touch "$m"; log "$DEV ${s:0:9}: finding(s) $main_nums of run $run name a culprit already on $MAIN — recorded (open-findings.log), not routed on $DEV"
   fi
-  # the receipt names the exact review attempt (run id, run attempt, review job id) of that same jobs answer: a rerun
-  # reporting other findings is recorded again (review of pawx-twitter-poller 7f0dbbc8f #2)
-  main_receipt=$STATE/sent/$s.$run.$att.mainfindings
-  if [ ! -e "$main_receipt" ]; then
-    # shellcheck disable=SC2086
-    if { echo "[$(date -u +%FT%TZ)] ${s:0:9} ($DEV review, run $run): finding(s) $main_nums — culprit on $MAIN ($(for n in $main_nums; do awk -v n="$n" '$1 == n {printf "#%s %s ", $1, substr($3, 1, 9)}' <<<"$cls"; done | sed 's/ $//')); pre-existing main finding(s), owned by main's own re-check chain, not routed on $DEV:"
-      findings_subset "$f" 0 $main_nums; echo; } >> "$STATE/open-findings.log" && touch "$main_receipt"; then
-      log "$DEV ${s:0:9}: finding(s) $main_nums of run $run name a culprit already on $MAIN — recorded as pre-existing main finding(s) (open-findings.log); no $DEV fixer, no fix round${dev_nums:+; routing only $dev_nums}"
-    else
-      log "$DEV ${s:0:9}: finding(s) $main_nums of run $run name a culprit on $MAIN, but open-findings.log could not be written — not routed on $DEV, not approved as main-only this run (retried)"
-      return 0
-    fi
-  fi
-  [ -n "$dev_nums" ] || main_only=1
   return 0
-}
-review_approve() { # review_approve <S> <allow main findings 0|1> <approval file> → check + negotiate the receipt contract
-  # A declaration is available even on failure. Older receipt-capable checkers can establish support by writing the
-  # existing approval sidecar. Legacy checkers must pass with main findings disabled before landing without a receipt.
-  # An unsuccessful receiptless check leaves capability unknown: keep requiring a receipt until a plain pass proves
-  # it can be waived. Failure alone cannot identify a legacy checker (historical capable checkers write only on success).
-  local s=$1 allow_main=$2 approval=$3 protocol=$3.protocol rc=0
-  approval_named=1
-  : > "$approval"; : > "$protocol"
-  (cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=$allow_main REVIEW_APPROVAL_OUT=$approval REVIEW_APPROVAL_PROTOCOL_OUT=$protocol bash "$CI_SCRIPTS/review-passed.sh" "$s" "$REPO" >/dev/null 2>&1) || rc=$?
-  if [ -s "$protocol" ]; then
-    [ "$(cat "$protocol")" = receipt-v1 ] || return 1
-    [ "$rc" = 0 ] && [ -s "$approval" ]; return
-  fi
-  if [ -s "$approval" ]; then return "$rc"; fi
-  if [ "$allow_main" != 0 ]; then
-    rc=0
-    (cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=0 REVIEW_APPROVAL_OUT=$approval REVIEW_APPROVAL_PROTOCOL_OUT=$protocol bash "$CI_SCRIPTS/review-passed.sh" "$s" "$REPO" >/dev/null 2>&1) || rc=$?
-    # A fallback can also discover support; never waive a declared protocol or a nonempty receipt.
-    if [ -s "$protocol" ] || [ -s "$approval" ]; then
-      approval_named=1
-      [ ! -s "$protocol" ] || [ "$(cat "$protocol")" = receipt-v1 ] || return 1
-      [ "$rc" = 0 ] && [ -s "$approval" ]; return
-    fi
-    # The first check may have refused while the full-review fallback passed.
-    [ "$rc" = 0 ] || return 1
-  fi
-  [ "$rc" = 0 ] || return "$rc"
-  approval_named=0
-  return 0
-}
-
-record_approving_main() { # record_approving_main <S> <approval file of review-passed.sh (REVIEW_APPROVAL_OUT)> → 0 when S may
-  # land: the approval is not a main-findings one, or the main findings of THAT approving attempt (run, attempt, review
-  # job) are in open-findings.log — written now or before. The one guard of the train AND the branch-head landing path
-  # (review of pawx-twitter-poller 7f0dbbc8f #1). Anything unreadable / mismatched → 1 (not landed; the next run retries).
-  # After review_approve succeeds, approval_named=0 means a plain pass with REVIEW_MAIN_FINDINGS=0 and no receipt.
-  local run att jid how
-  if [ "${approval_named:-1}" != 1 ]; then return 0; fi
-  read -r run att jid how < "$2" 2>/dev/null || return 1
-  case "$how" in pass) return 0 ;; main) ;; *) return 1 ;; esac
-  [[ "$run" =~ ^[0-9]+$ && "$att" =~ ^[0-9]+$ && "$jid" =~ ^[0-9]+$ ]] || return 1
-  dev_split_main "$1" "$run" "$(findings "$run")"
-  # DRY never lands and writes no record: the classification alone decides the preview (review of 9b7ece173 #3)
-  if [ -n "${DRY:-}" ]; then [ "$main_only" = 1 ]; return; fi
-  [ "$main_only" = 1 ] && [ "$main_receipt" = "$STATE/sent/$1.$run.$att.$jid.mainfindings" ] && [ -e "$main_receipt" ]
 }
 dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> <run url> <fixer task> [<ALL findings>] → the
   # reviewer's route per finding (author groups, see dev_blocked_split); otherwise fixer first, authors only when it failed.
-  # <ALL findings>: the round's findings before the pre-existing main ones were removed (dev_split_main) — the dupfix
-  # shortcut below decides on the full set, so removing main findings can never make a dev finding disappear (review of dev
-  # 5061f8b91 #3: with the main finding gone, a dev finding whose culprit had an unrelated repair was skipped).
+  # <ALL findings>: the round's findings before dev_main_split removed main's — the dupfix shortcut below decides on the full
+  # set, so removing main findings never makes a dev finding disappear (review of dev 5061f8b91 #3).
   local s=$1 f=$2 cul=$3 url=$4 why att task=$5 all=${6:-$2}
   att=$(attribution "$s" "$f")
   if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$s.findings" ]; then printf '%s\n' "$f" > "$STATE/sent/$s.findings"; fi   # for the FYI when its fix lands
@@ -2063,8 +1975,6 @@ if [ -z "${DRY:-}" ] && git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/
    && ! git -C "$SRC" merge-base --is-ancestor "origin/$DEV" origin/$MAIN; then
   done_titles=$(review_list 100 displayTitle,status,conclusion \
     '.[] | select(.status == "completed" and .conclusion == "success") | .displayTitle' || true)
-  failed_titles=$(review_list 100 displayTitle,status,conclusion \
-    '.[] | select(.status == "completed" and .conclusion == "failure") | .displayTitle' || true)
   # The newest completed dev review that blocked (any dev sha, not only the head — the train
   # reviews older shas): tell the authors and wake a fixer once.
   bl=$(review_list 100 databaseId,displayTitle,status,conclusion \
@@ -2076,8 +1986,8 @@ if [ -z "${DRY:-}" ] && git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/
        && ! dev_round_noop "$bsha" "$brid" failure; then   # a merge-only round is never blocked
       bf=$(findings "$brid")
       if binfra=$(review_infra_reason "$bf"); then dev_infra "$bsha" "$brid" "$binfra"; else
-      # findings whose culprit is already on main are main's (dev_split_main): recorded, never routed on $DEV
-      ball=$bf; dev_split_main "$bsha" "$brid" "$bf"; bf=$dev_f
+      # findings whose culprit is already on main are main's (dev_main_split): recorded, never routed on $DEV
+      ball=$bf; dev_main_split "$bsha" "$brid" "$bf"; bf=$dev_f
       if [ -n "$(tr -d '[:space:]' <<<"$bf")" ]; then
       bcul=$(culprit_threads "$bsha" "$bf")
       # reviewer → fixer → author: the fixer gets it; the authors only when it failed (dev_blocked)
@@ -2090,29 +2000,9 @@ Fix every finding at its source on $DEV (git log origin/$MAIN..origin/$DEV). You
     fi
   fi
   for tsha in $(git -C "$SRC" rev-list origin/$MAIN.."origin/$DEV" | head -60); do
-    rp_main=0   # review-passed.sh's main-findings path only for a sha with a completed blocked review (it saves the reads)
-    if ! grep -qx "review $tsha" <<<"$done_titles"; then
-      # No passing run, but a completed blocked one: it may have blocked only on pre-existing main findings. No
-      # single-run classification here — review-passed.sh's main-findings path weighs EVERY trusted failed review of the
-      # sha (one source of truth): a newer run whose reviewer failed (infrastructure) or that the dispatcher cannot
-      # classify must not hide an older run that qualifies (review of vpn-sub c2cb135f0 #1).
-      grep -qx "review $tsha" <<<"$failed_titles" || continue
-      rp_main=1
-    fi
-    # Persist main findings independently of the approval result, including older qualifying runs.
-    for trid in $(review_list 100 databaseId,displayTitle,status,conclusion \
-      ".[] | select(.status == \"completed\" and .conclusion == \"failure\" and .displayTitle == \"review $tsha\") | .databaseId"); do
-      dev_split_main "$tsha" "$trid" "$(findings "$trid")"
-    done
+    grep -qx "review $tsha" <<<"$done_titles" || continue
     : > "$STATE/train.kind"
-    REVIEW_KIND_OUT="$STATE/train.kind" review_approve "$tsha" "$rp_main" "$STATE/train.approval" || continue
-    # Approved by a review that blocked only on pre-existing main findings: THAT attempt's findings are recorded
-    # (open-findings.log) BEFORE the sha lands, or it does not land this run (reviews of d9228afe7 #1, 625246776 #1,
-    # 7f0dbbc8f #1/#2)
-    if ! record_approving_main "$tsha" "$STATE/train.approval"; then
-      log "train: $DEV@${tsha:0:9} approved ($(cat "$STATE/train.approval" 2>/dev/null)), but the approving review's main findings could not be recorded in open-findings.log — not landed this run, retried next run"
-      continue
-    fi
+    (cd "$TRUSTED" && REVIEW_KIND_OUT="$STATE/train.kind" bash "$CI_SCRIPTS/review-passed.sh" "$tsha" "$REPO" >/dev/null 2>&1) || continue
     # a tests-only approval never lands review machinery, by fast-forward or Train-Merge (review of dev a171d3396 #1/#2)
     if [ "$(cat "$STATE/train.kind" 2>/dev/null)" != review ]; then
       tmfiles=$(landing_machinery_files "$SRC" "origin/$MAIN" "$tsha")
@@ -2163,7 +2053,7 @@ Train-Merge: $tsha" >/dev/null 2>&1) \
       git -C "$SRC" worktree remove --force "$WORK" >/dev/null 2>&1 || true
       break
     fi
-    if out=$(cd "$TRUSTED" && { [ "${approval_named:-1}" = 1 ] || export REVIEW_MAIN_FINDINGS=0; } && bash "$CI_SCRIPTS/merge-branch.sh" "$DEV" "$tsha" 2>&1); then
+    if out=$(cd "$TRUSTED" && bash "$CI_SCRIPTS/merge-branch.sh" "$DEV" "$tsha" 2>&1); then
       merged_one=1; log "MERGED $DEV@${tsha:0:9} (train; $DEV head $(git -C "$SRC" rev-parse --short "origin/$DEV")): $out"
       git -C "$SRC" fetch -q origin "$MAIN"; rm -f "$STATE/dev.blocked_since"
       : # passed rounds notify nobody (owner 11-10: only blocks and fixes are news)
@@ -2320,11 +2210,8 @@ Then you can delete this branch. The rules: the Shipping section of CLAUDE.md on
     # The review already blocked this sha: its tests can no longer make it mergeable, so free
     # the test runners for other branches (the findings are sent once the run completes).
     # A review-fix head keeps its tests running: they are what lands it (owner 11-10, below).
-    # A dev review blocked by findings naming a main commit keeps its tests too: blocked only by such pre-existing main
-    # findings, the head lands on its tests (review-passed.sh, review-main-culprits.sh).
     if ! git -C "$SRC" show -s --format=%B "$sha" | grep -qE '^Review-Fix-Of: [0-9a-f]{40}$' \
-       && [ "$(gh api "repos/$REPO/actions/runs/$rid/jobs" -q '[.jobs[] | select((.name | sub("^.* / "; "")) == "review" and .conclusion=="failure")] | length' 2>/dev/null)" = 1 ] \
-       && ! { [ "$ref" = "$DEV" ] && main_culprit_hint "$sha" "$(findings "$rid")"; }; then
+       && [ "$(gh api "repos/$REPO/actions/runs/$rid/jobs" -q '[.jobs[] | select((.name | sub("^.* / "; "")) == "review" and .conclusion=="failure")] | length' 2>/dev/null)" = 1 ]; then
       [ -n "${DRY:-}" ] && { echo "DRY cancel $rid"; continue; }
       if [ ! -e "$STATE/sent/$sha.cancelled" ]; then      # one cancel request per run
         gh run cancel "$rid" -R "$REPO" >/dev/null 2>&1 && log "cancelled run $rid of $ref ${sha:0:9}: review blocked, tests no longer needed"
@@ -2349,24 +2236,12 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
     read -r rid concl <<<"$(dev_verdict_run "$sha" "$rid" "$concl")"; url="https://github.com/$REPO/actions/runs/$rid"
     if dev_round_noop "$sha" "$rid" "$concl" clear; then continue; fi   # before any blocked / fixer / overdue decision
   fi   # before any blocked / fixer / overdue decision
-  # a blocked dev review: its findings first — those whose culprit is already on main are main's (dev_split_main); blocked
-  # only by those, review-passed.sh's main-findings path decides whether it lands (otherwise skipped: it saves the reads)
-  f=""; rp_main=1
-  if [ "$ref" = "$DEV" ] && [ "$concl" != success ]; then
-    f=$(findings "$rid"); dev_split_main "$sha" "$rid" "$f"; [ "$main_only" = 1 ] || rp_main=0
-  fi
-  if review_approve "$sha" "$rp_main" "$STATE/head.approval"; then
-    # the same guard as the train: a main-findings approval lands only after the APPROVING attempt's findings are recorded
-    # (review of pawx-twitter-poller 7f0dbbc8f #1: the head loop checked the run it had selected, not the one approving)
-    if ! record_approving_main "$sha" "$STATE/head.approval"; then
-      log "$ref ${sha:0:9}: approved ($(cat "$STATE/head.approval" 2>/dev/null)), but the approving review's main findings could not be recorded in open-findings.log — not landed this run, retried next run"
-      continue
-    fi
+  if (cd "$TRUSTED" && bash "$CI_SCRIPTS/review-passed.sh" "$sha" "$REPO" >/dev/null 2>&1); then
     if git -C "$SRC" merge-base --is-ancestor origin/$MAIN "$sha"; then
       [ $merged_one = 0 ] || continue
       if [ -n "${DRY:-}" ]; then echo "DRY merge $ref ${sha:0:9}"; merged_one=1; continue; fi
       [ "$ref" = "$DEV" ] && dev_threads=$(range_threads "$sha")
-      if out=$(cd "$TRUSTED" && { [ "${approval_named:-1}" = 1 ] || export REVIEW_MAIN_FINDINGS=0; } && bash "$CI_SCRIPTS/merge-branch.sh" "$ref" 2>&1); then
+      if out=$(cd "$TRUSTED" && bash "$CI_SCRIPTS/merge-branch.sh" "$ref" 2>&1); then
         merged_one=1; log "MERGED $ref ${sha:0:9}: $out"
         git -C "$SRC" fetch -q origin "$MAIN"
         if [ "$ref" = "$DEV" ]; then
@@ -2396,21 +2271,16 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
       git -C "$SRC" worktree remove --force "$WORK" >/dev/null 2>&1 || true
     fi
   elif [ "$ref" = "$DEV" ]; then
-    if [ -z "$f" ]; then f=$(findings "$rid"); dev_split_main "$sha" "$rid" "$f"; fi   # (a failed run: split above already)
-    # Approval capability never changes finding ownership: keep the proven main/dev split even when a legacy checker
-    # refuses approval or a historical capable checker returns no receipt on failure.
+    f=$(findings "$rid")
     # the reviewer itself did not run: nothing was reviewed — no block, no fixer, no author notice, no revert clock
     if dinfra=$(review_infra_reason "$f"); then dev_infra "$sha" "$rid" "$dinfra"; continue; fi
-    # findings whose culprit is on main are main's: recorded, never routed on $DEV (no fixer, round, notice or revert clock)
-    fall=$f; f=$dev_f
+    # findings whose culprit is already on main are main's (dev_main_split): recorded, never routed on $DEV — and with
+    # nothing else left, nothing of $DEV's is blocked: no fixer, no round, no notice, no revert clock
+    fall=$f; dev_main_split "$sha" "$rid" "$f"; f=$dev_f
     if [ -z "$(tr -d '[:space:]' <<<"$f")" ]; then
-      if review_jobs "$rid" | jq -e '[.jobs[]? | select((.name | sub("^.* / "; "")) == "tests" and .conclusion == "cancelled")] | length > 0' >/dev/null; then
-        dev_infra "$sha" "$rid" "tests were terminally cancelled; rerun the failed jobs to recover this review"
-        continue
-      fi
-      if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$sha.mainonly-wait.$rid" ]; then
-        log "$DEV ${sha:0:9}: run $rid blocked only by pre-existing main finding(s) ($main_nums) but not approved (yet) — nothing of $DEV's to route; no fixer, no revert clock"
-        touch "$STATE/sent/$sha.mainonly-wait.$rid"
+      if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$sha.main-only.$rid" ]; then
+        log "$DEV ${sha:0:9}: run $rid blocked only by finding(s) $main_nums whose culprit is on $MAIN — nothing of $DEV's to route; not landed (a later passing review lands $DEV)"
+        touch "$STATE/sent/$sha.main-only.$rid"
       fi
       continue
     fi

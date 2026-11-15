@@ -32,19 +32,14 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   The supervisor is told once per failed review attempt (notice key `infra.dev.<run>.<review job id>`: a rerun is a new
   job; repeated scans never repeat it; an undelivered alert is retried, a gone supervisor falls back to the CI owner),
   with the `gh run rerun <id> --failed` command; the next push to dev re-triggers the review too.
-- **Pre-existing main findings in a dev review** (contract, Findings): a blocking finding whose culprit commit is already
-  on main is recorded once in `$STATE/open-findings.log` (so the next reviews see it as known-open / pre-existing) and
-  never routed on dev — no fixer, no fix round, no author notice, no `fixfailed`, no revert clock; only the head's other
-  findings are routed (`dev_split_main`). Blocked only by such findings, the head lands like a passing review (the train
-  and the head loop ask `review-passed.sh`, which decides from the trusted runs with the same rule; the train asks it for
-  every sha with a completed blocked review and classifies no single run itself, so a newer run whose reviewer failed
-  never hides an older qualifying one), and its tests are not cancelled when the review fails. It lands only after the
-  approving review attempt's main findings are recorded (`review-passed.sh` names that attempt in `REVIEW_APPROVAL_OUT`;
-  the classification and the record come from one read of its jobs and log; any read or write failure → not landed that
-  run, retried). Receipt-capable checkers support main-only approvals in both bundled and repository-local contract
-  scripts. Older checkers must pass with `REVIEW_MAIN_FINDINGS=0` before landing without a receipt. Approval capability
-  does not change finding ownership: classified main findings stay recorded and excluded from dev's repair and revert
-  paths even when the checker cannot approve the head. There is no cross-chain "same problem" matching: main's own chain owns the finding.
+- **Findings whose culprit is already on main, in a dev review** (contract, Findings): the reviewer reports them as
+  non-blocking `[pre-existing]` notes; a review by an older pinned reviewer can still print one as BLOCKED. Such a finding
+  (its `FINDING #n … commit=` a full sha on `origin/$MAIN`; `dev_main_split`, local, from the findings text already read)
+  is appended once to `$STATE/open-findings.log` (so the next reviews see it as known-open / pre-existing) and never
+  routed on dev — no fixer, no fix round, no author notice, no `fixfailed`, no revert clock, no file named for a revert;
+  only the head's other findings are routed (the dupfix shortcut still decides on the round's full finding set). The
+  dispatcher never lands anything because of it: a head blocked only by such findings stays unlanded until a later
+  review passes. `test/ci/review-dispatch-main-culprit.sh`.
 - **Open findings**: findings whose fix rounds are spent are kept in `$STATE/open-findings.log`, which the review job
   passes to the reviewer (`open-findings-file`) so repeats are recognised as pre-existing.
 
@@ -109,15 +104,6 @@ every run, used for ancestry checks). For a repository whose main has `.github/s
 copies (next to the dispatcher); for a repository not yet migrated it keeps using the repository's
 `scripts/ci/` copies. Both kinds of runs are readable by sheepdog's scripts (job names with or without the
 `<caller job> / ` prefix).
-
-`REVIEW_APPROVAL_PROTOCOL_OUT=<file>` declares `receipt-v1` even when approval fails. The dispatcher also accepts older
-receipt-capable checkers that declare support through `REVIEW_APPROVAL_OUT=<file>`, which contains
-`<run id> <run attempt> <review job id> <pass|main>`; a `main` approval lands only after that attempt's findings are
-recorded. If a checker approves without writing a receipt, the dispatcher requires a successful check with
-`REVIEW_MAIN_FINDINGS=0` before accepting a plain pass, and keeps main-only approval disabled when invoking its merge
-script. A nonempty but unreadable receipt is refused. An unsuccessful check with no declaration or receipt leaves
-capability unknown; it cannot establish the receipt waiver for a legacy full-review pass. Approval failure never changes
-the proven main/dev split, including when a historical receipt-capable checker writes its sidecar only on success.
 
 ## A host wrapper (example)
 

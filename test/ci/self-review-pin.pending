@@ -2,3 +2,4 @@
 #   <suite file name> <the 40-char pin sha> <the protection that is not in the pinned snapshot yet>
 # Allowed only for that exact pin: a pin bump runs every suite against the new pin again. Keep this list empty whenever
 # the newest reviewed main carries the protection — bump the pin instead (docs/self-review.md).
+review-dev-main.sh edb4fb32e98602b9ebe30cd85569bc1f77236739 the dev review hands the default branch's sha to the gate (--dev-main; owner 11-15): not in the pinned review.yml yet
