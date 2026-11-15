@@ -218,3 +218,5 @@ out=$(bash "$MB/merge-branch.sh" fxc 2>&1) || fail "merge-branch.sh refused a co
 echo "ok - merge-branch.sh: a tests-only approval never lands review machinery; a code-only one still merges"
 # the merge train asks review-passed.sh for coverage from the main commit the candidate contains (owner 11-15)
 grep -q 'review-passed.sh" "$tsha" "$REPO" "$tanc"' "$ROOT/scripts/ci/review-dispatch.sh" || fail "the merge train does not check coverage"
+# the devfix coverage proof is always sheepdog's own review-covered.sh, never skipped for a repository-local copy
+grep -q 'bash "$SHEEPDOG_CI/review-covered.sh"' "$ROOT/scripts/ci/review-dispatch.sh" || fail "the devfix landing does not use sheepdog's own review-covered.sh"

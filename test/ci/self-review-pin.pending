@@ -2,3 +2,4 @@
 #   <suite file name> <the 40-char pin sha> <the protection that is not in the pinned snapshot yet>
 # Allowed only for that exact pin: a pin bump runs every suite against the new pin again. Keep this list empty whenever
 # the newest reviewed main carries the protection — bump the pin instead (docs/self-review.md).
+dev-review-once.sh fdcd15f43ac9be3e701cf6df086a64659627236d a blocked merge gets no structural coverage and a repair's scope excludes the main side (review of 1b2f4484e #1/#2/#4): on dev, not in the pin yet

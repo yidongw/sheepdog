@@ -130,11 +130,16 @@ clean_merge() { # clean_merge <m> → 0 when m has two parents and its tree is e
   [ "${t%%$'\n'*}" = "$(git rev-parse "$1^{tree}")" ]
 }
 
-target_range() { # target_range <T> <run id> → the commits T's blocked review covered (its attested base..T), dev side
-  local att b
+target_range() { # target_range <T> <run id> → the commits T's blocked review actually reviewed: its attested base..T
+  # minus the attested main side (main's commits a main→dev merge brought were not in that review's diff — review of
+  # 1b2f4484e #4)
+  local att b m
   att=$(review_attestation "$2" "$1") || return 1
-  b=$(jq -r .base <<<"$att")
-  git rev-list "$b..$1"
+  b=$(jq -r .base <<<"$att"); m=$(jq -r '.mainside // ""' <<<"$att")
+  if [ -n "$m" ]; then
+    [[ "$m" =~ ^[0-9a-f]{40}$ ]] || return 1
+    git rev-list "$b..$1" "^$m"
+  else git rev-list "$b..$1"; fi
 }
 touches_only() { # touches_only <fix commit> <allowed commits file> → 0 when every line the commit removes or changes was
   # introduced by an allowed commit (blame at its parent); never for a merge, a revert or a binary change

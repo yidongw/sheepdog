@@ -14,6 +14,7 @@
 #       E blocked→F repairs E AND undoes D) is no tests-only round; a red tests-only round is no base / link; main's
 #       blocked re-check of a tests-only fix withdraws its approval; tests-only links of a failed proof attempt are
 #       not reported
+#   (i) a blocked, unrepaired merge is not covered through its parents; (j) a repair's allowed lines exclude mainside
 set -euo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"
 cd "$(dirname "$0")/../.."
@@ -300,4 +301,25 @@ run 39 "review $HY" success "$HM"; run 38 "review $HY" success "$P2"   # newest 
 [ ! -s "$T/fixes" ] || fail "(h) a failed proof attempt reported tests-only links: $(cat "$T/fixes")"
 g checkout -q dev
 echo "ok (h) - repairs stay within their blocked range; red rounds, blocked re-checks and failed proofs are no approval"
+
+# (i) review of 1b2f4484e #1/#2: a merge M whose own review BLOCKED (unrepaired) is the next range's base, so it is never
+# covered through its parents: N above it is not approved
+g checkout -q -b mi "$P2"; MA=$(c ma "MA (passed)"); g checkout -q -b mi2 "$P2"; MB=$(c mb "MB (passed)")
+g checkout -q mi; g merge -q --no-ff -m "M: merge (blocked)" "$MB"; MM=$(g rev-parse HEAD); MN=$(c mn "N above M (passed)")
+reset_runs; run 51 "review $MA" success "$P2"; run 52 "review $MB" success "$P2"; run 53 "review $MM" failure "$MA"; run 54 "review $MN" success "$MM"
+[ "$(base "$MN")" = "$MM" ] || fail "(i) N's range does not start at the blocked merge"
+if rp "$MN" o/r "$P2"; then fail "(i) N approved over the blocked, unrepaired merge M (structural coverage)"; fi
+# control: without M's blocked review the clean merge is covered through its parents
+reset_runs; run 51 "review $MA" success "$P2"; run 52 "review $MB" success "$P2"; run 54 "review $MN" success "$MM"
+rp "$MN" o/r "$P2" || fail "(i) a clean merge of covered parents is not covered"
+# (j) review of 1b2f4484e #4: a repair may not change main-side lines its blocked review did not review (mainside)
+g checkout -q -b mj "$P2"; JA=$(c ja "JA (dev, passed)")
+g checkout -q -b mjmain "$P2"; printf 'REQUIRE_AUTH=2\n' > "$T/src/auth.conf"; g add -A; g commit -q -m "H: main auth fix" -m "Hotfix: auth"; JH=$(g rev-parse HEAD)
+g checkout -q mj; g merge -q --no-ff -m "merge main" "$JH"; JE=$(c je "JE (blocked; reviewed without main's side)")
+printf 'REQUIRE_AUTH=0\n' > "$T/src/auth.conf"; echo fixed >> "$T/src/je"; g add -A; g commit -q -m "repairs JE, undoes H" -m "Review-Fix-Of: $JE"; JF=$(g rev-parse HEAD)
+reset_runs; run 55 "review $JA" success "$P2"; run 56 "review $JE" failure "$JA" "$JH"
+(cd "$T/src" && PATH=$T/bin:$PATH GH_TOKEN=x REPO=o/r DEV_REVIEW_MAIN_REF=$P2 bash "$BASE_SH" --only-fixes "$JE" "$JF" >/dev/null 2>&1) \
+  && fail "(j) a repair changed main-side lines its blocked review excluded"
+g checkout -q dev
+echo "ok (i)(j) - blocked merges get no structural coverage; a repair's scope excludes the main side"
 echo 'dev review once: all checks passed'

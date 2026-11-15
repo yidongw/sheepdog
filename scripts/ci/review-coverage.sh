@@ -66,11 +66,12 @@ review_fix_round() { # <run id> -> 0 when it is a completed tests-only fix round
     | [.steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] == "skipped")
     and ([.jobs[]? | select((.name | sub("^.* / "; "")) == "tests")][0].conclusion == "success")' <<<"$jobs" >/dev/null 2>&1
 }
-review_recheck_blocked() { # <sha> <candidate head> -> 0 when main's re-check of <sha> completed and BLOCKED and no
-  # effective repair of it is on <candidate head>: main's safety net for a tests-only fix has spoken against it
+review_recheck_blocked() { # <sha> <candidate head> [titles: recheck|any] -> 0 when a completed review of <sha> ("recheck
+  # <sha>"; with "any" also "review <sha>") BLOCKED and no effective repair of it is on <candidate head>: main's safety
+  # net for a tests-only fix has spoken against it, or (any) <sha> is an explicitly blocked commit
   local id
   [ -n "${review_completed_runs:-}" ] || review_completed_runs=$(review_runs completed)
-  for id in $(jq -r --arg r "recheck $1" 'select(.display_title == $r) | .id' <<<"$review_completed_runs"); do
+  for id in $(jq -r --arg r "recheck $1" --arg a "${3:+review $1}" 'select(.display_title == $r or .display_title == $a) | .id' <<<"$review_completed_runs"); do
     [ "$(review_verdict "$id" 2>/dev/null || true)" = blocked ] || continue
     repaired "$1" "$2" || return 0
   done
@@ -125,7 +126,9 @@ _review_covered() {
     select(.display_title == $a or .display_title == $r) | .id' <<<"$review_completed_runs"); do
     review_link "$id" "$b" "$d" "$h" "$((n + 1))" && return 0
   done
-  if review_clean_merge "$b"; then
+  # structural coverage of a clean merge through its parents — never for a merge whose own review BLOCKED and is not
+  # repaired: the dev producer starts the next range at it, so nothing else reviews it again (review of 1b2f4484e #1/#2)
+  if review_clean_merge "$b" && ! review_recheck_blocked "$b" "$h" any; then
     review_covered "$(git rev-parse "$b^1")" "$d" "$h" "$((n + 1))" \
       && review_covered "$(git rev-parse "$b^2")" "$d" "$h" "$((n + 1))" && return 0
   fi

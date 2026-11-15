@@ -2110,9 +2110,9 @@ $gaps}"
     fi
     # S's own review covered only what came after the review before it (dev reviews each commit once, whatever that
     # review's verdict): S + its fix land only when the chain below S is covered too — a blocked commit under S has its
-    # own repair first (review-covered.sh; a repository on its own scripts/ci/ copy without it keeps the old rule)
-    if [ -f "$CI_SCRIPTS/review-covered.sh" ] \
-       && ! (cd "$TRUSTED" && bash "$CI_SCRIPTS/review-covered.sh" "$fs" "$(git -C "$SRC" merge-base "origin/$MAIN" "$fh")" "$fh" "$REPO" >/dev/null 2>&1); then
+    # own repair first — always sheepdog's own review-covered.sh (next to this file), also for a repository on its own
+    # scripts/ci/ copies: a copy without it must not skip the proof (review of 1b2f4484e #5)
+    if ! (cd "$TRUSTED" && bash "$SHEEPDOG_CI/review-covered.sh" "$fs" "$(git -C "$SRC" merge-base "origin/$MAIN" "$fh")" "$fh" "$REPO" >/dev/null 2>&1); then
       [ -e "$STATE/sent/$fh.devfix-uncovered" ] || { log "devfix $fref ${fh:0:9}: the commits below ${fs:0:9} are not covered (a blocked review there without its repair, or missing proof) — not landed yet"; touch "$STATE/sent/$fh.devfix-uncovered"; }
       continue
     fi
