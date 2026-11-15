@@ -1162,6 +1162,8 @@ dev_split_main() { # dev_split_main <S> <run id> <findings> → sets dev_f (the 
 review_approve() { # review_approve <S> <allow main findings 0|1> <approval file> → check + negotiate the receipt contract
   # A declaration is available even on failure. Older receipt-capable checkers can establish support by writing the
   # existing approval sidecar. Legacy checkers must pass with main findings disabled before landing without a receipt.
+  # An unsuccessful receiptless check leaves capability unknown: keep requiring a receipt until a plain pass proves
+  # it can be waived. Failure alone cannot identify a legacy checker (historical capable checkers write only on success).
   local s=$1 allow_main=$2 approval=$3 protocol=$3.protocol rc=0
   approval_named=1
   : > "$approval"; : > "$protocol"
@@ -1171,7 +1173,6 @@ review_approve() { # review_approve <S> <allow main findings 0|1> <approval file
     [ "$rc" = 0 ] && [ -s "$approval" ]; return
   fi
   if [ -s "$approval" ]; then return "$rc"; fi
-  approval_named=0
   if [ "$allow_main" != 0 ]; then
     rc=0
     (cd "$TRUSTED" && REVIEW_MAIN_FINDINGS=0 REVIEW_APPROVAL_OUT=$approval REVIEW_APPROVAL_PROTOCOL_OUT=$protocol bash "$CI_SCRIPTS/review-passed.sh" "$s" "$REPO" >/dev/null 2>&1) || rc=$?
@@ -1184,7 +1185,9 @@ review_approve() { # review_approve <S> <allow main findings 0|1> <approval file
     # The first check may have refused while the full-review fallback passed.
     [ "$rc" = 0 ] || return 1
   fi
-  return "$rc"
+  [ "$rc" = 0 ] || return "$rc"
+  approval_named=0
+  return 0
 }
 
 record_approving_main() { # record_approving_main <S> <approval file of review-passed.sh (REVIEW_APPROVAL_OUT)> → 0 when S may
