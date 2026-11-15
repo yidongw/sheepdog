@@ -195,9 +195,17 @@ gate_section() { # stdin: a review job log (timestamps stripped) → only what t
   # (the reviewer never ran) only the commit-gate errors and the gate's own infrastructure lines. Anything printed before
   # the reviewer started is not a finding (review of sheepdog ee6b3ea74 #1: forged FINDING/BLOCKED lines before the
   # marker selected unrelated dev commits for an automatic revert).
-  awk '{ l[NR] = $0 } /^review-gate: reviewing / { m = NR }
-    END { if (m) { for (i = m + 1; i <= NR; i++) print l[i] }
-          else { for (i = 1; i <= NR; i++) if (l[i] ~ /^(\[gates .*ERROR|review-gate: (reviewer|no parseable|crashed))/) print l[i] } }'
+  # [<ran>]: 0 when the jobs answer shows the blocking step "Review (blocking …" did NOT run (review_step_ran): then no
+  # "review-gate:" line can be the gate's — a lone forged marker opens nothing; only commit-gate errors remain (review of
+  # vpn-sub 6eedb3535 #1).
+  awk -v ran="${1:-1}" '{ l[NR] = $0 } /^review-gate: reviewing / { m = NR }
+    END { if (ran != 0 && m) { for (i = m + 1; i <= NR; i++) print l[i] }
+          else { for (i = 1; i <= NR; i++) if (l[i] ~ (ran != 0 ? "^(\\[gates .*ERROR|review-gate: (reviewer|no parseable|crashed))" : "^\\[gates .*ERROR")) print l[i] } }'
+}
+review_step_ran() { # stdin: a run's jobs answer → 1 when its review job's blocking step "Review (blocking …" ran to a
+  # conclusion (success / failure), 0 when it was skipped, cancelled or never started
+  jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] | [.steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] // ""
+    | if . == "success" or . == "failure" then 1 else 0 end' 2>/dev/null || echo 0
 }
 finding_jobs() { ghm api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null; }   # routing/notification snapshot only, never approval evidence
 findings() { # findings <run id> [<its jobs answer, already read>] → text (blocking findings only: the reviewer's NIT lines are notes, see notes_of)
@@ -215,7 +223,7 @@ findings() { # findings <run id> [<its jobs answer, already read>] → text (blo
     if gl=$(ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null); then
       review_available=1
       # Ownership, repair routing and rollback use this same bounded snapshot.
-      sed -E 's/^[^ ]+ //' <<<"$gl" | gate_section \
+      sed -E 's/^[^ ]+ //' <<<"$gl" | gate_section "$(review_step_ran <<<"$jobs")" \
         | grep -E '^(review-gate: (BLOCKED|FINDING|ROUTE|reviewer|no parseable|crashed|NOTE)|evidence:|\[gates .*ERROR)' | findings_cap || true
     else echo 'review-gate: reviewer failed: finding log unavailable'; fi
   else
@@ -261,10 +269,11 @@ run: https://github.com/$REPO/actions/runs/$run"
 }
 
 notes_of() { # notes_of <run id> → the reviewer's non-blocking notes ("" when none), prefixed for a message
-  local rid n
-  rid=$(ghm api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null | jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "review") | .id' | head -1)
+  local rid n nj
+  nj=$(ghm api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null) || return 0
+  rid=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "review") | .id' <<<"$nj" 2>/dev/null | head -1)
   [ -n "$rid" ] || return 0
-  n=$(ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' | gate_section \
+  n=$(ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null | sed -E 's/^[^ ]+ //' | gate_section "$(review_step_ran <<<"$nj")" \
     | grep -E '^review-gate: (NOTE|NIT)' | sed -E 's/^review-gate: NOTE \(non-blocking\): //; s/^review-gate: NIT \(non-blocking\): /nit: /' | head -8 || true)
   [ -n "$n" ] && printf '\nreview notes (non-blocking): %s' "$n"
   return 0
@@ -1678,7 +1687,7 @@ preexisting_record() { # preexisting_record <H> <run id> [<its jobs answer, alre
   if [ -z "$rid" ]; then touch "$m"; return 0; fi   # no review job: nothing to record
   jlog=$(ghm api "repos/$REPO/actions/jobs/$rid/logs" 2>/dev/null) || return 0
   [ -n "$jlog" ] || return 0
-  p=$(sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^ ]+ //' <<<"$jlog" | gate_section | grep -E '^review-gate: (NIT|NOTE) \(non-blocking\): .*\[pre-existing\]' | head -20 || true)
+  p=$(sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^ ]+ //' <<<"$jlog" | gate_section "$(review_step_ran <<<"$jobs")" | grep -E '^review-gate: (NIT|NOTE) \(non-blocking\): .*\[pre-existing\]' | head -20 || true)
   if [ -n "$p" ]; then { echo "[$(date -u +%FT%TZ)] main ${1:0:9} (run $2):"; printf '%s\n' "$p"; echo; } >> "$STATE/preexisting-findings.log" || return 0; fi
   touch "$m"
 }

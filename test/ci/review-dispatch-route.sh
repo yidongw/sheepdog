@@ -13,7 +13,7 @@ cd "$(dirname "$0")/../.."
 D=scripts/ci/review-dispatch.sh
 fns() { local n b; for n in "$@"; do b=$(sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D")  # a missing helper fails the test (it used to only print to stderr)
   if [ -z "$b" ]; then printf '{ echo "fns: helper %s not found in %s" >&2; exit 1; }\n' "$n" "$D"; else printf '%s\n' "$b"; fi; done; }
-eval "$(fns repair_effective author_group_key findings_cap gate_section thread_of fixer_receipt_thread range_threads culprit_threads or_supervisor notify_threads devfix_fix_of fixer_ended launch_failed \
+eval "$(fns repair_effective author_group_key findings_cap gate_section review_step_ran thread_of fixer_receipt_thread range_threads culprit_threads or_supervisor notify_threads devfix_fix_of fixer_ended launch_failed \
   dev_round_pending dev_carries_fix fix_reverted hotfix_fix_pushed escalate_ended_fixer named_files blocked_author_reason \
   dev_blocked norm_tid finding_blocks finding_meta finding_route review_round_route route_reason attribute_finding \
   attribution findings_subset att_of culprit_lines notify_attributed author_fixed author_turn split_fixer_failed \
@@ -310,7 +310,7 @@ mklog() { # mklog old|new <n> → a review job log of n author-routed findings i
 }
 eval "$(fns findings)"
 for fmt in old new; do
-  gh() { case "$*" in *"/jobs/"*logs*) mklog "$LOGFMT" 60 ;; *) echo '{"jobs":[{"name":"tests","conclusion":"success","id":1},{"name":"review","conclusion":"failure","id":2}]}' ;; esac; }
+  gh() { case "$*" in *"/jobs/"*logs*) mklog "$LOGFMT" 60 ;; *) echo '{"jobs":[{"name":"tests","conclusion":"success","id":1},{"name":"review","conclusion":"failure","id":2,"steps":[{"name":"Review (blocking)","conclusion":"failure"}]}]}' ;; esac; }
   LOGFMT=$fmt; out=$(FINDINGS_MAX=25 findings 1)   # an explicit cap (display only)
   test "$(finding_blocks "$out" | wc -l)" -eq 25
   test "$(grep -c '^review-gate: FINDING #' <<<"$out")" -eq 25
@@ -320,7 +320,7 @@ done
 # re-check of f0d573631 #7: by default nothing is dropped — the 60th finding's route=author still decides the round
 mklog2() { echo "2026-11-12T00:00:00Z review-gate: reviewing a..b"; echo "2026-11-12T00:00:00Z review-gate: ROUTE fixer — r"; for i in $(seq 1 60); do r=fixer; [ "$i" = 60 ] && r=author
   echo "2026-11-12T00:00:00Z review-gate: FINDING #$i route=$r commit=- — r$i"; echo "2026-11-12T00:00:00Z review-gate: BLOCKED #$i regression [should]: bug $i"; echo "2026-11-12T00:00:00Z evidence: src/a.ts:3 e$i"; done; }
-gh() { case "$*" in *"/jobs/"*logs*) mklog2 ;; *) echo '{"jobs":[{"name":"tests","conclusion":"success","id":1},{"name":"review","conclusion":"failure","id":2}]}' ;; esac; }
+gh() { case "$*" in *"/jobs/"*logs*) mklog2 ;; *) echo '{"jobs":[{"name":"tests","conclusion":"success","id":1},{"name":"review","conclusion":"failure","id":2,"steps":[{"name":"Review (blocking)","conclusion":"failure"}]}]}' ;; esac; }
 out=$(findings 1)
 test "$(finding_blocks "$out" | wc -l)" -eq 60; ! grep -q 'more findings not listed' <<<"$out" || { echo "negative check failed: test/ci/review-dispatch-route.sh:363" >&2; exit 1; }
 test "$(review_round_route "$out")" = author

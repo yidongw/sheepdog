@@ -75,7 +75,7 @@ url=\$2; q=""; [ "\${3:-}" = -q ] && q=\$4
 url=\${url#repos/o/r/}
 case "\$url" in
   *workflows/review.yml/runs*) j=\$("$T/bin/page" "\$url") ;;
-  */runs/*/jobs) id=\${url##*runs/}; j=\$(cat "$T/api/\${id%%/*}.jobs") ;;
+  */runs/*/jobs) id=\${url##*runs/}; j=\$(cat "$T/api/\${id%%/*}.jobs") || exit 1 ;;
   */jobs/*/logs) id=\${url%/logs}; cat "$T/api/\${id##*/}.log" 2>/dev/null; exit ;;
   */runs/*/artifacts) id=\${url##*runs/}; id=\${id%%/*}; if [ -e "$T/api/\$id.zip" ]; then j="{\"artifacts\":[{\"name\":\"review-attestation\",\"id\":\$id}]}"; else j='{"artifacts":[]}'; fi ;;
   */artifacts/*/zip) id=\${url%/zip}; cat "$T/api/\${id##*/}.zip"; exit ;;
@@ -309,6 +309,10 @@ g checkout -q mi; g merge -q --no-ff -m "M: merge (blocked)" "$MB"; MM=$(g rev-p
 reset_runs; run 51 "review $MA" success "$P2"; run 52 "review $MB" success "$P2"; run 53 "review $MM" failure "$MA"; run 54 "review $MN" success "$MM"
 [ "$(base "$MN")" = "$MM" ] || fail "(i) N's range does not start at the blocked merge"
 if rp "$MN" o/r "$P2"; then fail "(i) N approved over the blocked, unrepaired merge M (structural coverage)"; fi
+# review of vpn-sub c3d6df140 #1: M's verdict cannot be read (the jobs lookup fails) → unknown counts as blocked
+mv "$T/api/53.jobs" "$T/api/53.jobs.off"
+if rp "$MN" o/r "$P2"; then fail "(i) N approved while M's verdict could not be read"; fi
+mv "$T/api/53.jobs.off" "$T/api/53.jobs"
 # control: without M's blocked review the clean merge is covered through its parents
 reset_runs; run 51 "review $MA" success "$P2"; run 52 "review $MB" success "$P2"; run 54 "review $MN" success "$MM"
 rp "$MN" o/r "$P2" || fail "(i) a clean merge of covered parents is not covered"
