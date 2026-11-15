@@ -13,6 +13,7 @@ D=scripts/ci/review-dispatch.sh
 fail() { echo "FAIL: $*" >&2; exit 1; }
 fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh"; done; }
 declare -F review_list >/dev/null || eval "$(fns review_list)"; eval "$(fns review_first_verdict review_attempt_verdict review_attested_kind review_verdict_load review_blocked_verdict review_log_lines gate_section review_step_ran)"; eval "$(fns review_api review_verdict_list)"   # THE verdict reader the dispatcher's helpers call (review_first_verdict)
+hotfix_pass_confirmed() { :; }   # the completion gate (review-passed.sh REVIEW_PASSED_MODE=recheck): review-first-verdict.sh / the API budget run test it
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 SRC=$T/src STATE=$T/state MAIN=main DEV=dev REPO=test/repo FIXER_GATE=$T/state/fixer-gate SUPERVISOR_THREAD=import:claudeAgent:sup key_prefix=""
 mkdir -p "$STATE/sent" "$FIXER_GATE/queue"
@@ -62,7 +63,7 @@ gh_raw() { case "$*" in
   "run list"*) cat "$T/runs.json" ;;
   *runs/6/jobs*|*runs/8/jobs*) if [ -e "$T/f-passed" ]; then echo "$passed"; else echo "$blocked"; fi ;;
   *runs/7/jobs*) echo '{"jobs":[{"name":"tests","id":70,"conclusion":"success"},{"name":"review","id":71,"conclusion":"skipped","steps":[]}]}' ;;
-  *jobs/61/logs*) printf '2026-11-13T00:00:00Z review-range: %s %s\n2026-11-13T00:00:00Z review-gate: reviewing a..b\n2026-11-13T00:00:00Z review-gate: FINDING #1 route=fixer commit=- — x\n2026-11-13T00:00:00Z review-gate: BLOCKED #1 regression [should]: s drops rows\n2026-11-13T00:00:00Z evidence: src/s.ts:1 x\n' "$X" "$F" ;;
+  *jobs/61/logs*) [ ! -e "$T/f-nolog" ] || return 1; printf '2026-11-13T00:00:00Z review-range: %s %s\n2026-11-13T00:00:00Z review-gate: reviewing a..b\n2026-11-13T00:00:00Z review-gate: FINDING #1 route=fixer commit=- — x\n2026-11-13T00:00:00Z review-gate: BLOCKED #1 regression [should]: s drops rows\n2026-11-13T00:00:00Z evidence: src/s.ts:1 x\n' "$X" "$F" ;;
   *"runs/6 "*|*"runs/8 "*) if [ -e "$T/f-passed" ]; then echo '{"conclusion":"success"}'; else echo '{"conclusion":"failure"}'; fi ;;
   *"runs/7 "*) echo '{"conclusion":"success"}' ;;
   *) echo '{}' ;; esac; }
@@ -102,6 +103,15 @@ mkdir -p "$T/st2"; ( STATE=$T/st2; echo "$(( $(date +%s) + 1 ))" > "$STATE/main-
   [ "$(cat "$STATE/main-heads-base")" = "$b" ] || fail "migration did not persist main-heads-base" )
 echo 'ok - main-heads-since migrates to the main sha fetched by then'
 
+# 2a. review of sheepdog 9ce09a6e2 #4: an UNKNOWN main verdict (its first re-check still running / unreadable) is judged
+#     again next run — never completed, never routed as a finding (here: its blocked step's log cannot be read)
+rm -f "$STATE/sent/$F.hotfix-complete"; touch "$T/f-nolog"; : > "$T/woken"
+eval "$loop"
+test -e "$STATE/sent/$F.hotfix-complete" && fail "an unknown main verdict completed the head"
+grep -q "^$F" "$T/woken" && fail "an unknown main verdict was routed to a fixer"
+grep -q "HOTFIX ${F:0:9}: its main verdict is unknown" "$LOG" || { tail -5 "$LOG" >&2; fail "the unknown main verdict was not logged"; }
+rm -f "$T/f-nolog"
+echo 'ok - an unknown main verdict waits for the next run'
 # 2. a passed main re-check of the head completes it
 rm -f "$STATE/sent/$F.hotfix-complete"; touch "$T/f-passed"
 eval "$loop"

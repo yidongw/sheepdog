@@ -46,5 +46,5 @@ review_runs_strict() { # complete trusted listing; exit 1 on an unreadable page 
 review_attested() { # review_attested <run id>
   local a
   a=$(review_api "actions/runs/$1/artifacts" 2>/dev/null) || return 1
-  jq -e '[.artifacts[]? | select(.name == "review-attestation" and .expired != true)] | length > 0' <<<"$a" >/dev/null 2>&1
+  jq -e '[.artifacts[]? | select((.name | test("^review-attestation(-[0-9]+)?$")) and .expired != true)] | length > 0' <<<"$a" >/dev/null 2>&1
 }

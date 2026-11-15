@@ -41,7 +41,7 @@ F=$(c x "F: repair of X" "Review-Fix-Of: $X")
 # fake GitHub API: $T/api/list (the run listing), <id>.jobs (latest attempt), <id>.a<k>.jobs (earlier attempts),
 # <job id>.log, <id>.zip (the run's attestation)
 mkdir -p "$T/bin" "$T/api"
-reset() { : > "$T/api/list"; rm -f "$T/api/"*.jobs "$T/api/"*.zip "$T/api/"*.log "$T/api/"*.nozip; }
+reset() { : > "$T/api/list"; rm -f "$T/api/"*.jobs "$T/api/"*.zip "$T/api/"*.log "$T/api/"*.nozip "$T/api/"*.arts; }
 # listing <id> <title> [<run_attempt>] [<status>] [<conclusion>]
 listing() {
   printf '{"id":%s,"path":".github/workflows/review.yml","display_title":"%s","status":"%s","conclusion":%s,"event":"workflow_run","head_branch":"main","run_attempt":%s}\n' \
@@ -64,10 +64,15 @@ attempt() {
     [ "$st" = failure ] && echo "2026-11-15T00:00:02.0Z review-gate: BLOCKED #1 regression [should]: finding of run $id attempt $k"
     [ "$st" = crash ] && echo "2026-11-15T00:00:02.0Z review-gate: reviewer failed: crashed"; true; } > "$T/api/$jid.log"
 }
-# att <id> <head> <base> [<kind>]
+# att <id> <head> <base> [<kind>] [<attempt>]: review.yml's per-attempt artifact "review-attestation-<attempt>" (run_id /
+# run_attempt inside; artifact id <id>*100+<attempt>); without <attempt> the legacy run-wide "review-attestation" (id <id>)
 att() {
-  jq -nc --arg h "$2" --arg b "$3" --arg k "${4:-review}" --arg m "$P" '{head: $h, base: $b, kind: $k, main: $m}' > "$T/api/att.json"
-  python3 -c 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1],"w"); z.write(sys.argv[2],"review-attestation.json"); z.close()' "$T/api/$1.zip" "$T/api/att.json"
+  local aid=$1 name=review-attestation
+  [ -z "${5:-}" ] || { aid=$(( $1 * 100 + $5 )); name=review-attestation-$5; }
+  jq -nc --arg h "$2" --arg b "$3" --arg k "${4:-review}" --arg m "$P" --arg rid "$1" --arg ra "${5:-}" \
+    '{head: $h, base: $b, kind: $k, main: $m} + (if $ra == "" then {} else {run_id: $rid, run_attempt: $ra} end)' > "$T/api/att.json"
+  python3 -c 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1],"w"); z.write(sys.argv[2],"review-attestation.json"); z.close()' "$T/api/$aid.zip" "$T/api/att.json"
+  printf '{"name":"%s","id":%s}\n' "$name" "$aid" >> "$T/api/$1.arts"
 }
 # a one-attempt completed run with its attestation: run1 <id> <title> <step> <attested base> [<kind>]
 run1() {
@@ -89,7 +94,7 @@ case "\$u" in
   actions/runs/*/attempts/*/jobs) id=\${u#actions/runs/}; k=\${id#*/attempts/}; id=\${id%%/*}; cat "$T/api/\$id.a\${k%%/*}.jobs" 2>/dev/null || exit 22 ;;
   actions/runs/*/jobs) id=\${u#actions/runs/}; cat "$T/api/\${id%%/*}.jobs" 2>/dev/null || exit 22 ;;
   actions/jobs/*/logs) id=\${u%/logs}; cat "$T/api/\${id##*/}.log" 2>/dev/null || exit 22 ;;
-  actions/runs/*/artifacts) id=\${u#actions/runs/}; id=\${id%%/*}; if [ -e "$T/api/\$id.zip" ]; then echo "{\"artifacts\":[{\"name\":\"review-attestation\",\"id\":\$id}]}"; else echo '{"artifacts":[]}'; fi ;;
+  actions/runs/*/artifacts) id=\${u#actions/runs/}; id=\${id%%/*}; cat "$T/api/\$id.arts" 2>/dev/null | jq -s '{artifacts: .}' ;;
   actions/artifacts/*/zip) id=\${u%/zip}; [ ! -e "$T/api/\${id##*/}.nozip" ] || exit 22; cat "$T/api/\${id##*/}.zip" ;;
   *) exit 22 ;;
 esac
@@ -171,14 +176,25 @@ reset; run1 15 "review $A" success "$P"; run1 14 "review $A" failure "$P"
 expect "$A" any "blocked 14 1" "(4) listing order"
 echo "ok (4) - the first run (by id) decides, both ways; no timestamps, no listing order"
 
-# (5) attempts of one run: attempt 1 decides over attempt 2
-reset; listing 30 "review $A" 2 completed failure; attempt 30 1 2 success; attempt 30 2 2 failure; att 30 "$A" "$P"
+# (5) attempts of one run: attempt 1 decides over attempt 2 (each attempt uploads its own attestation)
+reset; listing 30 "review $A" 2 completed failure; attempt 30 1 2 success; attempt 30 2 2 failure; att 30 "$A" "$P" review 1; att 30 "$A" "$P" review 2
 expect "$A" any "pass 30 1" "(5) pass then a blocked rerun"
-reset; listing 30 "review $A" 2 completed success; attempt 30 1 2 failure; attempt 30 2 2 success; att 30 "$A" "$P"
+reset; listing 30 "review $A" 2 completed success; attempt 30 1 2 failure; attempt 30 2 2 success; att 30 "$A" "$P" review 1; att 30 "$A" "$P" review 2
 expect "$A" any "blocked 30 1" "(5) blocked then a passing rerun"
-reset; listing 30 "review $A" 2 completed success; attempt 30 1 2 cancelled; attempt 30 2 2 success; att 30 "$A" "$P"
+reset; listing 30 "review $A" 2 completed success; attempt 30 1 2 cancelled; attempt 30 2 2 success; att 30 "$A" "$P" review 2
 expect "$A" any "pass 30 2" "(5) a cancelled attempt has no verdict"
-echo "ok (5) - attempts in order: the first attempt with a verdict decides"
+# review of 9ce09a6e2 #3: a historical attempt never borrows another attempt's attestation. N's attempt 1 passed WITHOUT
+# an upload; attempt 2 blocked and uploaded the broader range P..N → attempt 1 is an unattested pass (no verdict), N's
+# verdict is attempt 2's block, and nothing above N is approved without its repair
+reset; run1 11 "review $A" success "$P"; run1 12 "review $X" failure "$A"
+listing 30 "review $N" 2 completed failure; attempt 30 1 2 success; attempt 30 2 2 failure; att 30 "$N" "$P" review 2
+expect "$N" any "blocked 30 2" "(5) attempt 1 borrowed attempt 2's attestation"
+# a legacy run-wide artifact (pins before the per-attempt upload) belongs to an attempt only in a single-attempt run
+reset; listing 30 "review $A" 2 completed failure; attempt 30 1 2 success; attempt 30 2 2 failure; att 30 "$A" "$P"
+expect "$A" any "blocked 30 2" "(5) a legacy artifact of a rerun run attested attempt 1"
+reset; run1 30 "review $A" success "$P"
+expect "$A" any "pass 30 1" "(5) a legacy artifact of a single-attempt run"
+echo "ok (5) - attempts in order: the first attempt with a verdict decides; each attempt only with its own attestation"
 
 # (6) unknown: an earlier run still running; unreadable jobs; unreadable attestation of a pass
 reset; listing 30 "review $A" 1 in_progress; attempt 30 1 1 running; run1 31 "review $A" success "$P"
@@ -215,9 +231,29 @@ g checkout -q -b mo "$P"; g merge -q --no-ff -m "merge main into dev" "$Q"; M=$(
 Z=$(c z "Z: dev work on top")
 reset; run1 40 "review $M" failure "$P"; run1 41 "review $Z" success "$M"
 rp "$Z" o/r "$Q" || fail "(8) a merge-only commit (main's tree) with a blocked review stranded the dev head above it"
-g checkout -q -b mo2 "$P"; g merge -q --no-ff --no-commit "$Q" >/dev/null; echo evil >> "$T/src/q"; g add q; g commit -q -m "evil merge"; M2=$(g rev-parse HEAD)
+g checkout -q -b mo2 "$P"; g merge -q --no-ff --no-commit "$Q" >/dev/null 2>&1; echo evil >> "$T/src/q"; g add q; g commit -q -m "evil merge"; M2=$(g rev-parse HEAD)
 Z2=$(c z "Z2"); reset; run1 42 "review $M2" failure "$P"; run1 43 "review $Z2" success "$M2"
 if rp "$Z2" o/r "$Q"; then fail "(8) a blocked merge with a change of its own was covered"; fi
 g checkout -q dev
 echo "ok (8) - a merge-only commit identical to main's tree is covered; an evil merge's block still stands"
+# (9) review of 9ce09a6e2 #1/#2: the review job classifying its own repair-only range is no evidence about itself —
+# REVIEW_SELF_RUN (review.yml's range step) skips that unfinished attempt; another unfinished run still is unknown
+reset; chain; listing 30 "review $F" 1 in_progress; attempt 30 1 1 running
+env_ bash "$ROOT/scripts/ci/dev-review-base.sh" --only-fixes "$N" "$F" >/dev/null 2>&1 && fail "(9) control: an unfinished review of F (not this job) is unknown"
+REVIEW_SELF_RUN="30 1" env_ bash "$ROOT/scripts/ci/dev-review-base.sh" --only-fixes "$N" "$F" >/dev/null 2>&1 \
+  || fail "(9) the classifier vetoed its own repair-only range (its own running attempt)"
+echo "ok (9) - a run is no evidence about itself; other unfinished runs still are unknown"
+
+# (10) review of 9ce09a6e2 #7: a passing first verdict whose run did not conclude success (e.g. a failed status job) is
+# not approved; (11) #5: the main verdict (REVIEW_PASSED_MODE=recheck, the dispatcher's completion gate) is the first
+# "recheck" over the complete listing — a passing dev review of the same sha does not complete a blocked re-check
+reset; chain; listing 21 "review $F" 1 completed failure; attempt 21 1 1 skipped; att 21 "$F" "$N" tests-only-fix
+if rp "$F" o/r "$P"; then fail "(10) a run that concluded failure approved"; fi
+reset   # 120 newer runs list first (newest first, as GitHub pages them): the blocked re-check 25 is on page 2
+for i in $(seq 1 120); do printf '{"id":%s,"path":".github/workflows/review.yml","display_title":"review %040d","status":"completed","conclusion":"success","event":"workflow_run","head_branch":"main"}\n' $((90000 + i)) "$i" >> "$T/api/list"; done
+chain; run1 21 "review $F" skipped "$N"; run1 25 "recheck $F" failure "$N"
+if REVIEW_PASSED_MODE=recheck rp "$F" o/r; then fail "(11) the main verdict (blocked re-check 25, beyond 100 newer runs) completed"; fi
+reset; run1 11 "review $A" success "$P"; run1 26 "recheck $A" success "$P"
+REVIEW_PASSED_MODE=recheck rp "$A" o/r || fail "(11) control: a passing first re-check is the main verdict"
+echo "ok (10)(11) - approval needs the run's success; the main verdict reads every page"
 echo 'review first verdict: all checks passed'

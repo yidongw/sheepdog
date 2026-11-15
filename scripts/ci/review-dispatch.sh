@@ -118,6 +118,12 @@ review_verdict_list() {
   review_list 100 databaseId,displayTitle,status,conclusion '.[] | {id: .databaseId, display_title: .displayTitle, status, conclusion}' | jq -c . 2>/dev/null
 }
 REVIEW_GIT_DIR=$SRC
+REVIEW_VERDICT_RANGES=0   # routing only: a block's attested range is never read here (not exported: approval children read it)
+hotfix_pass_confirmed() { # hotfix_pass_confirmed <H> → 0 when review-passed.sh approves H's MAIN verdict (its first completed,
+  # attested "recheck <H>" over the complete trusted listing; the run concluded success; its tests passed): the one
+  # approval answer before a head is marked complete — never this loop's 100-run routing view
+  (cd "$TRUSTED" && REVIEW_PASSED_MODE=recheck bash "$CI_SCRIPTS/review-passed.sh" "$1" "$REPO" >/dev/null 2>&1)
+}
 source "$(dirname "${BASH_SOURCE[0]}")/review-repair.sh"   # reverted: the one repair-revert rule (fix_reverted)
 source "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machinery_files: what a tests-only approval never lands
 
@@ -1207,27 +1213,24 @@ dev_merge_only() { # dev_merge_only <sha> → 0 when <sha> adds nothing to main:
 run_verdict() { # run_verdict <run id> → 0 when a job of that run failed / timed out (the run carries a verdict)
   [ "$(gh api "repos/$REPO/actions/runs/$1/jobs" -q '[.jobs[]? | select(.conclusion == "failure" or .conclusion == "timed_out")] | length' 2>/dev/null)" != 0 ]
 }
-dev_verdict_run() { # dev_verdict_run <sha> <run id> <conclusion> → "<run id> <conclusion>": the run of THE dev verdict of <sha>
-  # (review_first_verdict "review": its FIRST completed, attested verdict — a later rerun, cancelled or not, never hides
-  # or replaces it; re-check of 379550c9a #1), else the given run. One successful run of <sha> needs no lookup (API budget).
-  if [ "$3" = success ] && [ "$(review_list 60 databaseId,displayTitle "[.[] | select(.displayTitle == \"review $1\")] | length")" = 1 ]; then
-    echo "$2 $3"; return 0
-  fi
+dev_verdict_run() { # dev_verdict_run <sha> <run id> <conclusion> → "<run id> <conclusion> <attempt|->": the run AND attempt of
+  # THE dev verdict of <sha> (review_first_verdict "review": its FIRST completed, attested verdict — a later rerun,
+  # cancelled or passing, never hides or replaces it; re-check of 379550c9a #1, review of 9ce09a6e2 #6), else the given run
   if review_first_verdict "$1" review; then
     # the verdict's own attempt decides: a block is failure, a pass / tests-only round success (whatever a later attempt concluded)
-    case "$rfv_kind" in blocked) echo "$rfv_id failure" ;; *) echo "$rfv_id success" ;; esac
+    case "$rfv_kind" in blocked) echo "$rfv_id failure $rfv_attempt" ;; *) echo "$rfv_id success $rfv_attempt" ;; esac
     return 0
   fi
   # no verdict readable yet: the given run — or, when it is a cancel without a verdict, the newest older completed run of
   # the same sha that has one (its findings are routed; approval is review-passed.sh's own reading)
   local id st c
-  if [ "$3" != cancelled ] || run_verdict "$2"; then echo "$2 $3"; return 0; fi
+  if [ "$3" != cancelled ] || run_verdict "$2"; then echo "$2 $3 -"; return 0; fi
   while read -r id st c; do
     [ "$st" = completed ] && [ "$id" != "$2" ] || continue
-    if [ "$c" != cancelled ] || run_verdict "$id"; then echo "$id $c"; return 0; fi
+    if [ "$c" != cancelled ] || run_verdict "$id"; then echo "$id $c -"; return 0; fi
   done < <(review_list 60 databaseId,displayTitle,status,conclusion \
              ".[] | select(.displayTitle==\"review $1\") | \"\(.databaseId) \(.status) \(.conclusion)\"")
-  echo "$2 $3"
+  echo "$2 $3 -"
 }
 dev_round_noop() { # dev_round_noop <sha> <run id> <run conclusion> [clear] → 0 when this round decides no block
   #  · merge-only (dev_merge_only): nothing can be blocked; with "clear" and the current dev HEAD, the dev-wide block
@@ -1986,8 +1989,11 @@ for hsha in $(hotfix_candidates); do
   hv="" hrc=0; review_first_verdict "$hsha" recheck || hrc=$?
   case "$hrc" in
     0) hrun=$rfv_id hv=$rfv_kind hjobs=$rfv_jobs hljobs=$rfv_latest_jobs ;;
-    *) [ "$hrc" = 1 ] || [ -z "${rfv_id:-}" ] || hrun=$rfv_id
-       hjobs=$(review_jobs "$hrun" || echo '{}'); [ -n "$hjobs" ] || hjobs='{}'; hljobs=$hjobs ;;
+    2) # unknown (an earlier run / attempt unreadable or unfinished): judged again next run — never completed from a
+       # later attempt, never routed as a finding (review of 9ce09a6e2 #4)
+       [ -n "${DRY:-}" ] || [ -e "$STATE/sent/$hsha.verdict-unknown-${rfv_id:-x}" ] || { log "HOTFIX ${hsha:0:9}: its main verdict is unknown (run ${rfv_id:-?} attempt ${rfv_attempt:-?} unreadable or unfinished) — judged again next run"; touch "$STATE/sent/$hsha.verdict-unknown-${rfv_id:-x}"; }
+       continue ;;
+    *) hjobs=$(review_jobs "$hrun" || echo '{}'); [ -n "$hjobs" ] || hjobs='{}'; hljobs=$hjobs ;;
   esac
   if ! recheck_reviewed "$hrun" "$hjobs"; then
     if hcov=$(recheck_covering "$hsha"); then
@@ -2001,13 +2007,14 @@ for hsha in $(hotfix_candidates); do
     continue
   fi
   hbase=$(recheck_base "$hrun" "$hsha" "$hjobs")
-  # Same bar as review-passed.sh / autodeploy: the whole run succeeded (status job included) …
-  # (a verdict "pass" is the attested passing step of that attempt; the trusted tests are the run's latest attempt)
+  # Same bar as review-passed.sh / autodeploy: the whole run succeeded (status job included) … and completion itself is
+  # review-passed.sh's own answer for the main verdict (hotfix_pass_confirmed: the complete trusted listing, the run's
+  # conclusion, its tests) — this loop's listing is the newest 100 runs (review of 9ce09a6e2 #5/#7)
   hltests=$(jq '[.jobs[]? | select((.name | sub("^.* / "; "")) == "tests" and .conclusion == "success")] | length' <<<"$hljobs" 2>/dev/null) || hltests=0
   [[ "$hltests" =~ ^[0-9]+$ ]] || hltests=0
   if { [ "$hv" = pass ] || { [ -z "$hv" ] && [ "$(gh api "repos/$REPO/actions/runs/$hrun" -q .conclusion 2>/dev/null)" = success ] \
          && [ "$(jq '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review" and .conclusion == "success") | .steps[] | select((.name | startswith("Review (blocking")) and .conclusion == "success")] | length' <<<"$hjobs")" -gt 0 ]; }; } \
-     && [ "$hltests" -gt 0 ]; then
+     && [ "$hltests" -gt 0 ] && hotfix_pass_confirmed "$hsha"; then
     if [ -n "${DRY:-}" ]; then echo "DRY HOTFIX ${hsha:0:9} on main: review passed"
     else log "HOTFIX ${hsha:0:9} on main: review passed (the controller deploys it)"; preexisting_record "$hsha" "$hrun" "$hjobs"; touch "$STATE/sent/$hsha.hotfix-complete"; fi
   else
@@ -2300,7 +2307,7 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
   thread=$(git -C "$SRC" show -s --format=%B "$sha" | grep -iE '^Thread:' | tail -1 | sed -E 's/^[Tt]hread:[[:space:]]*//' | tr -d '[:space:]' || true)
   url="https://github.com/$REPO/actions/runs/$rid"
   if [ "$ref" = "$DEV" ]; then
-    read -r rid concl <<<"$(dev_verdict_run "$sha" "$rid" "$concl")"; url="https://github.com/$REPO/actions/runs/$rid"
+    read -r rid concl vattempt <<<"$(dev_verdict_run "$sha" "$rid" "$concl")"; url="https://github.com/$REPO/actions/runs/$rid"
     if dev_round_noop "$sha" "$rid" "$concl" clear; then continue; fi   # before any blocked / fixer / overdue decision
   fi   # before any blocked / fixer / overdue decision
   if (cd "$TRUSTED" && bash "$CI_SCRIPTS/review-passed.sh" "$sha" "$REPO" >/dev/null 2>&1); then
@@ -2338,7 +2345,9 @@ Push the fix to the same branch: CI and the review run again, and it is merged a
       git -C "$SRC" worktree remove --force "$WORK" >/dev/null 2>&1 || true
     fi
   elif [ "$ref" = "$DEV" ]; then
-    djobs=$(finding_jobs "$rid") || djobs=""
+    # the verdict's own attempt: its findings, not a later rerun's (review of 9ce09a6e2 #6)
+    if [ "${vattempt:--}" != - ]; then djobs=$(gh api "repos/$REPO/actions/runs/$rid/attempts/$vattempt/jobs" 2>/dev/null) || djobs=""
+    else djobs=$(finding_jobs "$rid") || djobs=""; fi
     f=$(findings "$rid" "$djobs")
     # the reviewer itself did not run: nothing was reviewed — no block, no fixer, no author notice, no revert clock
     if dinfra=$(review_infra_reason "$f"); then dev_infra "$sha" "$rid" "$dinfra"; continue; fi

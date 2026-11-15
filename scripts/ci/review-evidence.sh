@@ -69,15 +69,22 @@ review_verdict_load() { # the trusted listing the verdicts are read from, once p
   else review_verdict_runs=$(review_runs_strict) || return 2; fi
   review_verdict_listed=1
 }
-review_attested_kind() { # <run id> <sha> → prints "<kind> <attestation JSON>" (kind review | tests-only-fix); 1 none / invalid; 2 unreadable
-  local a art d k b
+review_attested_kind() { # <run id> <sha> <attempt> <latest attempt> → prints "<kind> <attestation JSON>" of THAT attempt
+  # (kind review | tests-only-fix); 1 none / invalid; 2 unreadable. review.yml uploads "review-attestation-<attempt>"
+  # with run_id / run_attempt inside (review of 9ce09a6e2 #3: a run-wide artifact let a historical attempt borrow a
+  # later attempt's broader range). A legacy "review-attestation" (pins before f0b03471f's successor; no run fields)
+  # belongs to an attempt only when the run never had another one.
+  local a art d k b at=${3:-1} n=${4:-1}
   a=$(review_api "actions/runs/$1/artifacts") || return 2
-  art=$(jq -r '[.artifacts[]? | select(.name == "review-attestation" and .expired != true)][0].id // empty' <<<"$a" 2>/dev/null) || return 2
+  art=$(jq -r --arg name "review-attestation-$at" --arg at "$at" --arg n "$n" '[.artifacts[]? | select(.expired != true)
+    | select(.name == $name or (.name == "review-attestation" and $at == "1" and $n == "1"))][0].id // empty' <<<"$a" 2>/dev/null) || return 2
   [ -n "$art" ] || return 1
   d=$(mktemp -d) || return 2
   if ! review_api "actions/artifacts/$art/zip" > "$d/a.zip" 2>/dev/null; then rm -rf "$d"; return 2; fi
   if ! unzip -p "$d/a.zip" review-attestation.json > "$d/att.json" 2>/dev/null; then rm -rf "$d"; return 2; fi
-  a=$(jq -c --arg h "$2" 'select(.head == $h and (.base | type == "string") and (.base | test("^[0-9a-f]{40}$")))
+  a=$(jq -c --arg h "$2" --arg id "$1" --arg at "$at" --arg n "$n" 'select(.head == $h and (.base | type == "string") and (.base | test("^[0-9a-f]{40}$")))
+    | select(((.run_id | tostring) == $id and (.run_attempt | tostring) == $at)
+             or (.run_id == null and .run_attempt == null and $at == "1" and $n == "1"))
     | .kind = (.kind // "review")' "$d/att.json" 2>/dev/null) || a=""
   rm -rf "$d"
   [ -n "$a" ] || return 1
@@ -86,8 +93,8 @@ review_attested_kind() { # <run id> <sha> → prints "<kind> <attestation JSON>"
   [ "$b" != "$2" ] && git ${REVIEW_GIT_DIR:+-C "$REVIEW_GIT_DIR"} merge-base --is-ancestor "$b" "$2" 2>/dev/null || return 1
   printf '%s %s\n' "$k" "$a"
 }
-review_attempt_verdict() { # <run id> <attempt> <sha> <jobs answer> <run completed 0|1> → prints "pass <attestation>" | blocked |
-  # "fixes <attestation>"; 1 no verdict; 2 unknown
+review_attempt_verdict() { # <run id> <attempt> <sha> <jobs answer> <run completed 0|1> <latest attempt> → prints
+  # "pass <attestation>" | "blocked [<attestation>]" | "fixes <attestation>"; 1 no verdict; 2 unknown
   local j st jid log k rc
   j=$(jq -c '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] // empty' <<<"$4" 2>/dev/null) || return 2
   if [ -z "$j" ]; then [ "$5" = 1 ] && return 1; return 2; fi   # not created yet: it may still review
@@ -95,7 +102,7 @@ review_attempt_verdict() { # <run id> <attempt> <sha> <jobs answer> <run complet
   st=$(jq -r '[.steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] // ""' <<<"$j") || return 2
   case "$st" in
     success)
-      rc=0; k=$(review_attested_kind "$1" "$3") || rc=$?
+      rc=0; k=$(review_attested_kind "$1" "$3" "$2" "$6") || rc=$?
       [ "$rc" != 2 ] || return 2
       [ "$rc" = 0 ] && [ "${k%% *}" = review ] || return 1   # an unattested pass is no verdict
       echo "pass ${k#* }" ;;
@@ -104,13 +111,18 @@ review_attempt_verdict() { # <run id> <attempt> <sha> <jobs answer> <run complet
       [ -n "$jid" ] || return 2
       log=$(review_api "actions/jobs/$jid/logs") || return 2
       review_blocked_verdict "$4" "$log" || return 1   # a crash / gate failure reviewed nothing
+      # a block needs no artifact to stand; its range (repair scope, a repaired link) comes from this attempt only — read
+      # unless the caller routes only (REVIEW_VERDICT_RANGES=0: the dispatcher, never an approval consumer)
+      if [ "${REVIEW_VERDICT_RANGES:-1}" = 1 ]; then
+        k=$(review_attested_kind "$1" "$3" "$2" "$6") && [ "${k%% *}" = review ] && { echo "blocked ${k#* }"; return 0; }
+      fi
       echo blocked ;;
     skipped)
       [ "$(jq -r '.conclusion // ""' <<<"$j")" = success ] || return 1
       # its trusted tests still running: the round may still become one (unknown, never skipped past)
       [ "$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "tests")][0] | .status // "completed"' <<<"$4" 2>/dev/null)" = completed ] || return 2
       [ "$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "tests")][0].conclusion // ""' <<<"$4" 2>/dev/null)" = success ] || return 1
-      rc=0; k=$(review_attested_kind "$1" "$3") || rc=$?
+      rc=0; k=$(review_attested_kind "$1" "$3" "$2" "$6") || rc=$?
       [ "$rc" != 2 ] || return 2
       [ "$rc" = 0 ] && [ "${k%% *}" = tests-only-fix ] || return 1
       echo "fixes ${k#* }" ;;
@@ -144,7 +156,12 @@ review_first_verdict() { # see above
       else jobs=$(review_api "actions/runs/$id/attempts/$k/jobs") || { rc=2; break 2; }; fi
       # an earlier attempt is over (a rerun exists); only the latest attempt of an unfinished run may still review
       local fin=1; [ "$k" = "$n" ] && fin=$done_
-      v=$(review_attempt_verdict "$id" "$k" "$sha" "$jobs" "$fin") && { rfv_kind=${v%% *}; [ "$v" = "$rfv_kind" ] || rfv_att=${v#* }; rc=0; break 2; }
+      # a run is never evidence about itself: the review job reading this (REVIEW_SELF_RUN="<run id> <attempt>", set by
+      # review.yml's range step) skips its own unfinished attempt — earlier attempts and runs still decide (review of
+      # 9ce09a6e2 #1/#2: the classifier vetoed its own repair-only range as "unknown")
+      if [ "$id $k" = "${REVIEW_SELF_RUN:-}" ] && [ "$fin" = 0 ] \
+         && [ "$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].status // ""' <<<"$jobs")" != completed ]; then continue; fi
+      v=$(review_attempt_verdict "$id" "$k" "$sha" "$jobs" "$fin" "$n") && { rfv_kind=${v%% *}; [ "$v" = "$rfv_kind" ] || rfv_att=${v#* }; rc=0; break 2; }
       [ $? = 1 ] || { rc=2; break 2; }
     done
   done < <(jq -c --arg r "review $sha" --arg c "recheck $sha" --arg m "$mode" '

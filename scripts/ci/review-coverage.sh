@@ -25,7 +25,9 @@ review_verdict() { # <run id> -> pass|blocked; setup failures, cancellation and 
 review_attestation() { # <run id> <expected head> -> validated JSON; missing/expired/malformed fails closed
   local artifacts art dir att
   artifacts=$(review_api "actions/runs/$1/artifacts") || return 1
-  art=$(jq -r '[.artifacts[]? | select(.name == "review-attestation" and .expired != true)][0].id // empty' <<<"$artifacts") || return 1
+  # exactly one attestation artifact (legacy "review-attestation" or per-attempt "review-attestation-<n>"): with several
+  # attempts' artifacts the run alone does not say which range a verdict had
+  art=$(jq -r '[.artifacts[]? | select((.name | test("^review-attestation(-[0-9]+)?$")) and .expired != true)] | if length == 1 then .[0].id else empty end' <<<"$artifacts") || return 1
   [ -n "$art" ] || return 1
   dir=$(mktemp -d) || return 1
   if review_api "actions/artifacts/$art/zip" > "$dir/a.zip" \
@@ -95,7 +97,10 @@ review_link() { # <run id> <link head> <anchor> <candidate head> <depth> [<its v
 }
 _review_link() {
   local att v m k am
-  att=${7:-}; [ -n "$att" ] || att=$(review_attestation "$1" "$2") || return 1
+  # the attestation of the verdict's own attempt (review_first_verdict); a verdict without one links nothing (its
+  # producing attempt cannot be established: review of 9ce09a6e2 #3). Without a verdict (direct callers): the run's.
+  att=${7:-}
+  if [ -z "$att" ]; then [ -z "${6:-}" ] || return 1; att=$(review_attestation "$1" "$2") || return 1; fi
   k=$(jq -r .kind <<<"$att")
   case "$k" in
     review)
