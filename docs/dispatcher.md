@@ -41,9 +41,8 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   never hides an older qualifying one), and its tests are not cancelled when the review fails. It lands only after the
   approving review attempt's main findings are recorded (`review-passed.sh` names that attempt in `REVIEW_APPROVAL_OUT`;
   the classification and the record come from one read of its jobs and log; any read or write failure → not landed that
-  run, retried). Only sheepdog's own contract scripts approve main-only: a repository that still uses repository-local
-  contract scripts (no `.github/sheepdog.yml`) gets plain passes only, and a head of it blocked only by main findings is
-  an ordinary blocked head — its findings are routed like any other. There is no cross-chain "same problem" matching: main's own chain owns the finding.
+  run, retried). Receipt-capable checkers support main-only approvals in both bundled and repository-local contract
+  scripts. Older checkers must pass with `REVIEW_MAIN_FINDINGS=0` before landing without a receipt. There is no cross-chain "same problem" matching: main's own chain owns the finding.
 - **Open findings**: findings whose fix rounds are spent are kept in `$STATE/open-findings.log`, which the review job
   passes to the reviewer (`open-findings-file`) so repeats are recognised as pre-existing.
 
@@ -108,6 +107,14 @@ every run, used for ancestry checks). For a repository whose main has `.github/s
 copies (next to the dispatcher); for a repository not yet migrated it keeps using the repository's
 `scripts/ci/` copies. Both kinds of runs are readable by sheepdog's scripts (job names with or without the
 `<caller job> / ` prefix).
+
+`REVIEW_APPROVAL_PROTOCOL_OUT=<file>` declares `receipt-v1` even when approval fails. The dispatcher also accepts older
+receipt-capable checkers that declare support through `REVIEW_APPROVAL_OUT=<file>`, which contains
+`<run id> <run attempt> <review job id> <pass|main>`; a `main` approval lands only after that attempt's findings are
+recorded. If a checker approves without writing a receipt, the dispatcher requires a successful check with
+`REVIEW_MAIN_FINDINGS=0` before accepting a plain pass, and keeps main-only approval disabled when invoking its merge
+script. A nonempty but unreadable receipt is refused. A legacy checker that refuses approval keeps ordinary blocked-head
+routing; a declared receipt-capable checker retains the main/dev split when approval evidence is temporarily unavailable.
 
 ## A host wrapper (example)
 
