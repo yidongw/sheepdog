@@ -8,7 +8,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # a helper the suite did not extract fails it (review of 96c16d11a #3: a missing findings / review_infra_reason made the negated
 # completion check pass silently)
 command_not_found_handle() { echo "FAIL: command not found: $1 (a helper the test did not extract or stub)" >&2; kill -TERM $$ 2>/dev/null; exit 127; }
-for fn in review_job_state recheck_infra_failed recheck_reviewed main_infra infra_alert infra_episode_open findings findings_cap review_infra_reason; do
+for fn in review_job_state recheck_infra_failed recheck_reviewed main_infra infra_alert infra_episode_open findings findings_cap gate_section review_infra_reason; do
   eval "$(sed -n "/^$fn() {/,/^}/p" "$D")"
   declare -F "$fn" >/dev/null || fail "missing $fn"
 done
@@ -38,7 +38,7 @@ recheck_covering() { return 1; }  # no later completed review covers this episod
 log() { printf '%s\n' "$*" >> "$T/log"; }
 REVIEW_LOG_11='##[error]run-1-only'
 ghm() { case "$*" in
-  *actions/jobs/11/logs) printf '2026-11-14T00:00:00Z %s\n' "$REVIEW_LOG_11" ;;
+  *actions/jobs/11/logs) sed 's/^/2026-11-14T00:00:00Z /' <<<"$REVIEW_LOG_11" ;;
   *actions/jobs/21/logs) printf '2026-11-14T00:00:00Z ##[error]run-2-only\n' ;;
   *) fail "unexpected API request: $*" ;;
 esac; }
@@ -78,7 +78,7 @@ if [ "$mode" = all ] || [ "$mode" = completion ]; then
   REVIEW_LOG_11='review-gate: reviewer failed: spawn E2BIG'
   if recheck_reviewed 1 "$j"; then fail 'a run whose reviewer failed to start counted as reviewed'; fi
   [ "$(recheck_infra_failed 1 "$j")" = 'Review (blocking; x) — reviewer failed: spawn E2BIG' ] || fail "recheck_infra_failed: $(recheck_infra_failed 1 "$j")"
-  REVIEW_LOG_11=$'review-gate: BLOCKED #1 regression [should]: x\nevidence: a.ts:1'
+  REVIEW_LOG_11=$'review-gate: reviewing a..b\nreview-gate: BLOCKED #1 regression [should]: x\nevidence: a.ts:1'
   recheck_reviewed 1 "$j" || fail 'a run with a finding did not count as reviewed'
   REVIEW_LOG_11='##[error]run-1-only'
   FAIL_ALL=1

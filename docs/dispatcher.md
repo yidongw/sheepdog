@@ -93,13 +93,17 @@ itself, [self-review.md](self-review.md)), `FIXER_PROVIDER` / `FIXER_MODEL`, `ST
 Discord thread ids, default `http://localhost:3011`), `FIXER_WT_ROOT`, `FIX_ROUNDS_MAX`, `FIX_ROUNDS_MAX_RISK`,
 `DEV_REVERT_AFTER_SEC`, `AUTHOR_FIX_WINDOW_SEC`, `MAIN_OWNER_CLAIM_SEC`.
 
-## Contract scripts during a migration
+## Contract scripts
 
-The dispatcher calls `review-passed.sh` and `merge-branch.sh` inside `$STATE/trusted` (the repository's main, refreshed
-every run, used for ancestry checks). For a repository whose main has `.github/sheepdog.yml` it uses sheepdog's own
-copies (next to the dispatcher); for a repository not yet migrated it keeps using the repository's
-`scripts/ci/` copies. Both kinds of runs are readable by sheepdog's scripts (job names with or without the
-`<caller job> / ` prefix).
+The dispatcher calls `review-passed.sh`, `merge-branch.sh` and `review-covered.sh` inside `$STATE/trusted` (the
+repository's main, refreshed every run, used for ancestry checks), always sheepdog's own copies next to the dispatcher:
+one coverage contract for the merge train, the branch-head landing and the devfix landing. A repository's own
+`scripts/ci/` copies are never the approval authority (review of ee6b3ea74 #3/#6). Runs of both job-name forms are
+readable (with or without the `<caller job> / ` prefix).
+
+Findings are read only from the trusted gate's own section of a review job log: the lines after the last
+`review-gate: reviewing` marker (without one, only commit-gate errors and the gate's infrastructure lines) — output
+printed before the reviewer started never routes a fixer or selects a revert (review of ee6b3ea74 #1).
 
 ## A host wrapper (example)
 

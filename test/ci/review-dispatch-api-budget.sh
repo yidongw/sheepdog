@@ -138,7 +138,7 @@ R=.github/workflows/review.yml C=.github/workflows/ci.yml
 run "recheck $H1" $R workflow_run main "$H1" completed success; RH1=$id; attest $id "$H1" "$A"
 printf 'review-range: %s %s\nreview-gate: PASS\n' "$A" "$H1" > "$FX/log-${RH1}2.txt"
 run "recheck $H2" $R workflow_run main "$H2" completed failure; RH2=$id; attest $id "$H2" "$H1"
-printf 'review-range: %s %s\nreview-gate: ROUTE author — x\nreview-gate: FINDING #1 route=author commit=%s — x\nreview-gate: BLOCKED #1 regression [should]: two drops rows\nevidence: f-h2:1 x\n' "$H1" "$H2" "$H2" > "$FX/log-${RH2}2.txt"
+printf 'review-range: %s %s\nreview-gate: reviewing a..b\nreview-gate: ROUTE author — x\nreview-gate: FINDING #1 route=author commit=%s — x\nreview-gate: BLOCKED #1 regression [should]: two drops rows\nevidence: f-h2:1 x\n' "$H1" "$H2" "$H2" > "$FX/log-${RH2}2.txt"
 run "review $D1" $R workflow_run main "$D1" completed success; attest $id "$D1" "$H2"
 printf 'review-range: %s %s\nreview-gate: PASS\n' "$H2" "$D1" > "$FX/log-${id}2.txt"
 run "review $D2" $R workflow_run main "$D2" in_progress null

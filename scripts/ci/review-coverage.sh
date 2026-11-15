@@ -57,6 +57,9 @@ review_clean_merge() {
 #    producer (hotfix-review-base.sh) sets neither: a tests-only round is never a main base — main re-checks the fix.
 #  · the attestation's "mainside" (a dev range that brought main commits in and did not review them): that main commit
 #    must be covered in its own right (main's reviews, or below the anchor).
+#  · historical main-only approvals (the rolled-back main-culprit feature, 11-14/15) are no links: coverage is needed only
+#    from the deployed sha (prod) or main forward, and every head landed that way is already below it — tralyx
+#    1f341ae94 / adf919018 are in its deployed tag, sheepdog 11638c93f / 84ada34cc on its main (review of ee6b3ea74 #7).
 review_fix_links=""
 review_fix_round() { # <run id> -> 0 when it is a completed tests-only fix round: review job succeeded, blocking step
   # skipped, and its trusted tests passed (a red round repaired nothing yet: review of fb6bb396e #3)

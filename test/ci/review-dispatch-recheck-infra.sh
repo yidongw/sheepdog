@@ -17,7 +17,7 @@ cd "$(dirname "$0")/../.."
 D=scripts/ci/review-dispatch.sh
 fail() { echo "FAIL: $*" >&2; exit 1; }
 fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D"; done; }
-eval "$(fns findings findings_cap thread_of fixer_receipt_thread norm_tid finding_blocks finding_meta finding_route review_round_route route_reason \
+eval "$(fns findings findings_cap gate_section thread_of fixer_receipt_thread norm_tid finding_blocks finding_meta finding_route review_round_route route_reason \
   attribute_finding attribution findings_subset att_of culprit_lines named_files repair_effective fix_reverted hotfix_fix_pushed \
   author_turn author_fixed fyi_author or_supervisor fix_of)"
 eval "$(fns review_list)"
@@ -74,7 +74,7 @@ addrun() { # addrun <id> <sha> <kind: pass|range|gates|blocked|running>
            echo failure > "$T/concl-$1"; printf '2026-11-14T00:00:00Z [gates ERROR] commit abc missing Verify:\n2026-11-14T00:00:01Z ##[error]Process completed with exit code 3.\n' > "$T/log-$1" ;;
     blocked) echo '{"jobs":[{"name":"tests","id":'"$1"'0,"conclusion":"success"},{"name":"review","id":'"$1"'1,"conclusion":"failure","steps":[{"name":"Reviewed range","conclusion":"success"},{"name":"Review (blocking; x)","conclusion":"failure"}]}]}' > "$T/jobs-$1"
              echo failure > "$T/concl-$1"
-             printf '2026-11-14T00:00:00Z review-range: %s %s\n2026-11-14T00:00:00Z review-gate: FINDING #1 route=fixer commit=- — x\n2026-11-14T00:00:00Z review-gate: BLOCKED #1 regression [should]: c drops rows\n2026-11-14T00:00:00Z evidence: src/c.ts:1 x\n' "$4" "$2" > "$T/log-$1" ;;
+             printf '2026-11-14T00:00:00Z review-range: %s %s\n2026-11-14T00:00:00Z review-gate: reviewing a..b\n2026-11-14T00:00:00Z review-gate: FINDING #1 route=fixer commit=- — x\n2026-11-14T00:00:00Z review-gate: BLOCKED #1 regression [should]: c drops rows\n2026-11-14T00:00:00Z evidence: src/c.ts:1 x\n' "$4" "$2" > "$T/log-$1" ;;
     reviewer) echo '{"jobs":[{"name":"tests","id":'"$1"'0,"conclusion":"success"},{"name":"review","id":'"$1"'1,"conclusion":"failure","steps":[{"name":"Reviewed range","conclusion":"success"},{"name":"Review (blocking; x)","conclusion":"failure"}]}]}' > "$T/jobs-$1"
               echo failure > "$T/concl-$1"
               printf '2026-11-14T00:00:00Z review-range: %s %s\n2026-11-14T00:00:00Z review-gate: prior round — fixes of abc\n2026-11-14T00:00:00Z review-gate: reviewer failed: spawn E2BIG\n2026-11-14T00:00:01Z ##[error]Process completed with exit code 2.\n' "$4" "$2" > "$T/log-$1" ;;

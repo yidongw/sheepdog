@@ -17,7 +17,7 @@ SRC=$T/src STATE=$T/state MAIN=main DEV=dev REPO=test/repo FIXER_GATE=$T/state/f
 mkdir -p "$STATE/sent" "$FIXER_GATE/queue"
 LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 source scripts/ci/review-notify.sh   # digest_add / digest_file
-eval "$(fns findings findings_cap thread_of fixer_receipt_thread norm_tid finding_blocks finding_meta finding_route attribute_finding attribution findings_subset \
+eval "$(fns findings findings_cap gate_section thread_of fixer_receipt_thread norm_tid finding_blocks finding_meta finding_route attribute_finding attribution findings_subset \
   att_of named_files repair_effective fix_reverted fix_of launch_failed)"
 eval "$(fns review_list)"   # the trusted-run filter (review-runs.sh rule) over the fake run list
 sect() { python3 - "$D" "$1" "$2" <<'PY'
@@ -61,7 +61,7 @@ gh_raw() { case "$*" in
   "run list"*) cat "$T/runs.json" ;;
   *runs/6/jobs*|*runs/8/jobs*) if [ -e "$T/f-passed" ]; then echo "$passed"; else echo "$blocked"; fi ;;
   *runs/7/jobs*) echo '{"jobs":[{"name":"tests","id":70,"conclusion":"success"},{"name":"review","id":71,"conclusion":"skipped","steps":[]}]}' ;;
-  *jobs/61/logs*) printf '2026-11-13T00:00:00Z review-range: %s %s\n2026-11-13T00:00:00Z review-gate: FINDING #1 route=fixer commit=- — x\n2026-11-13T00:00:00Z review-gate: BLOCKED #1 regression [should]: s drops rows\n2026-11-13T00:00:00Z evidence: src/s.ts:1 x\n' "$X" "$F" ;;
+  *jobs/61/logs*) printf '2026-11-13T00:00:00Z review-range: %s %s\n2026-11-13T00:00:00Z review-gate: reviewing a..b\n2026-11-13T00:00:00Z review-gate: FINDING #1 route=fixer commit=- — x\n2026-11-13T00:00:00Z review-gate: BLOCKED #1 regression [should]: s drops rows\n2026-11-13T00:00:00Z evidence: src/s.ts:1 x\n' "$X" "$F" ;;
   *"runs/6 "*|*"runs/8 "*) if [ -e "$T/f-passed" ]; then echo '{"conclusion":"success"}'; else echo '{"conclusion":"failure"}'; fi ;;
   *"runs/7 "*) echo '{"conclusion":"success"}' ;;
   *) echo '{}' ;; esac; }
