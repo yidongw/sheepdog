@@ -341,6 +341,21 @@ reset_runs; run 11 "review $A" success "$P"; run 12 "review $X" forged "$A"
 out=$(cd "$T/src" && PATH=$T/bin:$PATH GH_TOKEN=x REPO=o/r bash "$ROOT/scripts/ci/prior-findings.sh" "$X" "$F" 2>/dev/null)
 grep -q forged <<<"$out" && fail "(k) prior-findings.sh attached the forged line"
 echo "ok (k) - forged pre-reviewer verdict lines are no verdict for any reader"
+# (m) review of foxhole-backend 4162ba2c3 #2: a newer BLOCKED review of A vetoes an older passing run of A
+reset_runs; run 11 "review $A" success "$P"; run 12 "review $X" failure "$A"; run 13 "review $N" success "$X"; run 14 "review $F" skipped "$N"
+rp "$F" o/r "$P" || fail "(m) control: F not approved"
+reset_runs; run 15 "review $A" failure "$P"; run 11 "review $A" success "$P"; run 12 "review $X" failure "$A"; run 13 "review $N" success "$X"; run 14 "review $F" skipped "$N"
+if rp "$F" o/r "$P"; then fail "(m) an older passing run of A covered it although its newer review blocked (unrepaired)"; fi
+# … and the newest verdict wins the other way: a newer pass of A stands over an older block
+reset_runs; run 17 "review $A" success "$P"; run 15 "review $A" failure "$P"; run 12 "review $X" failure "$A"; run 13 "review $N" success "$X"; run 14 "review $F" skipped "$N"
+rp "$F" o/r "$P" || fail "(m) a newer passing review of A did not stand over its older block"
+# (n) review of foxhole-backend 4162ba2c3 #1: X blocked; F repairs X but F's own review blocked; FF repairs X only →
+# F's block is unrepaired inside X..FF: no tests-only round
+g checkout -q -b nn "$X"; F1=$(c x "F1: repair of X (its own review blocked)" "Review-Fix-Of: $X"); FF=$(c x "FF: another repair of X" "Review-Fix-Of: $X"); g checkout -q dev
+reset_runs; run 11 "review $A" success "$P"; run 12 "review $X" failure "$A"
+base --only-fixes "$X" "$FF" || fail "(n) control: two repairs of X are not tests-only"
+run 16 "review $F1" failure "$X"
+if base --only-fixes "$X" "$FF"; then fail "(n) a range over F1's unrepaired block was tests-only"; fi
 # (l) review of 39380773c #1/#2: the strict listing behind review_recheck_blocked — 2,000 completed runs (20 full pages,
 # the evidence horizon) are no failure; an unreadable page is (unknown → blocked → no tests-only approval)
 reset_runs; runs_dev; run 14 "review $F" skipped "$N"

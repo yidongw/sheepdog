@@ -151,7 +151,7 @@ if base --only-fixes "$X" "$F"; then echo "fix of a review that passed skipped" 
 reset_runs; run 21 "review $X" failure; run 22 "review $F" failure
 if base --only-fixes "$X" "$N2"; then echo "x" >&2; exit 1; fi
 g checkout -q -b fixfix "$F"; FF=$(c a "fix of X, more" "Review-Fix-Of: $X")
-base --only-fixes "$X" "$FF"                                 # repairs only: tests-only (F's own block is approval's)
+if base --only-fixes "$X" "$FF"; then echo "a fix whose own review blocked (unrepaired) skipped" >&2; exit 1; fi
 FF2=$(c a "fix of F" "Review-Fix-Of: $F")
 base --only-fixes "$X" "$FF2"                                # once F is repaired, the fixes are fixes again
 g checkout -q -b fake "$H"; FK=$(c a "first contribution" "Review-Fix-Of: $P")

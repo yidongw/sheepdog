@@ -72,18 +72,22 @@ review_fix_round() { # <run id> -> 0 when it is a completed tests-only fix round
     | [.steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] == "skipped")
     and ([.jobs[]? | select((.name | sub("^.* / "; "")) == "tests")][0].conclusion == "success")' <<<"$jobs" >/dev/null 2>&1
 }
-review_recheck_blocked() { # <sha> <candidate head> [titles: recheck|any] -> 0 when a completed review of <sha> ("recheck
-  # <sha>"; with "any" also "review <sha>") BLOCKED and no effective repair of it is on <candidate head>: main's safety
+review_recheck_blocked() { # <sha> <candidate head> [titles: recheck|any] -> 0 when the NEWEST completed review of <sha>
+  # ("recheck <sha>"; with "any" also "review <sha>") BLOCKED and no effective repair of it is on <candidate head>: main's safety
   # net for a tests-only fix has spoken against it, or (any) <sha> is an explicitly blocked commit
   # Fail closed: a run whose verdict cannot be read, or no readable run listing at all, counts as blocked.
   local id v rc
   [ -n "${review_strict_runs:-}" ] || review_strict_runs=$(review_runs_strict completed) || { review_strict_runs=""; return 0; }
   [ -n "$review_strict_runs" ] || return 0
   for id in $(jq -r --arg r "recheck $1" --arg a "${3:+review $1}" 'select(.display_title == $r or .display_title == $a) | .id' <<<"$review_strict_runs"); do
+    # the NEWEST completed verdict wins (the listing is newest first): a newer pass stands over an older block, a newer
+    # block over an older pass unless an effective repair is on the head (review of foxhole-backend 4162ba2c3 #2)
     rc=0; v=$(review_verdict "$id" 2>/dev/null) || rc=$?
     if [ "$rc" = 2 ]; then return 0; fi
-    [ "$v" = blocked ] || continue
-    repaired "$1" "$2" || return 0
+    case "$v" in
+      pass) return 1 ;;
+      blocked) if repaired "$1" "$2"; then return 1; else return 0; fi ;;
+    esac   # no verdict (cancelled, setup failure, skipped): the next older run decides
   done
   return 1
 }
@@ -132,6 +136,10 @@ _review_covered() {
   git merge-base --is-ancestor "$b" "$d" 2>/dev/null && return 0
   [ "$n" -lt 40 ] || return 1
   [ -n "${review_completed_runs:-}" ] || review_completed_runs=$(review_runs completed)
+  # one verdict precedence for every link of <b>: a completed review of <b> that BLOCKED and is not repaired on the head
+  # vetoes every other run of <b> (an older pass, a tests-only round) and its structural coverage (review of
+  # foxhole-backend 4162ba2c3 #2). The dev range producer (REVIEW_LINK_PRODUCER) only asks for readable proof.
+  if [ "${REVIEW_LINK_PRODUCER:-0}" != 1 ] && review_recheck_blocked "$b" "$h" any; then return 1; fi
   for id in $(jq -r --arg a "review $b" --arg r "recheck $b" '
     select(.display_title == $a or .display_title == $r) | .id' <<<"$review_completed_runs"); do
     review_link "$id" "$b" "$d" "$h" "$((n + 1))" && return 0
