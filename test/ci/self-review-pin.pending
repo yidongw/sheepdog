@@ -2,3 +2,4 @@
 #   <suite file name> <the 40-char pin sha> <the protection that is not in the pinned snapshot yet>
 # Allowed only for that exact pin: a pin bump runs every suite against the new pin again. Keep this list empty whenever
 # the newest reviewed main carries the protection — bump the pin instead (docs/self-review.md).
+review-runs-pagination.sh 6d73688be52a41e227cee3f820e6f5b126d4fd26 complete strict pagination past a full twentieth page (main review of 39380773c findings 1 and 2); the pin bump follows this Hotfix
