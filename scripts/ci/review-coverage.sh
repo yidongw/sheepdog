@@ -73,23 +73,39 @@ review_fix_round() { # <run id> -> 0 when it is a completed tests-only fix round
     and ([.jobs[]? | select((.name | sub("^.* / "; "")) == "tests")][0].conclusion == "success")' <<<"$jobs" >/dev/null 2>&1
 }
 review_recheck_blocked() { # <sha> <candidate head> [titles: recheck|any] -> 0 when the NEWEST completed review of <sha>
-  # ("recheck <sha>"; with "any" also "review <sha>") BLOCKED and no effective repair of it is on <candidate head>: main's safety
-  # net for a tests-only fix has spoken against it, or (any) <sha> is an explicitly blocked commit
-  # Fail closed: a run whose verdict cannot be read, or no readable run listing at all, counts as blocked.
-  local id v rc
+  # ("recheck <sha>"; with "any" also "review <sha>") BLOCKED and no effective repair of it is on <candidate head> — the
+  # one verdict precedence for every coverage link (review of foxhole-backend 4162ba2c3 #2, sheepdog 04d883525 #1).
+  # "Newest" is the review job's completion time (completed_at; a rerun's latest attempt is its run's verdict), never
+  # the listing order. Fail closed: an unreadable listing, jobs answer or log, or — when several runs carry a verdict —
+  # a missing or tied newest completion time, counts as blocked.
+  local id jobs j st t v log best_t="" best_v="" tie=0 unknown=0 n=0
   [ -n "${review_strict_runs:-}" ] || review_strict_runs=$(review_runs_strict completed) || { review_strict_runs=""; return 0; }
   [ -n "$review_strict_runs" ] || return 0
   for id in $(jq -r --arg r "recheck $1" --arg a "${3:+review $1}" 'select(.display_title == $r or .display_title == $a) | .id' <<<"$review_strict_runs"); do
-    # the NEWEST completed verdict wins (the listing is newest first): a newer pass stands over an older block, a newer
-    # block over an older pass unless an effective repair is on the head (review of foxhole-backend 4162ba2c3 #2)
-    rc=0; v=$(review_verdict "$id" 2>/dev/null) || rc=$?
-    if [ "$rc" = 2 ]; then return 0; fi
-    case "$v" in
-      pass) return 1 ;;
-      blocked) if repaired "$1" "$2"; then return 1; else return 0; fi ;;
-    esac   # no verdict (cancelled, setup failure, skipped): the next older run decides
+    jobs=$(review_api "actions/runs/$id/jobs") || return 0
+    j=$(jq -c '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] // empty' <<<"$jobs") || return 0
+    [ -n "$j" ] || continue
+    st=$(jq -r '[.steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] // ""' <<<"$j") || return 0
+    case "$st" in
+      success) v=pass ;;
+      failure)
+        log=$(review_api "actions/jobs/$(jq -r '.id // empty' <<<"$j")/logs") || return 0
+        if review_blocked_verdict "$jobs" "$log"; then v=blocked; else continue; fi ;;   # a crash is no verdict
+      *) continue ;;
+    esac
+    n=$((n + 1))
+    t=$(jq -r '.completed_at // ""' <<<"$j")
+    if [ -z "$t" ] || [ "$t" = null ]; then unknown=1; continue; fi
+    if [ -z "$best_t" ] || [[ "$t" > "$best_t" ]]; then best_t=$t; best_v=$v; tie=0
+    elif [ "$t" = "$best_t" ]; then tie=1; [ "$v" = "$best_v" ] || best_v=blocked; fi
   done
-  return 1
+  [ "$n" -gt 0 ] || return 1
+  if [ "$n" -eq 1 ] && [ "$unknown" = 1 ]; then best_v=$v; fi   # one verdict: no order needed
+  if [ "$n" -gt 1 ] && { [ "$unknown" = 1 ] || [ "$tie" = 1 ]; }; then best_v=blocked; fi
+  case "$best_v" in
+    pass) return 1 ;;
+    *) if repaired "$1" "$2"; then return 1; else return 0; fi ;;
+  esac
 }
 # review_fix_links is transactional: a link (or a covered alternative) that fails restores what it had appended
 review_link() { # <run id> <link head> <anchor> <candidate head> <depth>
