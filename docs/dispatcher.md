@@ -32,12 +32,18 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   The supervisor is told once per failed review attempt (notice key `infra.dev.<run>.<review job id>`: a rerun is a new
   job; repeated scans never repeat it; an undelivered alert is retried, a gone supervisor falls back to the CI owner),
   with the `gh run rerun <id> --failed` command; the next push to dev re-triggers the review too.
+  Unavailable jobs/logs, empty logs and logs containing only route metadata or notes follow the same hold: neither the
+  head loop nor the train starts repair routing or a clock without blocking finding evidence. An existing clock is left
+  alone and cannot trigger a revert on that scan. Findings use one successful log read, bounded to the trusted gate section; partial failed reads and candidate text before that boundary never drive repair or rollback.
 - **Open findings**: findings whose fix rounds are spent are kept in `$STATE/open-findings.log`, which the review job
   passes to the reviewer (`open-findings-file`) so repeats are recognised as pre-existing.
 - **Main-side findings on dev**: a dev review blocks on every finding it reports, including one whose culprit commit is
-  already on the default branch. A main-side finding that keeps blocking dev is escalated to the owner; there is no
-  automatic bypass (owner decision 2026-11-15: the main-culprit landing of `a036e7a60` and its successors was rolled
-  back).
+  already on the default branch. When a blocking finding's reported culprit resolves to a commit on main, both the
+  head loop and the train hold the **whole round**, including mixed main/dev findings, and notify the supervisor for
+  owner action. No dev repair, new block clock, revert warning or automatic revert runs for it, even with an old overdue
+  clock: reverting a dev edit in the same file cannot remove main's defect. The owner repairs main through its review
+  chain and reruns the dev review. The head stays unlanded; this never approves or discards findings (owner decision
+  2026-11-15: the main-culprit landing of `a036e7a60` and its successors was rolled back).
 
 ## GitHub API budget
 

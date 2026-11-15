@@ -22,7 +22,7 @@ mkdir -p "$STATE/sent" "$TRUSTED/scripts/ci" "$OUTBOX"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$TRUSTED/scripts/ci/review-passed.sh"   # no round here passed
 LOG=$STATE/dispatch.log; log() { echo "$*" >> "$LOG"; }
 fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D"; done; }
-eval "$(fns dev_round_noop dev_merge_only run_verdict dev_verdict_run named_files review_infra_reason dev_infra infra_alert)"
+eval "$(fns dev_round_noop dev_merge_only run_verdict dev_verdict_run named_files dev_main_hold review_infra_reason dev_infra infra_alert)"
 for f in review_infra_reason dev_infra infra_alert; do declare -F "$f" >/dev/null || fail "missing $f"; done
 review_list() { gh run list -R "$REPO" -w review.yml -L "$1" --json "$2" -q "$3"; }
 loop=$(python3 - "$D" <<'PY'
@@ -74,10 +74,11 @@ review_infra_reason "$E2BIG" >/dev/null || fail "reviewer failed: not infra"
 test "$(review_infra_reason "$E2BIG")" = "reviewer failed: spawn E2BIG" || fail "the reason: $(review_infra_reason "$E2BIG")"
 review_infra_reason "review-gate: reviewer timed out: codex timed out after 3600000ms" >/dev/null || fail "timeout: not infra"
 review_infra_reason "review-gate: no parseable VERDICT line (not a pass). Reviewer output tail:" >/dev/null || fail "no verdict: not infra"
-for t in "$E2BIG"$'\ntrusted tests job: failure' "$E2BIG"$'\nreview-gate: BLOCKED #1 regression [should]: x' "[gates abc ERROR] missing Verify:"$'\n'"$E2BIG" "review-gate: BLOCKED #1 regression [should]: x" ""; do
+for t in "$E2BIG"$'\ntrusted tests job: failure' "$E2BIG"$'\nreview-gate: BLOCKED #1 regression [should]: x' "[gates abc ERROR] missing Verify:"$'\n'"$E2BIG" "review-gate: BLOCKED #1 regression [should]: x"; do
   if review_infra_reason "$t" >/dev/null; then fail "classified as infrastructure: $t"; fi
 done
-echo 'classifier: reviewer failures only, never next to a finding, failed tests or gates errors'
+review_infra_reason '' >/dev/null || fail 'empty finding evidence is not held'
+echo 'classifier: missing evidence or reviewer failures, never next to a finding, failed tests or gates errors'
 
 # 1. the dev head's review: reviewer failed → no block, no clock, supervisor once (head loop and train scan agree)
 RUNS="101 completed failure"; JOBS_OF[101]=$(failjobs 1011); FIND_OF[101]=$E2BIG; TRAIN="101 review $S1"
