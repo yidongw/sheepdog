@@ -199,6 +199,10 @@ only_fixes() { # only_fixes <base> <head>
       fi
     done
     [ "$hit" = 1 ] || { rm -f "$TMPF"*; return 1; }
+    # a commit of the round whose OWN review blocked (e.g. a repair that was itself reviewed and blocked) stays blocked
+    # until it is repaired on the head: no tests-only round over it (review of foxhole-backend 4162ba2c3 #1)
+    verdict_m "$c"; v=$vm
+    if [ "${v%% *}" = blocked ] && ! repaired "$c" "$2"; then rm -f "$TMPF"*; return 1; fi
     touches_only "$c" "$TMPF.allowed" || { echo "dev-review-base: ${c:0:12} changes lines outside the blocked range it repairs — a full review" >&2; rm -f "$TMPF"*; return 1; }
     echo "$c" >> "$TMPF.allowed"
     n=$((n + 1))
