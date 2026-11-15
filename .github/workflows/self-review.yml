@@ -37,7 +37,7 @@ concurrency:
 
 jobs:
   sheepdog:
-    uses: yidongw/sheepdog/.github/workflows/review.yml@12fe197397098249130932fa383a43b880382877
+    uses: yidongw/sheepdog/.github/workflows/review.yml@ac73d21d3d7e0f9f882fc25dd2b74115312cc8a9
     with:
       tests-runs-on: '["ubuntu-24.04"]'
       review-runs-on: '["self-hosted","cx43","sheepdog-review"]'
