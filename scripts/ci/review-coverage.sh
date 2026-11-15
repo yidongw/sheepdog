@@ -58,20 +58,31 @@ review_clean_merge() {
 #  · the attestation's "mainside" (a dev range that brought main commits in and did not review them): that main commit
 #    must be covered in its own right (main's reviews, or below the anchor).
 review_fix_links=""
-review_fix_round() { # <run id> -> 0 when it is a completed tests-only fix round: review job succeeded, blocking step skipped
+review_fix_round() { # <run id> -> 0 when it is a completed tests-only fix round: review job succeeded, blocking step
+  # skipped, and its trusted tests passed (a red round repaired nothing yet: review of fb6bb396e #3)
   local jobs
   jobs=$(review_api "actions/runs/$1/jobs") || return 1
-  jq -e 'select(any(.jobs[]?; (.name | sub("^.* / "; "")) == "tests" and .conclusion == "success"))
-    | [.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] | select(.conclusion == "success")
-    | [.steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] == "skipped"' <<<"$jobs" >/dev/null 2>&1
+  jq -e '([.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0] | select(.conclusion == "success")
+    | [.steps[]? | select(.name | startswith("Review (blocking")) | .conclusion][0] == "skipped")
+    and ([.jobs[]? | select((.name | sub("^.* / "; "")) == "tests")][0].conclusion == "success")' <<<"$jobs" >/dev/null 2>&1
 }
-review_link() {
-  local saved_links=$review_fix_links
-  if _review_link "$@"; then return 0; fi
-  review_fix_links=$saved_links
+review_recheck_blocked() { # <sha> <candidate head> -> 0 when main's re-check of <sha> completed and BLOCKED and no
+  # effective repair of it is on <candidate head>: main's safety net for a tests-only fix has spoken against it
+  local id
+  [ -n "${review_completed_runs:-}" ] || review_completed_runs=$(review_runs completed)
+  for id in $(jq -r --arg r "recheck $1" 'select(.display_title == $r) | .id' <<<"$review_completed_runs"); do
+    [ "$(review_verdict "$id" 2>/dev/null || true)" = blocked ] || continue
+    repaired "$1" "$2" || return 0
+  done
   return 1
 }
-_review_link() { # <run id> <link head> <anchor> <candidate head> <depth>
+# review_fix_links is transactional: a link (or a covered alternative) that fails restores what it had appended
+review_link() { # <run id> <link head> <anchor> <candidate head> <depth>
+  local saved=$review_fix_links
+  _review_link "$@" && return 0
+  review_fix_links=$saved; return 1
+}
+_review_link() {
   local att v m k am
   att=$(review_attestation "$1" "$2") || return 1
   k=$(jq -r .kind <<<"$att")
@@ -83,6 +94,7 @@ _review_link() { # <run id> <link head> <anchor> <candidate head> <depth>
       review_fix_round "$1" || return 1
       if [ "${REVIEW_LINK_PRODUCER:-0}" != 1 ]; then
         [ "${REVIEW_LINK_FIXES:-0}" = 1 ] || return 1
+        ! review_recheck_blocked "$2" "$4" || return 1
         am=$(jq -r '.main // ""' <<<"$att")
         [[ "$am" =~ ^[0-9a-f]{40}$ ]] && git rev-parse -q --verify "$am^{commit}" >/dev/null 2>&1 || return 1
         (REPO=${REVIEW_REPO:-${REPO:-}} DEV_REVIEW_MAIN_REF=$am \
@@ -99,13 +111,12 @@ _review_link() { # <run id> <link head> <anchor> <candidate head> <depth>
   if [ "$k" = tests-only-fix ] && [ "${REVIEW_LINK_PRODUCER:-0}" != 1 ]; then review_fix_links+="$2 "; fi
   return 0
 }
-review_covered() {
-  local saved_links=$review_fix_links
-  if _review_covered "$@"; then return 0; fi
-  review_fix_links=$saved_links
-  return 1
+review_covered() { # <base> <anchor (deployed or review-time main)> <candidate head> [depth]
+  local saved=$review_fix_links
+  _review_covered "$@" && return 0
+  review_fix_links=$saved; return 1
 }
-_review_covered() { # <base> <anchor (deployed or review-time main)> <candidate head> [depth]
+_review_covered() {
   local b=$1 d=$2 h=$3 n=${4:-0} id
   git merge-base --is-ancestor "$b" "$d" 2>/dev/null && return 0
   [ "$n" -lt 40 ] || return 1

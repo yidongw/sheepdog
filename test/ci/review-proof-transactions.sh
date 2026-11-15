@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests
 cd "$(dirname "$0")/../.."
 . scripts/ci/review-coverage.sh
 review_api() { printf '%s' '{"jobs":[{"name":"tests","conclusion":"failure"},{"name":"review","conclusion":"success","steps":[{"name":"Review (blocking)","conclusion":"skipped"}]}]}'; }

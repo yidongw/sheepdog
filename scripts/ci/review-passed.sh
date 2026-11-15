@@ -59,7 +59,7 @@ covered() { review_covered "$1" "$2" "$sha" "${3:-0}"; }
 # A run whose review never ran for any other reason (cancelled, setup / gate failure) never passes.
 # REVIEW_KIND_OUT=<file>: the kind of the approving run ("review" | "tests-only-fix") is written there (merge-branch.sh).
 for id in $ids; do
-  review_fix_links=""
+  review_fix_links=""   # this run's proof only
   jobs=$(gh api "repos/$repo/actions/runs/$id/jobs")
   tests=$(jq '[.jobs[] | select((.name | sub("^.* / "; "")) == "tests" and .conclusion == "success")] | length' <<<"$jobs")
   [ "${tests:-0}" -gt 0 ] || continue
@@ -80,6 +80,11 @@ for id in $ids; do
       mref=$am
       if ! (REPO=$repo DEV_REVIEW_MAIN_REF=$mref bash "$(dirname "${BASH_SOURCE[0]}")/dev-review-base.sh" --only-fixes "$ab" "$sha" >/dev/null 2>&1); then
         echo "run $id: tests-only-fix round, but ${ab:0:12}..${sha:0:12} is not only repairs of completed (blocked) reviews" >&2; continue
+      fi
+      # main's safety net (rule (g)): once main re-checked the landed fix and that re-check blocked, the tests-only
+      # approval no longer stands — the fix needs its own repair (whose own approval then decides)
+      if review_recheck_blocked "$sha" "$sha"; then
+        echo "run $id: main's re-check of ${sha:0:12} blocked: its tests-only approval no longer stands" >&2; continue
       fi ;;
     *) continue ;;
   esac

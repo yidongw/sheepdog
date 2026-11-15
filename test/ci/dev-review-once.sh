@@ -10,6 +10,10 @@
 #   (e) a new commit after a blocked one is reviewed alone
 #   (f) the range waits for a still-running review of the nearest ancestor instead of reviewing its commits twice
 #   (g) the devfix landing check (review-covered.sh) needs the chain below the blocked sha
+#   (h) review of fb6bb396e: a "repair" that changes lines outside its blocked range (P→C blocked→D passing auth fix→
+#       E blocked→F repairs E AND undoes D) is no tests-only round; a red tests-only round is no base / link; main's
+#       blocked re-check of a tests-only fix withdraws its approval; tests-only links of a failed proof attempt are
+#       not reported
 set -euo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"
 cd "$(dirname "$0")/../.."
@@ -34,9 +38,9 @@ mkdir -p "$T/bin" "$T/api"
 run() { # run <id> <title> <blocking step: success|failure|skipped(tests-only)|running> <attested base> [<mainside>]
   local st=$3 jst=completed jc
   case "$st" in success|skipped) jc=success ;; running) jst=in_progress; jc=null; st=null ;; *) jc=failure ;; esac
-  printf '{"id":%s,"path":".github/workflows/review.yml","display_title":"%s","status":"completed","conclusion":"%s","event":"workflow_run","head_branch":"main"}\n' "$1" "$2" "$([ "$jc" = success ] && echo success || echo failure)" >> "$T/api/list"
-  printf '{"jobs":[{"name":"tests","status":"completed","conclusion":"success","steps":[]},{"name":"review","id":%s,"status":"%s","conclusion":%s,"steps":[{"name":"Review (blocking)","conclusion":%s}]}]}\n' \
-    "$(($1 + 1000))" "$jst" "$([ "$jc" = null ] && echo null || echo "\"$jc\"")" "$([ "$st" = null ] && echo null || echo "\"$st\"")" > "$T/api/$1.jobs"
+  printf '{"id":%s,"path":".github/workflows/review.yml","display_title":"%s","status":"completed","conclusion":"%s","event":"workflow_run","head_branch":"main"}\n' "$1" "$2" "$([ "$jc" = success ] && [ "${TESTS:-success}" = success ] && echo success || echo failure)" >> "$T/api/list"
+  printf '{"jobs":[{"name":"tests","status":"completed","conclusion":"%s","steps":[]},{"name":"review","id":%s,"status":"%s","conclusion":%s,"steps":[{"name":"Review (blocking)","conclusion":%s}]}]}\n' \
+    "${TESTS:-success}" "$(($1 + 1000))" "$jst" "$([ "$jc" = null ] && echo null || echo "\"$jc\"")" "$([ "$st" = null ] && echo null || echo "\"$st\"")" > "$T/api/$1.jobs"
   { echo "2026-11-15T00:00:00.0Z review-range: $4 ${2#* }"
     [ "$3" = failure ] && echo "2026-11-15T00:00:02.0Z review-gate: BLOCKED #1 regression [should]: x"; true; } > "$T/api/$(($1 + 1000)).log"
   local kind=review; [ "$3" = skipped ] && kind=tests-only-fix
@@ -232,4 +236,43 @@ if cov "$X" "$P" "$FX"; then fail "(g) X + its fix covered with the blocked A be
 if cov "$X" "$P" "$X"; then fail "(g) blocked X covered without its fix"; fi
 g checkout -q dev
 echo "ok (g) - devfix landing needs the chain below the blocked sha"
+# (h) the reviewer's fixture (review of fb6bb396e #1/#2)
+g update-ref refs/remotes/origin/main "$P"
+g checkout -q -b auth "$P"
+printf 'REQUIRE_AUTH=1\n' > "$T/src/auth.conf"; g add auth.conf; g commit -q -m "auth on"; P2=$(g rev-parse HEAD)
+g update-ref refs/remotes/origin/main "$P2"
+printf 'REQUIRE_AUTH=0\n' > "$T/src/auth.conf"; g add auth.conf; g commit -q -m "C: auth off (blocked)"; HC=$(g rev-parse HEAD)
+printf 'REQUIRE_AUTH=1\n' > "$T/src/auth.conf"; g add auth.conf; g commit -q -m "D: auth back on (passed, full range)"; HD=$(g rev-parse HEAD)
+HE=$(c e "E (blocked, unrelated)")
+printf 'REQUIRE_AUTH=0\n' > "$T/src/auth.conf"; echo fixed >> "$T/src/e"; g add -A; g commit -q -m "F: repairs E (and undoes D)" -m "Review-Fix-Of: $HE"; HF=$(g rev-parse HEAD)
+reset_runs; run 31 "review $HC" failure "$P2"; run 32 "review $HD" success "$P2"; run 33 "review $HE" failure "$HD"
+if base --only-fixes "$HE" "$HF"; then fail "(h) a repair undoing D's reviewed lines was a tests-only round"; fi
+run 34 "review $HF" skipped "$HE"
+if rp "$HF" o/r "$P2"; then fail "(h) review-passed.sh approved the tests-only round that undoes D"; fi
+# a git revert of D carrying the trailer: no tests-only round either
+g checkout -q -b auth2 "$HE"; g revert --no-edit "$HD" >/dev/null; g commit -q --amend -m "Revert D" -m "Review-Fix-Of: $HE"; HR=$(g rev-parse HEAD)
+if base --only-fixes "$HE" "$HR"; then fail "(h) a revert was a tests-only round"; fi
+# control: a repair touching only E's own lines (and adding new ones) stays tests-only
+g checkout -q -b auth3 "$HE"; echo repaired > "$T/src/e"; echo new > "$T/src/e2"; g add -A; g commit -q -m "repairs E only" -m "Review-Fix-Of: $HE"; HG=$(g rev-parse HEAD)
+base --only-fixes "$HE" "$HG" || fail "(h) a repair of E's own lines is not tests-only"
+run 35 "review $HG" skipped "$HE"
+rp "$HG" o/r "$P2" || fail "(h) the plain repair of E is not approved"
+# main's re-check of the landed fix blocked → its tests-only approval no longer stands
+run 36 "recheck $HG" failure "$P2"
+if rp "$HG" o/r "$P2"; then fail "(h) a tests-only fix approved although main's re-check of it blocked"; fi
+# a red tests-only round (review of fb6bb396e #3) is neither a base nor a link: the next commit's review includes it
+g checkout -q -b red "$HG"; HH=$(c h "H after a red repair round")
+reset_runs; run 31 "review $HC" failure "$P2"; run 32 "review $HD" success "$P2"; run 33 "review $HE" failure "$HD"
+TESTS=failure run 35 "review $HG" skipped "$HE"
+[ "$(base "$HH")" = "$HE" ] || fail "(h) a red tests-only round was a range base (got $(base "$HH"))"
+# (review of fb6bb396e #4) a failed proof attempt reports no tests-only links: Y's newer run attests a clean merge M
+# whose first parent is covered through the tests-only HG and whose second parent is not; Y's older full review covers
+reset_runs; run 31 "review $HC" failure "$P2"; run 32 "review $HD" success "$P2"; run 33 "review $HE" failure "$HD"; run 35 "review $HG" skipped "$HE"
+g checkout -q -b side "$P2"; SD=$(c sd "side, never reviewed"); g checkout -q auth3
+g merge -q --no-ff -m "merge side" "$SD"; HM=$(g rev-parse HEAD); HY=$(c y "Y")
+run 39 "review $HY" success "$HM"; run 38 "review $HY" success "$P2"   # newest first: the merge-based run is tried first
+(cd "$T/src" && PATH=$T/bin:$PATH GH_TOKEN=x REPO=o/r REVIEW_FIXES_OUT=$T/fixes bash "$ROOT/scripts/ci/review-passed.sh" "$HY" o/r "$P2" >/dev/null 2>&1) || fail "(h) Y not approved by its full review"
+[ ! -s "$T/fixes" ] || fail "(h) a failed proof attempt reported tests-only links: $(cat "$T/fixes")"
+g checkout -q dev
+echo "ok (h) - repairs stay within their blocked range; red rounds, blocked re-checks and failed proofs are no approval"
 echo 'dev review once: all checks passed'

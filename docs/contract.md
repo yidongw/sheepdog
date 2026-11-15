@@ -43,7 +43,12 @@ what gets deployed. The workflow is [.github/workflows/review.yml](../.github/wo
   repairs of blocked reviews (plus clean main merges) is a **tests-only fix round**: the blocking step is skipped
   (never reported as a pass), the attestation says `kind: tests-only-fix`, and `review-passed.sh` re-checks from the
   trusted runs that every commit really repairs a completed, blocked review before it lets the fix land on green tests.
-  Repairs whose landing would change review machinery get a full review of those repair commits only (rule (h)).
+  A repair counts only within its blocked review: every line it removes or changes must come from that review's range
+  (or from an earlier repair of the round), and a revert is never a repair — otherwise the round is a full review of
+  those repair commits (review of fb6bb396e #1/#2: a "repair" undoing a passing commit's auth fix). A tests-only round
+  whose trusted tests failed is no base and no link (its commits ride the next review), and once main's re-check of a
+  landed fix blocks, the fix's tests-only approval no longer stands. Repairs whose landing would change review
+  machinery get a full review of those repair commits only (rule (h)).
   Main then reviews the fix under (a). Because no later dev review vouches for a blocked commit, approval does:
   landing a dev sha (`merge-branch.sh`, the merge train, a devfix landing) needs the coverage chain (c) from main to
   it, and a blocked review is a link of that chain only with an effective repair of it on the head.
