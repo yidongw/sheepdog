@@ -34,7 +34,9 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   with the `gh run rerun <id> --failed` command; the next push to dev re-triggers the review too.
   Unavailable jobs/logs, empty logs and logs containing only route metadata or notes follow the same hold: neither the
   head loop nor the train starts repair routing or a clock without blocking finding evidence. An existing clock is left
-  alone and cannot trigger a revert on that scan. Findings use one successful log read, bounded to the trusted gate section; partial failed reads and candidate text before that boundary never drive repair or rollback.
+  alone and cannot trigger a revert on that scan. Unavailable review evidence never discards independently confirmed
+  trusted-test failures: those still enter repair routing with their available test logs. Findings use one successful log
+  read, bounded to the trusted gate section; partial failed reads and candidate text before that boundary never drive repair or rollback.
 - **Open findings**: findings whose fix rounds are spent are kept in `$STATE/open-findings.log`, which the review job
   passes to the reviewer (`open-findings-file`) so repeats are recognised as pre-existing.
 - **Main-side findings on dev**: a dev review blocks on every finding it reports, including one whose culprit commit is
@@ -44,6 +46,9 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   clock: reverting a dev edit in the same file cannot remove main's defect. The owner repairs main through its review
   chain and reruns the dev review. The head stays unlanded; this never approves or discards findings (owner decision
   2026-11-15: the main-culprit landing of `a036e7a60` and its successors was rolled back).
+  The escalation is delivered once per run and review job, using the job identity from the findings snapshot. A rerun
+  delivers its updated findings; repeated scans of that attempt stay quiet. A retired supervisor falls back to the CI
+  owner; failed deliveries remain retryable, with unreachable recipients retried after the infrastructure alert interval.
 
 ## GitHub API budget
 
