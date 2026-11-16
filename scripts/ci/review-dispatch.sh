@@ -762,34 +762,16 @@ launch_failed() { # launch_failed <sha> <key> → 0 after two failed fixer launc
   local n=0; if [ -e "$STATE/sent/$1.$2.launchfail" ]; then n=$(wc -l < "$STATE/sent/$1.$2.launchfail"); fi
   [ "$n" -ge 2 ]
 }
-dev_round_pending() { # dev_round_pending <commit> → 0 while a Review run of a dev sha containing <commit> has not completed
-  local t
-  [ -n "${pending_titles+x}" ] || pending_titles=$(review_list 40 displayTitle,status \
-      '.[] | select(.status != "completed") | .displayTitle' || true)
-  for t in $(sed -nE 's/^review ([0-9a-f]{40})$/\1/p' <<<"$pending_titles"); do
-    git -C "$SRC" merge-base --is-ancestor "$1" "$t" 2>/dev/null && return 0
-  done
-  return 1
-}
-dev_carries_fix() { # dev_carries_fix <S> <files (newline separated)> [<exclude ref>] → 0 (sets dupfix_why) when origin/$DEV
-  # beyond S already carries a fix for S: a commit with "Review-Fix-Of: S", or a later commit touching a named
-  # file by a culprit author of S (same Thread:) while a newer dev round containing it is still in review. Narrow on purpose (owner 11-12).
-  local s=$1 files=$2 c
+dev_carries_fix() { # dev_carries_fix <S> [<exclude ref>] → 0 (sets dupfix_why) when origin/$DEV beyond S already carries
+  # an effective repair of S: repair_effective, the exact trailer "Review-Fix-Of: S" — the one rule the coverage chain
+  # (review-coverage.sh / review-passed.sh) accepts. Nothing else counts: an author's later commit on the same files
+  # (the old file-touch rule, owner 11-12) suppressed the fixer and refused green devfixes while the coverage chain
+  # still waited for a Review-Fix-Of: S repair — tralyx dev deadlocked silently on 11-16 (2a21ce302, fe25438c3,
+  # be2a50e67, bd0f361ea; CI owner 11-16).
+  local s=$1 c
   dupfix_why=""
-  if c=$(repair_effective "$s" "" "origin/$DEV" ${3:+"^$3"}); then dupfix_why="${c:0:9} carries Review-Fix-Of: ${s:0:9}"; return 0; fi
-  # the author's later commit on a named file only DEFERS the fixer while that newer round is in review — never completes
-  [ -n "$files" ] || return 1
-  local cul x t; cul=$(culprit_threads "$s" "$files"); c=""
-  # shellcheck disable=SC2086 # one pathspec per named file; optional exclude ref
-  for x in $(git -C "$SRC" rev-list --no-merges -n 20 "origin/$DEV" --not "$s" ${3:-} -- $files 2>/dev/null || true); do
-    t=$(thread_of "$x")   # the culprit author's own later commit (not a fixer's or another author's)
-    [ -n "$t" ] && grep -qxF "$t" <<<"$cul" || continue
-    git -C "$SRC" show -s --format=%B "$x" | grep -qE '^Loop: (dev-fixer|review-dispatch)$' && continue
-    c=$x; break
-  done
-  [ -n "$c" ] || return 1
-  dev_round_pending "$c" || return 1
-  dupfix_why="the author's ${c:0:9} changed the named files after ${s:0:9} and a newer $DEV round is in review"
+  c=$(repair_effective "$s" "" "origin/$DEV" ${2:+"^$2"}) || return 1
+  dupfix_why="${c:0:9} carries Review-Fix-Of: ${s:0:9}"
   return 0
 }
 fix_reverted() { # <R> <ref>... → 0 when R is reverted on a ref that contains it: review-repair.sh reverted(), THE one rule
@@ -1175,7 +1157,7 @@ dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> 
   if [ -n "$att" ]; then task="$task
 Whose code each finding is (culprit commit → its Thread:):
 $(culprit_lines "$att")"; fi
-  if dev_carries_fix "$s" "$(named_files "$f")"; then
+  if dev_carries_fix "$s"; then
     if [ -n "${DRY:-}" ]; then echo "DRY blocked ${s:0:9}: $DEV already carries a fix for ${s:0:9} ($dupfix_why) — no fixer"
     elif [ ! -e "$STATE/sent/$s.dupfix" ]; then log "blocked ${s:0:9}: $DEV already carries a fix for ${s:0:9} ($dupfix_why) — no fixer"; touch "$STATE/sent/$s.dupfix"; fi
     return 0
@@ -2180,9 +2162,9 @@ if [ "$merged_one" = 0 ] && [ -z "${DRY:-}" ]; then
     if [ -n "$gaps" ] && [ ! -e "$STATE/sent/$fh.proofgap" ]; then
       log "devfix $fref ${fh:0:9}: unproven fix — $(tr '\n' ';' <<<"$gaps")"; touch "$STATE/sent/$fh.proofgap"
     fi
-    # Duplicate fix (owner 11-12): dev beyond S already carries a fix for S (its own Review-Fix-Of: S commit, or the
-    # author's later commit on the files this fix touches, with a newer dev round in review) — do not land a second one.
-    if dev_carries_fix "$fs" "$(git -C "$SRC" diff --name-only "$fs" "$fh" 2>/dev/null || true)" "$fh"; then
+    # Duplicate fix (owner 11-12): dev beyond S already carries an effective Review-Fix-Of: S repair (dev_carries_fix,
+    # nothing else) — do not land a second one.
+    if dev_carries_fix "$fs" "$fh"; then
       if [ ! -e "$STATE/sent/$fh.dupfix" ]; then log "devfix $fref ${fh:0:9}: dev already carries a fix for ${fs:0:9} ($dupfix_why) — not landing"; touch "$STATE/sent/$fh.dupfix"; fi
       continue
     fi

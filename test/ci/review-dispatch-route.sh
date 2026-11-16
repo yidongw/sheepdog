@@ -14,7 +14,7 @@ D=scripts/ci/review-dispatch.sh
 fns() { local n b; for n in "$@"; do b=$(sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh")  # a missing helper fails the test (it used to only print to stderr)
   if [ -z "$b" ]; then printf '{ echo "fns: helper %s not found in %s" >&2; exit 1; }\n' "$n" "$D"; else printf '%s\n' "$b"; fi; done; }
 eval "$(fns repair_effective author_group_key findings_cap gate_section review_step_ran thread_of fixer_receipt_thread range_threads culprit_threads or_supervisor notify_threads devfix_fix_of fixer_ended launch_failed \
-  dev_round_pending dev_carries_fix fix_reverted reverted hotfix_fix_pushed escalate_ended_fixer named_files blocked_author_reason \
+  dev_carries_fix fix_reverted reverted hotfix_fix_pushed escalate_ended_fixer named_files blocked_author_reason \
   dev_blocked norm_tid finding_blocks finding_meta finding_route review_round_route route_reason attribute_finding \
   attribution findings_subset att_of culprit_lines notify_attributed author_fixed author_turn split_fixer_failed \
   split_fixer dev_blocked_split revert_after_for own_findings fyi_author culprits_repaired att_threads)"
@@ -255,9 +255,9 @@ echo 'FYI: log only'
 reset
 g checkout -q -B devw origin/dev; R=$(commit src/a.ts "$A" "Review-Fix-Of: $S")
 g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin
-dev_carries_fix "$S" ""
+dev_carries_fix "$S"
 g revert --no-edit HEAD >/dev/null; g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin
-if dev_carries_fix "$S" ""; then echo "unexpected: a reverted fix still counts on dev" >&2; exit 1; fi
+if dev_carries_fix "$S"; then echo "unexpected: a reverted fix still counts on dev" >&2; exit 1; fi
 H=$(g rev-parse origin/main)
 g checkout -q -B mainw origin/main; R=$(commit src/h.ts "$A" "Review-Fix-Of: $H"); g push -q origin HEAD:refs/heads/main; g fetch -q origin
 test "$(hotfix_fix_pushed "$H")" = "$R"

@@ -14,7 +14,7 @@ D=scripts/ci/review-dispatch.sh ROOT=$PWD
 fns() { local n b; for n in "$@"; do b=$(sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh")  # a missing helper fails the test (it used to only print to stderr)
   if [ -z "$b" ]; then printf '{ echo "fns: helper %s not found in %s" >&2; exit 1; }\n' "$n" "$D"; else printf '%s\n' "$b"; fi; done; }
 eval "$(fns repair_effective fix_reverted reverted thread_of fixer_receipt_thread range_threads culprit_threads notify_threads devfix_fix_of fixer_ended launch_failed \
-  dev_round_pending dev_carries_fix hotfix_fix_pushed named_files blocked_author_reason dev_blocked \
+  dev_carries_fix hotfix_fix_pushed named_files blocked_author_reason dev_blocked \
   or_supervisor norm_tid finding_blocks finding_meta finding_route review_round_route route_reason attribute_finding \
   attribution findings_subset att_of culprit_lines notify_attributed author_fixed author_turn split_fixer_failed \
   split_fixer dev_blocked_split revert_after_for own_findings fyi_author culprits_repaired)"
@@ -56,7 +56,7 @@ review_list() { gh run list -R "$REPO" -w review.yml -L "$1" --json "$2" -q "$3"
 THREAD_ID=mcp:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa THREAD_STATE=running
 cul=$(culprit_threads "$S" "$F")
 test "$cul" = "$A"
-reset() { rm -f "$woken" "$sent" "$LOG"; rm -rf "$STATE/sent"; mkdir -p "$STATE/sent"; rm -f "$FIXER_GATE"/queue/*; unset pending_titles; }
+reset() { rm -f "$woken" "$sent" "$LOG"; rm -rf "$STATE/sent"; mkdir -p "$STATE/sent"; rm -f "$FIXER_GATE"/queue/*; }
 
 # 1. blocked → the fixer is woken, no author is told
 reset
@@ -134,32 +134,53 @@ grep -q 'Do NOT message the authors' "$D"
 ! grep -q 'fixer-report-<thread>' "$D" || { echo "negative check failed: test/ci/review-dispatch-notify-order.sh:130" >&2; exit 1; }
 echo 'fixer report: log only'
 
-# 6. duplicate fix: dev beyond S already carries "Review-Fix-Of: S" → no fixer, logged once
-reset
-g checkout -q -B devw origin/dev
+# 6. duplicate fix: ONLY an effective "Review-Fix-Of: S" on dev beyond S counts (dev_carries_fix = repair_effective, the
+#    one rule the coverage chain accepts — CI owner 11-16: the old file-touch rule deadlocked tralyx dev)
+# the landing loop's duplicate-fix check, as it is in the dispatcher (one devfix: fs = S, fh = the fixer's commit)
+dupland=$(python3 - "$D" <<'PY2'
+import sys
+s = open(sys.argv[1]).read()
+a = s.index('    # Duplicate fix (owner 11-12)')
+b = s.index('\n    fi\n', s.index('— not landing"', a)) + len('\n    fi\n')
+print(s[a:b])
+PY2
+)
+grep -q 'dev_carries_fix "$fs" "$fh"' <<<"$dupland"
+lands() { # lands <devfix head> → 0 when the landing loop's duplicate-fix check lets it through
+  local fs=$S fh=$1 fref=devfix/${S:0:12} passed=1
+  for _ in 1; do eval "$dupland"; passed=0; done
+  [ "$passed" = 0 ]
+}
+g checkout -q -B fixw "$S"; DF=$(commit src/a.ts "$THREAD_ID" "Review-Fix-Of: $S")   # the fixer's devfix commit on S
+# a) the author's own later commit on the named file, WITHOUT Review-Fix-Of: S, a newer dev round in review → the
+#    fixer is still woken and the green devfix still lands (it used to suppress both)
+g checkout -q -B devw "$S"; commit src/a.ts "$A" >/dev/null; N=$(g rev-parse HEAD)
+g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin
+reset; PENDING="review $N"
+dev_blocked "$S" "$F" "$cul" run-url task
+test "$(cat "$woken")" = "$S blocked"
+! grep -q 'already carries a fix' "$LOG" || { echo "negative check failed: a same-file author commit suppressed the fixer" >&2; exit 1; }
+lands "$DF" || { echo "FAIL: a same-file author commit without Review-Fix-Of: S refused the devfix" >&2; exit 1; }
+test ! -e "$STATE/sent/$DF.dupfix"
+reset; PENDING=""
+dev_blocked "$S" "$F" "$cul" run-url task
+test "$(cat "$woken")" = "$S blocked"
+# b) dev beyond S carries "Review-Fix-Of: S" → no fixer, logged once; a second devfix does not land, logged once
 commit src/a.ts "$A" "Review-Fix-Of: $S" >/dev/null
 g push -q origin HEAD:refs/heads/dev; g fetch -q origin
+reset
 dev_blocked "$S" "$F" "$cul" run-url task
 dev_blocked "$S" "$F" "$cul" run-url task
 test ! -e "$woken"; test ! -e "$sent"
 test "$(grep -c 'already carries a fix' "$LOG")" -eq 1
-# … the author's own later commit on the named file counts only while a newer dev round is in review
-g reset -q --hard "$S"; commit src/a.ts "$A" >/dev/null; N=$(g rev-parse HEAD)
-g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin
-reset; PENDING="review $N"
-dev_blocked "$S" "$F" "$cul" run-url task
-test ! -e "$woken"; grep -q "author's ${N:0:9}" "$LOG"
-reset; PENDING=""
-dev_blocked "$S" "$F" "$cul" run-url task
-test "$(cat "$woken")" = "$S blocked"
-# another author's later commit on the same file is no fix of S
-g reset -q --hard "$S"; commit src/a.ts "$B" >/dev/null; N=$(g rev-parse HEAD)
-g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin
-reset; PENDING="review $N"
-dev_blocked "$S" "$F" "$cul" run-url task
-test "$(cat "$woken")" = "$S blocked"
+! lands "$DF" || { echo "FAIL: a second fix of S landed although dev carries Review-Fix-Of: S" >&2; exit 1; }
+! lands "$DF" || { echo "FAIL: a second fix of S landed although dev carries Review-Fix-Of: S" >&2; exit 1; }
+test "$(grep -c 'not landing' "$LOG")" -eq 1
+# … the devfix's own Review-Fix-Of: S (dev reached it through the devfix) is excluded: not its own duplicate
+g push -q -f origin "$DF:refs/heads/dev"; g fetch -q origin
+reset; lands "$DF"
 g checkout -q main
-echo 'duplicate fix: skipped'
+echo 'duplicate fix: only Review-Fix-Of: S counts'
 
 # 7. hotfix re-check: a pushed Review-Fix-Of: H commit closes it without the author
 H=$(g rev-parse origin/main)
