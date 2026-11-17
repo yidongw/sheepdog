@@ -221,7 +221,7 @@ findings_cap() { # stdin: review-gate lines → every line of the first FINDINGS
 }
 finding_jobs() { ghm api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null; }   # routing/notification snapshot only, never approval evidence
 findings() { # findings <run id> [<review jobs, already read>] [<current tests jobs>] → text (blocking findings only: the reviewer's NIT lines are notes, see notes_of)
-  local run=$1 jobs=${2:-} tests_jobs tests_ok rid gl review_available=0
+  local run=$1 jobs=${2:-} tests_jobs rid gl review_available=0
   if [ "$#" -ge 2 ]; then ghc_note_jobs <<<"$jobs"; else
     jobs=$(ghm api "repos/$REPO/actions/runs/$run/jobs") || { echo 'review-gate: reviewer failed: finding jobs unavailable'; return 0; }
   fi
@@ -243,6 +243,12 @@ findings() { # findings <run id> [<review jobs, already read>] [<current tests j
   # Review findings belong to the immutable verdict attempt; tests belong to the run's latest attempt.
   # An explicitly unavailable current snapshot must never fall back to historical test failures.
   tests_jobs=${3-$jobs}
+  findings_tests "$tests_jobs" "$review_available"
+}
+findings_tests() { # findings_tests <a run's CURRENT jobs answer> [<review evidence available 0|1>] → its failed trusted tests job lines
+  # ("" when the tests passed, were cancelled, or the answer is unavailable). Mutable: a rerun of red tests changes it, so
+  # it is never cached (re-check of 60d3f0b #6)
+  local tests_jobs=$1 review_available=${2:-1} tests_ok
   jq -e '.jobs | type == "array"' >/dev/null 2>&1 <<<"$tests_jobs" || return 0
   ghc_note_jobs <<<"$tests_jobs"
   tests_ok=$(jq -r '.jobs[] | select((.name | sub("^.* / "; "")) == "tests") | .conclusion' <<<"$tests_jobs")
@@ -1362,10 +1368,11 @@ dev_commit_verdict() { # dev_commit_verdict <sha> → 0 and dcv="<kind> <run> <a
   dcv="$rfv_kind $rfv_id $rfv_attempt ${ct:-0} ${jid:-0}"
   [ -z "${DRY:-}" ] || return 0
   if [ "$rfv_kind" = blocked ]; then
-    # its findings (the verdict's attempt; the run's latest tests), kept only when they are readable: the next run retries
-    local f; f=$(findings "$rfv_id" "$rfv_jobs" "$rfv_latest_jobs")
+    # its REVIEW findings only (the verdict's attempt: immutable), kept only when readable — the next run retries. The
+    # trusted tests are mutable (a rerun): dev_owner_walk reads them afresh every time (re-check of 60d3f0b #6)
+    local f; f=$(findings "$rfv_id" "$rfv_jobs" "")
     grep -q '^review-gate: BLOCKED' <<<"$f" || return 0
-    printf '%s\n' "$f" > "$c.findings"
+    printf '%s\n' "$f" > "$c.review-findings"
   fi
   printf '%s\n' "$dcv" > "$c"; rm -f "$c.none"
 }
@@ -1483,11 +1490,14 @@ dev_owner_walk() { # every run: each blocked commit of origin/$MAIN..origin/$DEV
   while read -r s run at ct jid; do
     [ -n "$s" ] || continue
     dev_verdict_rotate "$s" "$ct" "$run" "$at"
-    f=$(cat "$DEV_VERDICTS/$s.findings" 2>/dev/null || true)
+    f=$(cat "$DEV_VERDICTS/$s.review-findings" 2>/dev/null || true)
     if [ -z "$f" ]; then   # not kept (DRY, or unreadable when decided): read it again, routed only once readable
-      review_first_verdict "$s" any >/dev/null 2>&1 && f=$(findings "$rfv_id" "$rfv_jobs" "$rfv_latest_jobs")
+      review_first_verdict "$s" any >/dev/null 2>&1 && f=$(findings "$rfv_id" "$rfv_jobs" "")
       grep -q '^review-gate: BLOCKED' <<<"$f" || continue
     fi
+    # + the run's CURRENT trusted tests (a rerun that passed is no failure to route)
+    local tl; tl=$(findings_tests "$(finding_jobs "$run" || true)" 1)
+    if [ -n "$tl" ]; then f="$f"$'\n'"$tl"; fi
     url="https://github.com/$REPO/actions/runs/$run"
     if dev_main_hold "$s" "$run" "$f" "{\"jobs\":[{\"name\":\"review\",\"id\":${jid:-0}}]}"; then continue; fi
     dev_blocked "$s" "$f" "$(culprit_threads "$s" "$f")" "$url" "$(dev_devfix_task "$s" "$f" "$url")"
@@ -1503,6 +1513,13 @@ dev_owner_walk() { # every run: each blocked commit of origin/$MAIN..origin/$DEV
     INFRA_WHERE=$DEV infra_alert "$s" "$run" "orphan.$run.$at" "$STATE/sent/$s.orphan" "[review-dispatch] $DEV ${s:0:9} was blocked by its review (run $url attempt $at) and has no effective repair — a commit on $DEV carrying Review-Fix-Of: $s — so no $DEV head can land on $MAIN (the coverage chain needs it). Nobody the dispatcher can wake owns it any more (no author window, no live fixer, no queued fixer, no delivered notice). Please hand it to someone: its author, or push the repair on $DEV yourself.
 $f"
   done <<<"$dev_unrepaired"
+  return 0
+}
+devfix_delete_leased() { # devfix_delete_leased <devfix ref> <the head this run merged> → delete the branch only while it is still that
+  # head (re-check of 60d3f0b #1/#2, data-loss: an unleased delete dropped a fixer's commit pushed after the merge). Moved →
+  # kept; the next run judges its new head.
+  if git -C "$SRC" push -q --force-with-lease="refs/heads/$1:$2" origin ":refs/heads/$1" 2>/dev/null; then return 0; fi
+  log "devfix $1: not deleted — it moved past ${2:0:9} after its merge into $DEV (the next run judges its new head)"
   return 0
 }
 dev_devfix_to_dev() { # dev_devfix_to_dev <devfix ref> <its head> <S> → a green devfix that cannot land on main because a commit below S
@@ -1522,14 +1539,14 @@ dev_devfix_to_dev() { # dev_devfix_to_dev <devfix ref> <its head> <S> → a gree
   dev_blocked_below "$s" "$fh"
   [ -n "$dev_lower" ] || return 0
   d=$(git -C "$SRC" rev-parse "origin/$DEV")
-  if git -C "$SRC" merge-base --is-ancestor "$fh" "$d" 2>/dev/null; then git -C "$SRC" push -q origin --delete "$fref" 2>/dev/null || true; return 0; fi
+  if git -C "$SRC" merge-base --is-ancestor "$fh" "$d" 2>/dev/null; then devfix_delete_leased "$fref" "$fh"; return 0; fi
   rm -rf "$WORK"; git -C "$SRC" worktree prune; git -C "$SRC" worktree add -q --detach "$WORK" "$d"
   if (cd "$WORK" && git -c core.hooksPath=/dev/null -c user.name="review-dispatch" -c user.email="review-dispatch@localhost" \
         merge -q --no-ff "$fh" -m "$(dispatch_msg "land review fix ${fh:0:9} (of ${s:0:9}) on $DEV" "the fix passed the trusted tests; a blocked commit below ${s:0:9} has no repair yet, so it cannot land on $MAIN; merged into $DEV without conflicts")" >/dev/null 2>&1); then
     m=$(git -C "$WORK" rev-parse HEAD)
     if git -C "$WORK" push -q --force-with-lease="$DEV:$d" origin "HEAD:refs/heads/$DEV" 2>/dev/null; then
       log "devfix $fref ${fh:0:9} (fix of ${s:0:9}): cannot land on $MAIN yet (blocked $(for b in $dev_lower; do printf '%s ' "${b:0:9}"; done)below it without a repair under the fix) — merged into $DEV as ${m:0:9}: the repair counts there and rides the next $DEV review"
-      git -C "$SRC" push -q origin --delete "$fref" 2>/dev/null || true
+      devfix_delete_leased "$fref" "$fh"
       touch "$STATE/sent/$fh.devfix-todev"
       git -C "$SRC" fetch -q origin "$DEV" 2>/dev/null || true
     else log "devfix $fref ${fh:0:9}: push of its merge into $DEV failed ($DEV moved meanwhile; next run retries)"; fi

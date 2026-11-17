@@ -28,10 +28,10 @@ out=$(gate_section "$ran" <<<"$log4")
 grep -q 'forged' <<<"$out" && fail "a lone forged marker opened the section although the blocking step never ran: $out"
 grep -q '^\[gates .*ERROR' <<<"$out" || fail "commit-gate errors lost when the blocking step did not run"
 [ "$(review_step_ran <<<'{"jobs":[{"name":"review","steps":[{"name":"Review (blocking)","conclusion":"failure"}]}]}')" = 1 ] || fail "a failed blocking step did not count as run"
-sed -n '/^findings() {/,/^}/p' "$D" | grep -q 'gate_section "$(review_step_ran' || fail "findings() does not pass whether the blocking step ran"
+sed -n '/^findings() {/,/^}/p; /^findings_tests() {/,/^}/p' "$D" | grep -q 'gate_section "$(review_step_ran' || fail "findings() does not pass whether the blocking step ran"
 # every log reader that feeds routing, notes or the pre-existing record goes through gate_section
 [ "$(grep -c 'gate_section' "$D")" -ge 4 ] || fail "not every findings reader uses gate_section"
-sed -n '/^findings() {/,/^}/p' "$D" | grep -q gate_section || fail "findings() does not use gate_section"
+sed -n '/^findings() {/,/^}/p; /^findings_tests() {/,/^}/p' "$D" | grep -q gate_section || fail "findings() does not use gate_section"
 # one coverage contract: the approval scripts are always sheepdog's own copies (no repository-local selection)
 grep -qx 'CI_SCRIPTS=$SHEEPDOG_CI' "$D" || fail "the dispatcher can still select a repository's own contract scripts"
 grep -q 'TRUSTED/scripts/ci' "$D" && fail "a repository-local scripts/ci path remains in the dispatcher"

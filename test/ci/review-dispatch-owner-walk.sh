@@ -221,6 +221,35 @@ git -C "$SRC" fetch -q --prune origin
 git -C "$SRC" merge-base --is-ancestor "$FS" origin/dev || fail "(c) the unlandable devfix was not merged into dev: $(cat "$STATE/dispatch.log")"
 ! git -C "$SRC" rev-parse -q --verify "origin/devfix/${S:0:12}" >/dev/null || fail "(c) the devfix branch was kept"
 grep -q "merged into dev as" "$STATE/dispatch.log" || fail "(c) not logged"
+# re-check of 60d3f0b #1/#2 (data-loss): devfix/S moves (a fixer pushes FS2) between the dispatcher's merge into dev and its
+# delete of the branch — the delete is leased on the merged head, so FS2 survives
+setup c3
+P=$(c p); push main; g checkout -q -b dev
+B=$(c b); S=$(c s); RB=$(c rb "Review-Fix-Of: $B"); push dev
+g checkout -q -b fx "$S"; FS=$(c fs "Review-Fix-Of: $S
+Hotfix: review fix of ${S:0:9}"); push "fx:refs/heads/devfix/${S:0:12}"; FS2=$(c fs2 "Review-Fix-Of: $S
+Hotfix: review fix of ${S:0:9}"); g checkout -q dev
+clone
+run1 "$B" blocked "$P"; run1 "$S" blocked "$B"; run1 "$FS" fixes "$S"
+mkdir -p "$STATE/sent"; echo "$S" > "$STATE/dev-fixer.active"; echo "mcp:cccccccc-0000-4000-8000-000000000002" > "$STATE/sent/$S.fixer-blocked"
+echo completed > "$FX/state-cccccccc-0000-4000-8000-000000000002"
+REALGIT=$(command -v git); mkdir -p "$X/gitbin"
+cat > "$X/gitbin/git" <<SH
+#!/usr/bin/env bash
+"$REALGIT" "\$@"; rc=\$?
+# right after the dispatcher's push of its merge into dev: the fixer pushes FS2 onto devfix/S
+if [ \$rc = 0 ] && [[ " \$* " == *" HEAD:refs/heads/dev "* ]] && [ ! -e "$X/advanced" ]; then
+  touch "$X/advanced"; "$REALGIT" -C "$X/w" push -q -f origin "$FS2:refs/heads/devfix/${S:0:12}"
+fi
+exit \$rc
+SH
+chmod +x "$X/gitbin/git"
+PATH="$X/gitbin:$PATH" dispatch c3
+[ -e "$X/advanced" ] || fail "(60d3f0b #1/#2) setup: the dispatcher never pushed its merge into dev: $(cat "$STATE/dispatch.log")"
+[ "$(git --git-dir="$X/remote.git" rev-parse -q --verify "refs/heads/devfix/${S:0:12}" || true)" = "$FS2" ] || fail "(60d3f0b #1/#2) the moved devfix branch was deleted: FS2 lost"
+grep -q "not deleted — it moved past ${FS:0:9}" "$STATE/dispatch.log" || fail "(60d3f0b #1/#2) the kept branch is not logged"
+echo 'ok - a devfix branch that moved after its merge into dev is kept (leased delete)'
+
 # … and a fixer woken for a commit with an unrepaired block below it pushes to dev, not devfix/
 setup c2
 P=$(c p); push main; g checkout -q -b dev
@@ -329,7 +358,8 @@ gate_case() { # gate_case <name> <how: unrelated|wrongdir|configured> → whethe
   setup "$1"
   P=$(c p); push main; g checkout -q -b dev; Q=$(c q); push dev; g checkout -q main
   clone
-  RID=$((RID + 1)); GATE_SHA=${Q:0:9} listing "$RID" "review $Q" completed failure; GATE_SHA=${Q:0:9} jobs "$RID" 1 1 gate
+  local gs=${Q:0:9}; [ "$2" != spaced ] || gs=${Q:0:5}   # core.abbrev=5: the gates print 5 hex (re-check of d837792 #3)
+  RID=$((RID + 1)); GATE_SHA=$gs listing "$RID" "review $Q" completed failure; GATE_SHA=$gs jobs "$RID" 1 1 gate
   dispatch "$1-1"
   [ -n "$(task_for "$Q")" ] || fail "(#3) setup: no gate fixer"
   echo completed > "$FX/state-aaaaaaaa-0000-4000-8000-000000000001"
@@ -338,6 +368,8 @@ gate_case() { # gate_case <name> <how: unrelated|wrongdir|configured> → whethe
     unrelated) rec "scripts/ci/commit-verification/$P.txt" "$P" ;;                       # another commit's record
     wrongdir) rec "scripts/ci/commit-verification/$Q.txt" "$Q"
               mkdir -p "$X/w/.github/workflows"; printf 'jobs:\n  r:\n    with:\n      verification-dir: custom-proof\n' > "$X/w/.github/workflows/review.yml" ;;
+    spaced) rec "proof records/commit-verification/$Q.txt" "$Q"   # a quoted dir with a space (re-check of d837792 #1/#2)
+              mkdir -p "$X/w/.github/workflows"; printf 'jobs:\n  r:\n    with:\n      verification-dir: "proof records/commit-verification"\n' > "$X/w/.github/workflows/review.yml" ;;
     configured) rec "custom-proof/$Q.txt" "$Q"
               mkdir -p "$X/w/.github/workflows"; printf 'jobs:\n  r:\n    with:\n      verification-dir: custom-proof\n' > "$X/w/.github/workflows/review.yml" ;;
   esac
@@ -351,5 +383,25 @@ Verify:
 }
 gate_case gu unrelated || fail "(#3) another commit's record counted as the repair: $(cat "$STATE/dispatch.log")"
 gate_case gw wrongdir || fail "(#3) a record outside the configured verification-dir counted as the repair"
+! gate_case gs spaced || fail "(#3) a valid record in a quoted verification-dir with a space (gates abbreviating to 5 hex) was not accepted: $(cat "$STATE/dispatch.log")"
 ! gate_case gc configured || fail "(#3) a valid record in the configured verification-dir was not accepted: $(cat "$STATE/dispatch.log")"
 echo "ok - a gate fixer is done only when main holds the failing commit's own record in the configured directory"
+
+# re-check of 60d3f0b #6: the verdict's REVIEW findings are kept, the trusted tests are read afresh — X's tests failed when
+# its verdict was first read (X waited for the slot), its tests rerun passed before X's fixer was woken: no failure routed
+setup t
+P=$(c p); push main; g checkout -q -b dev; XT=$(c xt); YT=$(c yt); push dev
+clone
+run1 "$XT" blocked "$P"; XTR=$RUN
+jq '.jobs[0].conclusion = "failure"' "$FX/jobs-$XTR.json" > "$FX/j.tmp" && mv "$FX/j.tmp" "$FX/jobs-$XTR.json"
+mkdir -p "$STATE/sent"; echo "$YT" > "$STATE/dev-fixer.active"; echo "mcp:dddddddd-0000-4000-8000-000000000001" > "$STATE/sent/$YT.fixer-blocked"
+dispatch t1
+[ -z "$(task_for "$XT")" ] || fail "(60d3f0b #6) setup: X got a fixer beside Y's"
+[ -s "$STATE/verdicts/$XT" ] || fail "(60d3f0b #6) setup: X's verdict not kept"
+jq '.jobs[0].conclusion = "success"' "$FX/jobs-$XTR.json" > "$FX/j.tmp" && mv "$FX/j.tmp" "$FX/jobs-$XTR.json"   # the tests rerun passed
+echo completed > "$FX/state-dddddddd-0000-4000-8000-000000000001"
+dispatch t2
+f=$(task_for "$XT"); [ -n "$f" ] || fail "(60d3f0b #6) X got no fixer: $(cat "$STATE/dispatch.log")"
+grep -q "run $XTR attempt 1 drops rows" "$f" || fail "(60d3f0b #6) the kept review findings were lost"
+! grep -q 'trusted tests job' "$f" || fail "(60d3f0b #6) a tests failure that passed on rerun was routed to the fixer"
+echo 'ok - kept review findings, current trusted tests: a passed rerun is not routed as a failure'

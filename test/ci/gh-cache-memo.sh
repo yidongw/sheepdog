@@ -234,7 +234,7 @@ for f in "$ROOT"/scripts/ci/*.sh; do
   if grep -nE '\bghm\b|GHC_RUN_DIR|ghc_(api|fetch|out)' "$f"; then fail "$(basename "$f") reaches the memo (approval scripts read GitHub)"; fi
 done
 D=$ROOT/scripts/ci/review-dispatch.sh
-ALLOWED=" review_list all_runs_list dev_round_running finding_jobs findings notes_of recheck_base preexisting_record main_infra dev_infra review_api "   # main_infra: the log excerpt of a supervisor notice; dev_infra: the review job id naming an alert
+ALLOWED=" review_list all_runs_list dev_round_running finding_jobs findings findings_tests notes_of recheck_base preexisting_record main_infra dev_infra review_api "   # main_infra: the log excerpt of a supervisor notice; dev_infra: the review job id naming an alert
 # review_api (the verdict reader's client in the dispatcher): ONLY job logs through ghm — a log is stored only once its job
 # completed (by job id, byte for byte: a completed job's log never changes) and a log only tells a block from a crash
 # (neither completes anything); jobs answers and attestations are always the real gh (checked below)

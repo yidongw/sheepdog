@@ -21,7 +21,7 @@ fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$
 declare -F review_list >/dev/null || eval "$(fns review_list)"; eval "$(fns review_first_verdict review_attempt_verdict review_attested_kind review_verdict_load review_blocked_verdict review_log_lines gate_section review_step_ran)"; eval "$(fns review_api review_verdict_list)"   # THE verdict reader the dispatcher's helpers call (review_first_verdict)
 source "${D%/*}/review-runs.sh"
 hotfix_pass_confirmed() { :; }   # the completion gate (review-passed.sh REVIEW_PASSED_MODE=recheck): review-first-verdict.sh / the API budget run test it
-eval "$(fns finding_jobs gate_section review_step_ran findings findings_cap dev_round_noop dev_merge_only run_verdict dev_verdict_run named_files review_infra_reason dev_main_hold dispatch_msg infra_alert notify_best_effort)"
+eval "$(fns finding_jobs gate_section review_step_ran findings findings_tests findings_cap dev_round_noop dev_merge_only run_verdict dev_verdict_run named_files review_infra_reason dev_main_hold dispatch_msg infra_alert notify_best_effort)"
 loop=$(python3 - "$D" <<'PY'
 import sys
 s = open(sys.argv[1]).read()
