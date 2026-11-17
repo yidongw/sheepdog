@@ -16,10 +16,11 @@ D=scripts/ci/review-dispatch.sh ROOT=$PWD
 fns() { local n b; for n in "$@"; do b=$(sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh")  # a missing helper fails the test (it used to only print to stderr)
   if [ -z "$b" ]; then printf '{ echo "fns: helper %s not found in %s" >&2; exit 1; }\n' "$n" "$D"; else printf '%s\n' "$b"; fi; done; }
 eval "$(fns repair_effective fix_reverted reverted thread_of fixer_receipt_thread range_threads culprit_threads notify_threads devfix_fix_of fixer_ended launch_failed \
-  dev_carries_fix hotfix_fix_pushed named_files blocked_author_reason budget_spent dev_blocked \
+  dev_carries_fix effective_repairs hotfix_fix_pushed named_files blocked_author_reason budget_spent dev_blocked \
   or_supervisor norm_tid finding_blocks finding_meta finding_route review_round_route route_reason attribute_finding \
   attribution findings_subset att_of culprit_lines notify_attributed author_fixed author_turn split_fixer_failed \
-  split_fixer dev_blocked_split revert_after_for own_findings fyi_author culprits_repaired)"
+  split_fixer dev_blocked_split revert_after_for own_findings fyi_author culprits_repaired devfix_on_its_way dev_gate_round dev_gate_failed dev_gate_record_pushed dev_task_on_dev)"
+dev_lower_unrepaired() { dev_lower=${LOWER:-}; }   # the walk's list of blocked commits without their repair: none here
 eval "$(sed -n '/^digest_file() {/p; /^digest_add() {/,/^}/p' scripts/ci/review-notify.sh)"   # fyi_author → the authors' digest
 SUPERVISOR_THREAD=import:claudeAgent:supervisor DISPATCH_THREAD=00000000-0000-4000-8000-0000000000c1 AUTHOR_FIX_WINDOW_SEC=3600
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
