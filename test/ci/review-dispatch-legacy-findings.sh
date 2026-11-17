@@ -5,7 +5,7 @@ set -euo pipefail
 source "$(dirname "$0")/lib/no-real-t3.sh"
 cd "$(dirname "$0")/../.."
 D=scripts/ci/review-dispatch.sh
-for fn in dev_commit_verdict dev_owner_walk finding_jobs findings_tests; do
+for fn in dev_commit_verdict dev_owner_walk finding_jobs findings_tests dev_unknown_verdict; do
   eval "$(sed -n "/^$fn() {/,/^}/p; /^$fn() { .*}\$/p" "$D")"
   declare -F "$fn" >/dev/null || { echo "missing helper $fn" >&2; exit 1; }
 done

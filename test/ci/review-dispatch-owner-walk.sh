@@ -405,3 +405,27 @@ f=$(task_for "$XT"); [ -n "$f" ] || fail "(60d3f0b #6) X got no fixer: $(cat "$S
 grep -q "run $XTR attempt 1 drops rows" "$f" || fail "(60d3f0b #6) the kept review findings were lost"
 ! grep -q 'trusted tests job' "$f" || fail "(60d3f0b #6) a tests failure that passed on rerun was routed to the fixer"
 echo 'ok - kept review findings, current trusted tests: a passed rerun is not routed as a failure'
+
+# re-check of 02c2dcbcc #1: a verdict kept by the previous dispatcher (<sha>.findings: review + the tests of that moment) is
+# migrated — routed by its review part, even when the run's evidence cannot be read again; nothing readable at all → the
+# supervisor (never a silent skip)
+setup l
+P=$(c p); push main; g checkout -q -b dev; XL=$(c xl); push dev
+clone
+run1 "$XL" blocked "$P"; XLR=$RUN
+mkdir -p "$STATE/verdicts"; echo "blocked $XLR 1 0 $((XLR * 10 + 1))" > "$STATE/verdicts/$XL"
+printf '%s\n' "review-gate: BLOCKED #1 regression [should]: legacy kept finding" "evidence: f-x.ts:1 x" "trusted tests job: failure" > "$STATE/verdicts/$XL.findings"
+rm -f "$FX/jobs-$XLR.json"   # the run's evidence is unreadable now
+dispatch l
+f=$(task_for "$XL"); [ -n "$f" ] || fail "(02c2dcb #1) a legacy kept verdict lost its routing: $(cat "$STATE/dispatch.log")"
+grep -q 'legacy kept finding' "$f" || fail "(02c2dcb #1) the legacy review findings were not routed"
+! grep -q 'trusted tests job' "$f" || fail "(02c2dcb #1) the legacy file's frozen test text was routed"
+[ -s "$STATE/verdicts/$XL.review-findings" ] || fail "(02c2dcb #1) the legacy findings were not migrated"
+setup l2
+P=$(c p); push main; g checkout -q -b dev; XL=$(c xl); push dev
+clone
+run1 "$XL" blocked "$P"; XLR=$RUN
+mkdir -p "$STATE/verdicts"; echo "blocked $XLR 1 0 $((XLR * 10 + 1))" > "$STATE/verdicts/$XL"; rm -f "$FX/jobs-$XLR.json"
+DEV_UNKNOWN_NOTICE_SEC=0 dispatch l2
+grep -q "sent infra.findings-unreadable ${XL:0:9} → t3 $SUP" "$STATE/dispatch.log" || fail "(02c2dcb #1) a blocked verdict whose findings cannot be read was skipped silently: $(cat "$STATE/dispatch.log")"
+echo 'ok - a previous dispatcher'"'"'s kept findings are migrated; unreadable findings reach the supervisor'

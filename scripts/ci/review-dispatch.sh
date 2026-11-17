@@ -1421,15 +1421,16 @@ dev_lower_unrepaired() { # dev_lower_unrepaired <S> → dev_lower: blocked commi
   # fix) could never land on main (review-covered.sh), even when their repair sits on $DEV above S (11-16 856137bb9)
   dev_blocked_below "$1" "$1"
 }
-dev_unknown_verdict() { # dev_unknown_verdict <S> → its verdict cannot be read (coverage treats it as blocked): the supervisor
-  # once it stayed so DEV_UNKNOWN_NOTICE_SEC
-  local m="$STATE/sent/$1.verdict-unknown-since" t
+dev_unknown_verdict() { # dev_unknown_verdict <S> [findings-unreadable] → its verdict (or a blocked verdict's findings) cannot be read
+  # (coverage treats it as blocked; nobody can be given it): the supervisor once it stayed so DEV_UNKNOWN_NOTICE_SEC
+  local k=${2:-verdict-unknown} m t
+  m="$STATE/sent/$1.$k-since"
   [ -z "${DRY:-}" ] || return 0
   [ -s "$m" ] || date +%s > "$m"
   t=$(cat "$m"); [[ "$t" =~ ^[0-9]+$ ]] || t=0
-  [ $(( $(date +%s) - t )) -ge "$DEV_UNKNOWN_NOTICE_SEC" ] || return 0
-  [ ! -e "$STATE/sent/$1.verdict-unknown.delivered.$1.${rfv_id:-0}" ] || return 0
-  INFRA_WHERE=$DEV infra_alert "$1" "${rfv_id:-0}" "verdict-unknown" "$STATE/sent/$1.verdict-unknown" "[review-dispatch] the review verdict of $DEV ${1:0:9} has been unreadable for $(( ($(date +%s) - t) / 60 )) min (run ${rfv_id:-?} attempt ${rfv_attempt:-?}: its jobs, log or attestation cannot be read, or an earlier run never finished). The coverage chain treats it as blocked, so no $DEV head above it can land on $MAIN. Please look at the run (a rerun of its failed jobs), or push a repair of ${1:0:9} (Review-Fix-Of: $1) on $DEV."
+  [ $(( $(date +%s) - t )) -ge "${DEV_UNKNOWN_NOTICE_SEC:-3600}" ] || return 0
+  [ ! -e "$STATE/sent/$1.$k.delivered.$1.${rfv_id:-0}" ] || return 0
+  INFRA_WHERE=$DEV infra_alert "$1" "${rfv_id:-0}" "$k" "$STATE/sent/$1.$k" "[review-dispatch] the review verdict$([ "$k" = verdict-unknown ] || echo " (a BLOCKED one: its findings)") of $DEV ${1:0:9} has been unreadable for $(( ($(date +%s) - t) / 60 )) min (run ${rfv_id:-?} attempt ${rfv_attempt:-?}: its jobs, log or attestation cannot be read, or an earlier run never finished). The coverage chain treats it as blocked, so no $DEV head above it can land on $MAIN. Please look at the run (a rerun of its failed jobs), or push a repair of ${1:0:9} (Review-Fix-Of: $1) on $DEV."
 }
 dev_verdict_rotate() { # dev_verdict_rotate <S> <verdict completed epoch> <run> <attempt> → receipts of S OLDER than its verdict belong
   # to an earlier attempt that had none (a gate failure, a cancel: 11-17 8bab832c9, run 44021700721 attempt 1 → attempt 2
@@ -1500,12 +1501,16 @@ dev_owner_walk() { # every run: each blocked commit of origin/$MAIN..origin/$DEV
         [ -n "${DRY:-}" ] || printf '%s\n' "$f" > "$DEV_VERDICTS/$s.review-findings"
       else f=""; fi
     fi
-    if [ -z "$f" ]; then   # not kept (DRY, or unreadable when decided): read it again, routed only once readable
+    if [ -z "$f" ]; then   # not kept (DRY, or unreadable when decided): read it again
       review_first_verdict "$s" any >/dev/null 2>&1 && f=$(findings "$rfv_id" "$rfv_jobs" "")
-      grep -q '^review-gate: BLOCKED' <<<"$f" || continue
+      if ! grep -q '^review-gate: BLOCKED' <<<"$f"; then
+        # still unreadable: never a silent skip — the supervisor once it stays so (dev_unknown_verdict)
+        rfv_id=$run rfv_attempt=$at; dev_unknown_verdict "$s" findings-unreadable; continue
+      fi
     fi
+    rm -f "$STATE/sent/$s.findings-unreadable-since"
     # + the run's CURRENT trusted tests (a rerun that passed is no failure to route)
-    local tl; tl=$(findings_tests "$(finding_jobs "$run" || true)" 1)
+    local tl; tl=$(findings_tests "$(finding_jobs "$run" || true)" 0)   # 0: a tests job absent from the answer is no failure
     if [ -n "$tl" ]; then f="$f"$'\n'"$tl"; fi
     url="https://github.com/$REPO/actions/runs/$run"
     if dev_main_hold "$s" "$run" "$f" "{\"jobs\":[{\"name\":\"review\",\"id\":${jid:-0}}]}"; then continue; fi
