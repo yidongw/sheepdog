@@ -1262,12 +1262,24 @@ dev_gate_record_pushed() { # dev_gate_record_pushed <findings> → 0 when origin
   # touch of a commit-verification path counted). The record is read as commit-gates.sh reads it — "Commit: <full sha>"
   # and a bare Verify: line followed by a checked item — at <verification-dir>/<sha>.txt, the directory the caller workflow
   # on $MAIN configures (its "verification-dir:" input; default scripts/ci/commit-verification, review.yml).
-  local f=$1 l short sha body n=0 vd
-  vd=$(git -C "$SRC" show "origin/$MAIN:.github/workflows/${SHEEPDOG_REVIEW_WORKFLOW:-review.yml}" 2>/dev/null \
-    | sed -nE "s/^[[:space:]]+verification-dir:[[:space:]]*[\"']?([^\"' #]+).*/\\1/p" | head -1 || true)
+  local f=$1 l short sha body n=0 vd workflow
+  workflow=$(git -C "$SRC" show "origin/$MAIN:.github/workflows/${SHEEPDOG_REVIEW_WORKFLOW:-review.yml}" 2>/dev/null || true)
+  # Read the YAML scalar as Actions does, including spaces, quoting and escapes. Isolated Python keeps a repository's
+  # yaml.py from shadowing PyYAML (also used by review.yml); an unreadable configuration cannot prove a repair.
+  vd=$(python3 -I -c 'import sys, yaml
+workflow = yaml.safe_load(sys.stdin) or {}
+for job in (workflow.get("jobs") or {}).values():
+    value = ((job or {}).get("with") or {}).get("verification-dir")
+    if value is not None:
+        if not isinstance(value, str):
+            sys.exit(1)
+        print(value)
+        break
+' <<<"$workflow") || return 1
   vd=${vd:-scripts/ci/commit-verification}; vd=${vd%/}
   while IFS= read -r l; do
-    [[ "$l" =~ ERROR:\ commit\ ([0-9a-f]{7,40})\ missing\ trailer\(s\):\ +Verify:\ \( ]] || return 1   # another error: no record fixes it
+    # git rev-parse --short honors core.abbrev (minimum 4); rev-parse below still requires an unambiguous commit.
+    [[ "$l" =~ ERROR:\ commit\ ([0-9a-f]{4,40})\ missing\ trailer\(s\):\ +Verify:\ \( ]] || return 1   # another error: no record fixes it
     short=${BASH_REMATCH[1]}
     sha=$(git -C "$SRC" rev-parse -q --verify "$short^{commit}" 2>/dev/null) || return 1
     body=$(git -C "$SRC" show "origin/$MAIN:$vd/$sha.txt" 2>/dev/null) || return 1
