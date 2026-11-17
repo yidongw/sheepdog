@@ -2,6 +2,8 @@
 # reviewer → fixer → author (owner 11-12): a blocked review wakes a fixer and nobody else; the authors hear of it
 # only when the fixer path failed (thread ended with no fix, launch failures, fix keeps failing its tests, budget),
 # or the revert of their commit is due / done. Fixer reports stay in the dispatch log. Duplicate fixes are skipped.
+# legacy round cap / dev auto-revert (off by default since owner 11-17) exercised explicitly
+export DEV_AUTO_REVERT=1 FIX_ROUNDS_MAX=3 FIX_ROUNDS_MAX_RISK=5
 set -euo pipefail
 ghm() { gh "$@"; }; ghc_note_jobs() { cat > /dev/null; }   # gh-cache.sh (the per-run memo of review-dispatch.sh): here the fake gh itself
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests

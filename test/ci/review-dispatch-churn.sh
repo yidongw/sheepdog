@@ -3,6 +3,8 @@
 # FIX_ROUNDS_MAX rounds along its Review-Fix-Of: chain (5 for security/funds/...) and the supervisor is woken once;
 # a fix whose Verify: says NOT RUN or names no fails-before test is reported; conflict tasks decide CLOSE first;
 # Review-Disputed: trailers and the previous findings reach the re-review prompt.
+# legacy round cap / dev auto-revert (off by default since owner 11-17) exercised explicitly
+export DEV_AUTO_REVERT=1 FIX_ROUNDS_MAX=3 FIX_ROUNDS_MAX_RISK=5
 set -euo pipefail
 ghm() { gh "$@"; }; ghc_note_jobs() { cat > /dev/null; }   # gh-cache.sh (the per-run memo of review-dispatch.sh): here the fake gh itself
 source "$(dirname "$0")/lib/no-real-t3.sh"   # the real T3 (t3 CLI, T3 MCP) is unreachable from tests

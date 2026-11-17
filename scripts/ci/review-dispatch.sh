@@ -295,6 +295,9 @@ notes_of() { # notes_of <run id> → the reviewer's non-blocking notes ("" when 
 }
 
 DEV=${DEV_BRANCH:-dev}
+# Owner 11-17: no automatic revert on dev — a blocked commit is fixed forward (its Review-Fix-Of: repair lands on green
+# trusted tests). DEV_AUTO_REVERT=1 re-enables the old 60-min revert (tests only).
+DEV_AUTO_REVERT=${DEV_AUTO_REVERT:-0}
 DEV_REVERT_AFTER_SEC=${DEV_REVERT_AFTER_SEC:-3600}
 DEV_REVERT_WARN_SEC=${DEV_REVERT_WARN_SEC:-900}   # the culprits are warned this long before the revert
 dispatch_msg() { # dispatch_msg <subject> <verify line>  → a commit message the commit gates accept
@@ -467,8 +470,10 @@ dev_fixer_claim() { [ "$(cat "$STATE/dev-fixer.active" 2>/dev/null)" = "$1" ] ||
 # a finding is tagged security/permissions/funds/data-loss/concurrency), then the supervisor thread is woken once
 # instead; a fixer may dispute a finding (Review-Disputed: trailer, read by the next review); fix commits must name a
 # fails-before/passes-after test in Verify: or say "NOT RUN" — the authors are told when they don't (tests decide).
-FIX_ROUNDS_MAX=${FIX_ROUNDS_MAX:-3}
-FIX_ROUNDS_MAX_RISK=${FIX_ROUNDS_MAX_RISK:-5}
+# Owner 11-17: no round cap — a bug is fixed until it is fixed ("最多两轮" was superseded 11-15). 0 = unlimited (default);
+# a positive value re-enables the old cap (tests only).
+FIX_ROUNDS_MAX=${FIX_ROUNDS_MAX:-0}
+FIX_ROUNDS_MAX_RISK=${FIX_ROUNDS_MAX_RISK:-0}
 FIX_ROUNDS_WINDOW=${FIX_ROUNDS_WINDOW:-1.day}   # how far back earlier fix rounds on the same files still count
 fix_of() { git -C "$SRC" show -s --format=%B "$1" 2>/dev/null | sed -nE 's/^Review-Fix-Of: ([0-9a-f]{40})$/\1/p' | tail -1; return 0; }
 # THE definition of a fixer round (both parts of fix_rounds use it): a fix commit (Review-Fix-Of:) a fixer agent made
@@ -515,6 +520,7 @@ fix_budget_ok() { # fix_budget_ok <sha> <key> <findings> → 0 while a fixer may
   local rounds max=$FIX_ROUNDS_MAX gaps=""
   [ -e "$STATE/sent/$1.fixer-$2" ] && return 0   # woken already: wake_fixer is a no-op, nothing to decide
   grep -qE '\[(blocker|should), (security|permissions|funds|data-loss|concurrency)\]' <<<"$3" && max=$FIX_ROUNDS_MAX_RISK
+  [ "${max:-0}" -gt 0 ] || return 0   # 0 = no cap (owner 11-17)
   rounds=$(fix_rounds "$1" "$3")
   [ "$rounds" -ge "$max" ] || return 0
   if [ -n "${DRY:-}" ]; then echo "DRY fix budget spent: ${1:0:9} ($2) blocked after $rounds fixer rounds (max $max) — it ends, nobody woken"; return 1; fi
@@ -1183,7 +1189,7 @@ $(culprit_lines "$att")"; fi
   key_prefix=""
   # each culprit thread gets only its own findings; unattributable ones go to the supervisor (owner 11-12)
   notify_attributed "$s" fixfailed "$f" "$att" "[review-dispatch] $DEV (${s:0:9}) was blocked by the review and the fix did not succeed: ${why}. Please handle it (the findings attributed to your commits are below):" "run: $url
-Push a fix commit on $DEV (it is reviewed again). Not fixed within $((DEV_REVERT_AFTER_SEC / 60)) min, the commits involved are reverted automatically so that the others can land on main."
+Push a fix commit on $DEV with Review-Fix-Of: ${s} — it lands once the trusted tests pass.$( [ "${DEV_AUTO_REVERT:-0}" = 1 ] && echo " Not fixed within $((DEV_REVERT_AFTER_SEC / 60)) min, the commits involved are reverted automatically so that the others can land on main.")"
 }
 
 # A dev round that cannot be blocked (11-13, vpn-sub 090c048d0 / foxhole-backend 02b663bf0): dev beyond main holds no
@@ -2187,7 +2193,7 @@ $gaps}" "$fref" "$(range_threads "$fh")" && touch "$STATE/sent/$fh.devfix-failed
       else fwhy=""; fi
       if [ -n "$fwhy" ]; then
         key_prefix=""
-        notify_threads "$fs" fixfailed "$(or_supervisor "$(culprit_threads "$fs" "$(git -C "$SRC" diff --name-only "$fs" "$fh" 2>/dev/null || true)")")" "[review-dispatch] $DEV (${fs:0:9}) was blocked by the review and the fix did not succeed: ${fwhy} (run: https://github.com/$REPO/actions/runs/$frun). Please handle it: push a fix commit on $DEV (it is reviewed again), or repair $fref. Not fixed within $((DEV_REVERT_AFTER_SEC / 60)) min, the commits involved are reverted automatically.${gaps:+
+        notify_threads "$fs" fixfailed "$(or_supervisor "$(culprit_threads "$fs" "$(git -C "$SRC" diff --name-only "$fs" "$fh" 2>/dev/null || true)")")" "[review-dispatch] $DEV (${fs:0:9}) was blocked by the review and the fix did not succeed: ${fwhy} (run: https://github.com/$REPO/actions/runs/$frun). Please handle it: push a fix commit on $DEV with Review-Fix-Of: $fs (it lands once the trusted tests pass), or repair $fref.$( [ "${DEV_AUTO_REVERT:-0}" = 1 ] && echo " Not fixed within $((DEV_REVERT_AFTER_SEC / 60)) min, the commits involved are reverted automatically.")${gaps:+
 The fix is not proven:
 $gaps}"
       fi
@@ -2370,6 +2376,7 @@ Your worktree starts at origin/$DEV; first git reset --hard ${sha} so the fix si
     # the revert is about to hit the culprits' commits: they hear it ahead (once per block episode). Findings the reviewer
     # routed to an author: author window (60 min) → fixer → revert DEV_REVERT_AFTER_SEC after the fixer's turn began.
     revert_after=$(revert_after_for "$sha" "$since")
+    if [ "${DEV_AUTO_REVERT:-0}" != 1 ]; then revert_after=999999999999; fi   # owner 11-17: never revert, fix forward
     if [ $((now - since)) -ge $((revert_after - DEV_REVERT_WARN_SEC)) ] && [ $((now - since)) -lt "$revert_after" ] \
        && [ ! -e "$STATE/sent/dev.revertwarn.$since" ] && [ -n "$(named_files "$f")" ]; then
       key_prefix="revertwarn-$since."; ratt=$(attribution "$sha" "$f"); rn=0; warned=1

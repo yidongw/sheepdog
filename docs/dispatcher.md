@@ -15,8 +15,9 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   thread.
 - **Fix landing**: a `devfix/<sha>` whose trusted tests pass lands on dev / the default branch — unless it changes
   review machinery (contract rule (h)): then it is not landed and its authors are told to push it through a full review.
-- **Overdue blocks**: dev blocked longer than `DEV_REVERT_AFTER_SEC` → the commits that touched the files named in the
-  findings are reverted on dev (a new commit), their authors told first.
+- **No automatic revert, no round cap** (owner 11-17): a blocked dev commit is fixed forward — its `Review-Fix-Of:` repair
+  lands on green trusted tests — however many repairs it takes. `DEV_AUTO_REVERT=1` / a positive `FIX_ROUNDS_MAX`
+  re-enable the old 60-min revert / round cap (test suites only).
 - **Main re-checks**: blocked main reviews go to the chain's owner, then (after `MAIN_OWNER_CLAIM_SEC`) to the strongest
   fixer agent. A finding pinned on a dispute-only commit (`Review-Fix-Of:`, no file changed) goes to the commit it
   disputes; such a commit is no hop of a repair chain.
