@@ -72,7 +72,7 @@ log() { echo "[$(date -u +%FT%TZ)] $*" >> "$LOG"; }
 # merge-branch.sh, run_verdict, recheck_reviewed / recheck_base, the devfix tests check, …).
 review_list() { # review_list <limit> <json fields (documentation: the request below lists every field a caller reads)> <jq filter over the trusted runs' array>
   ghm run list -R "$REPO" -w "${SHEEPDOG_REVIEW_WORKFLOW:-review.yml}" -e workflow_run -b "$MAIN" -L 100 \
-      --json databaseId,displayTitle,status,conclusion,event,headBranch,headSha 2>/dev/null \
+      --json databaseId,displayTitle,status,conclusion,event,headBranch,headSha,updatedAt 2>/dev/null \
     | jq -r --arg br "$MAIN" --argjson n "$1" "[.[:\$n][]? | select(.event == \"workflow_run\" and .headBranch == \$br)] | $3" 2>/dev/null
 }
 # The same for the repository-wide listing (the side-branch and superseded-dev cancels): one request per run.
@@ -750,6 +750,7 @@ when the fix fails (thread ended without a pushed fix, tests failing again, roun
     log "FIXER woken for $2 ${1:0:9}${launched:+ ($launched)}: $(head -c 160 <<<"$out" | tr '\n' ' ')${6:+ (authors, not woken: $(tr '\n' ' ' <<<"$6"))}"
     rm -f "$STATE/sent/$1.$2.launchfail"
     { grep -oE '(mcp:)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' <<<"$out" | head -1; } > "$mark" || touch "$mark"
+    rm -f "$FIXER_GATE/ended/${mark##*/}"   # a new fixer under a receipt name the gate cached as ended (re-check of 0fdd85b5a #1/#2)
     fixer_gate_holder="$1 $2 $(head -1 "$mark" 2>/dev/null || true)"; rm -f "$FIXER_GATE/queue/$1.$2"   # it holds the gate now
     # its own thread id, steered into the running first turn (11-13 bake-off: fixers without $T3CODE_THREAD_ID copied the CI
     # owner's id into Thread:); best effort — thread_of maps a fixer commit to this receipt's thread in any case
@@ -1256,16 +1257,31 @@ dev_gate_round() { # dev_gate_round <findings> → 0 when the round failed in th
   # and no reviewer BLOCKED line (gate_section prints only the gates' errors when the blocking step never ran)
   ! grep -q '^review-gate: BLOCKED' <<<"$1" && grep -qE '^\[gates .*ERROR' <<<"$1"
 }
-dev_gate_record_pushed() { # dev_gate_record_pushed <receipt> → 0 when origin/$MAIN got a commit-verification record after that fixer started
-  local since
-  since=$(stat -c %Y "$1" 2>/dev/null) || return 1
-  [ -n "$(git -C "$SRC" log --since="@$since" --format=%H "origin/$MAIN" -- ':(glob)**/commit-verification/**' 2>/dev/null | head -1)" ]
+dev_gate_record_pushed() { # dev_gate_record_pushed <findings> → 0 when origin/$MAIN now holds a valid SHA-bound record for EVERY commit
+  # the gates refused for a missing Verify: checklist, and the gates reported nothing else (re-check of 0fdd85b5a #3: any
+  # touch of a commit-verification path counted). The record is read as commit-gates.sh reads it — "Commit: <full sha>"
+  # and a bare Verify: line followed by a checked item — at <verification-dir>/<sha>.txt, the directory the caller workflow
+  # on $MAIN configures (its "verification-dir:" input; default scripts/ci/commit-verification, review.yml).
+  local f=$1 l short sha body n=0 vd
+  vd=$(git -C "$SRC" show "origin/$MAIN:.github/workflows/${SHEEPDOG_REVIEW_WORKFLOW:-review.yml}" 2>/dev/null \
+    | sed -nE "s/^[[:space:]]+verification-dir:[[:space:]]*[\"']?([^\"' #]+).*/\\1/p" | head -1 || true)
+  vd=${vd:-scripts/ci/commit-verification}; vd=${vd%/}
+  while IFS= read -r l; do
+    [[ "$l" =~ ERROR:\ commit\ ([0-9a-f]{7,40})\ missing\ trailer\(s\):\ +Verify:\ \( ]] || return 1   # another error: no record fixes it
+    short=${BASH_REMATCH[1]}
+    sha=$(git -C "$SRC" rev-parse -q --verify "$short^{commit}" 2>/dev/null) || return 1
+    body=$(git -C "$SRC" show "origin/$MAIN:$vd/$sha.txt" 2>/dev/null) || return 1
+    grep -qxF "Commit: $sha" <<<"$body" || return 1
+    awk 'BEGIN{v=0; ok=0} tolower($0) ~ /^verify:[[:space:]]*$/ {v=1; next} v && /^- \[[xX]\] *[^[:space:]]/ {ok=1} v && !/^- \[/ {v=0} END{exit ok?0:1}' <<<"$body" || return 1
+    n=$((n + 1))
+  done < <(grep -E '^\[gates .*ERROR' <<<"$f")
+  [ "$n" -gt 0 ]
 }
 dev_gate_failed() { # dev_gate_failed <S> <findings> <run url> <culprit threads> → a fixer adds the gates' trusted input on $MAIN
   # (owner 11-16, e873de849: the gates read a published commit's verification record only from the default branch's
   # checkout; a record a fixer wrote on devfix/ or $DEV was never read, and its devfix — a round without a verdict — could
-  # never land, holding the slot). Main-side: its own key "gate", no dev fixer slot; the fixer ended without a record on
-  # $MAIN → the culprits, else the supervisor (once).
+  # never land, holding the slot). Main-side: its own key "gate", no dev fixer slot; the fixer ended and main does not
+  # hold every missing record (dev_gate_record_pushed) → the culprits, else the supervisor (once).
   local s=$1 f=$2 url=$3 cul=$4 r="$STATE/sent/$1.fixer-gate" why
   if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$s.gate-logged" ]; then
     log "$DEV ${s:0:9}: the commit gates refused its review before the reviewer ran (no verdict) — a fixer adds the record on $MAIN (Hotfix), no dev fixer slot"; touch "$STATE/sent/$s.gate-logged"
@@ -1276,7 +1292,7 @@ Run: $url
 Repair it on $MAIN, never on $DEV or a devfix branch: the gates read their trusted inputs only from the default branch's checkout. For a published commit whose Verify: checklist is missing or unchecked (its message cannot change), add its SHA-bound record: the file <full sha>.txt in the repository's commit-verification directory (review.yml input verification-dir, default scripts/ci/commit-verification) with the line 'Commit: <full sha>', then a bare 'Verify:' line and '- [x] <evidence>' items (real evidence only). Fix any other gate error there the same way. ONE commit on top of origin/$MAIN with a Hotfix: trailer (no Review-Fix-Of: — ${s:0:9} is not on $MAIN), pushed with git push origin HEAD:refs/heads/$MAIN (rebase on origin/$MAIN and retry if it moved). A record on $DEV or devfix/ is never read. Do not rerun the review: the dispatcher merges $MAIN into $DEV, and the next $DEV review covers these commits." "$MAIN" "$cul" || true
   why=""
   if [ -e "$r" ]; then
-    if why=$(fixer_ended "$r") && ! dev_gate_record_pushed "$r"; then why="${why}, without pushing a verification record to $MAIN"; else why=""; fi
+    if why=$(fixer_ended "$r") && ! dev_gate_record_pushed "$f"; then why="${why}, without pushing a verification record to $MAIN"; else why=""; fi
   elif launch_failed "$s" gate; then why="the fixer agent failed to start (t3 thread start failed repeatedly)"
   fi
   [ -n "$why" ] || return 0
@@ -1302,26 +1318,32 @@ DEV_ORPHAN_GRACE_SEC=${DEV_ORPHAN_GRACE_SEC:-300}       # nobody owns it this lo
 DEV_UNKNOWN_NOTICE_SEC=${DEV_UNKNOWN_NOTICE_SEC:-3600}  # a verdict unreadable this long → the supervisor
 dcv="" dev_lower="" dev_unrepaired="" dev_unrepaired_done="" dev_full_listing=0
 dev_commit_verdict() { # dev_commit_verdict <sha> → 0 and dcv="<kind> <run> <attempt> <review job completed epoch> <review job id>";
-  # 1 no verdict; 2 unknown (unreadable); 3 a run of it is still going. THE verdict — review_first_verdict "any", what the
+  # 1 no verdict; 2 unknown (unreadable); 3 still deciding (no run of it completed, or an earlier one is unfinished). THE verdict — review_first_verdict "any", what the
   # coverage chain reads — which never changes once decided: kept in $DEV_VERDICTS (a blocked one with its findings,
   # <sha>.findings), so it costs no API call again. Which runs a sha has comes from the routing listing (the newest 100,
-  # memoised) or, when dev_unrepaired_load read it, the complete one; "no verdict" is kept against those runs' state for
-  # 30 min. Call it WITHOUT a subshell (review_first_verdict's memo and listing live in this process).
+  # memoised) or, when dev_unrepaired_load read it, the complete one; "no verdict" is kept for 30 min against those runs'
+  # state INCLUDING a rerun's identity (updated_at, and run_attempt where listed: a gate-failed attempt 1 and a BLOCKED
+  # rerun are otherwise the same "completed failure" — re-check of 0fdd85b5a #5). Call it WITHOUT a subshell
+  # (review_first_verdict's memo and listing live in this process).
   local s=$1 c="$DEV_VERDICTS/$1" sig rc=0 ct jid
   dcv=""
   if [ -s "$c" ]; then dcv=$(cat "$c"); return 0; fi
   if [ "$dev_full_listing" = 1 ]; then
-    sig=$(jq -r --arg r "review $s" --arg k "recheck $s" 'select(.display_title == $r or .display_title == $k) | "\(.id):\(.status // "completed"):\(.conclusion // "-"):\(.run_attempt // 1)"' <<<"$review_verdict_runs" 2>/dev/null | sort)
+    sig=$(jq -r --arg r "review $s" --arg k "recheck $s" 'select(.display_title == $r or .display_title == $k) | "\(.id):\(.status // "completed"):\(.conclusion // "-"):\(.run_attempt // 1):\(.updated_at // "-")"' <<<"$review_verdict_runs" 2>/dev/null | sort)
   else
-    sig=$(review_list 100 databaseId,displayTitle,status,conclusion ".[] | select(.displayTitle == \"review $s\" or .displayTitle == \"recheck $s\") | \"\(.databaseId):\(.status):\(.conclusion // \"-\")\"" | sort)
+    sig=$(review_list 100 databaseId,displayTitle,status,conclusion,updatedAt ".[] | select(.displayTitle == \"review $s\" or .displayTitle == \"recheck $s\") | \"\(.databaseId):\(.status):\(.conclusion // \"-\"):\(.updatedAt // \"-\")\"" | sort)
   fi
   [ -n "$sig" ] || return 1                                     # never reviewed itself (a commit inside a reviewed range)
-  ! grep -qvE '^[0-9]+:completed:' <<<"$sig" || return 3       # still deciding: asked again once it completed
+  # no run of it completed yet: nothing can have decided (no API call). Otherwise the reader decides — a completed earlier
+  # verdict stands whatever a later run is doing (re-check of 0fdd85b5a #4)
+  grep -qE '^[0-9]+:completed:' <<<"$sig" || return 3
   if [ -s "$c.none" ] && [ "$(cat "$c.none")" = "$sig" ] && [ -z "$(find "$c.none" -mmin +30 2>/dev/null)" ]; then return 1; fi
   review_first_verdict "$s" any || rc=$?
   case "$rc" in
-    1) [ -n "${DRY:-}" ] || printf '%s\n' "$sig" > "$c.none"; return 1 ;;
-    2) return 2 ;;
+    1) if [ -z "${DRY:-}" ] && ! grep -qvE '^[0-9]+:completed:' <<<"$sig"; then printf '%s\n' "$sig" > "$c.none"; fi; return 1 ;;
+    2) # an earlier run not finished yet is still deciding, not unreadable
+       if grep -qE "^${rfv_id:-x}:(queued|in_progress|waiting|requested|pending):" <<<"$sig"; then return 3; fi
+       return 2 ;;
   esac
   ct=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].completed_at // "" | if . == "" then 0 else (fromdateiso8601? // 0) end' <<<"$rfv_jobs" 2>/dev/null) || ct=0
   jid=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].id // 0' <<<"$rfv_jobs" 2>/dev/null) || jid=0
@@ -1407,6 +1429,7 @@ dev_verdict_rotate() { # dev_verdict_rotate <S> <verdict completed epoch> <run> 
       *) continue ;;
     esac
     mv "$f" "$d/${f##*/}.before-$3-$4"; n=$((n + 1))
+    rm -f "$FIXER_GATE/ended/${f##*/}"   # the gate's "ended" cache is by receipt name: a replacement must be checked again
   done
   log "blocked ${s:0:9}: its verdict (run $3 attempt $4) came after the fixer / notices of an earlier attempt without a verdict — $n receipt(s) set aside (sent/pre-verdict/), the verdict is routed afresh"
 }
