@@ -1338,7 +1338,7 @@ dcv="" dev_lower="" dev_unrepaired="" dev_unrepaired_done="" dev_full_listing=0
 dev_commit_verdict() { # dev_commit_verdict <sha> → 0 and dcv="<kind> <run> <attempt> <review job completed epoch> <review job id>";
   # 1 no verdict; 2 unknown (unreadable); 3 still deciding (no run of it completed, or an earlier one is unfinished). THE verdict — review_first_verdict "any", what the
   # coverage chain reads — which never changes once decided: kept in $DEV_VERDICTS (a blocked one with its findings,
-  # <sha>.findings), so it costs no API call again. Which runs a sha has comes from the routing listing (the newest 100,
+  # <sha>.review-findings), so it costs no API call again. Which runs a sha has comes from the routing listing (the newest 100,
   # memoised) or, when dev_unrepaired_load read it, the complete one; "no verdict" is kept for 30 min against those runs'
   # state INCLUDING a rerun's identity (updated_at, and run_attempt where listed: a gate-failed attempt 1 and a BLOCKED
   # rerun are otherwise the same "completed failure" — re-check of 0fdd85b5a #5). Call it WITHOUT a subshell
@@ -1491,6 +1491,15 @@ dev_owner_walk() { # every run: each blocked commit of origin/$MAIN..origin/$DEV
     [ -n "$s" ] || continue
     dev_verdict_rotate "$s" "$ct" "$run" "$at"
     f=$(cat "$DEV_VERDICTS/$s.review-findings" 2>/dev/null || true)
+    if [ -z "$f" ] && [ -s "$DEV_VERDICTS/$s.findings" ]; then
+      # Older dispatchers cached review + tests together, and their decided verdict returns before any new cache is
+      # written. Keep the immutable review text even when historical evidence is now unreadable. findings() appended
+      # tests after this delimiter: discard that entire mutable suffix and read CURRENT tests independently below.
+      f=$(sed '/^trusted tests job:/,$d' "$DEV_VERDICTS/$s.findings")
+      if grep -q '^review-gate: BLOCKED' <<<"$f"; then
+        [ -n "${DRY:-}" ] || printf '%s\n' "$f" > "$DEV_VERDICTS/$s.review-findings"
+      else f=""; fi
+    fi
     if [ -z "$f" ]; then   # not kept (DRY, or unreadable when decided): read it again, routed only once readable
       review_first_verdict "$s" any >/dev/null 2>&1 && f=$(findings "$rfv_id" "$rfv_jobs" "")
       grep -q '^review-gate: BLOCKED' <<<"$f" || continue
