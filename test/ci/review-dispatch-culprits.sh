@@ -107,7 +107,8 @@ echo 'preparing liveness checks passed'
 
 # dev_fixer_free: the slot follows every fixer of the active sha — fixer-blocked AND the per-group authorto-<hash> ones
 # (re-check of 46686e7a3 #8: an ended authorto fixer kept the slot until the 60 min timeout)
-eval "$(sed -n '/^dev_fixer_free() {/,/^}/p; /^fixer_thread_state() {/,/^}/p' scripts/ci/review-dispatch.sh)"; for _f in dev_fixer_free fixer_thread_state; do declare -F "$_f" >/dev/null || { echo "missing helper $_f (not extracted from the dispatcher)" >&2; exit 1; }; done
+eval "$(sed -n '/^dev_fixer_free() {/,/^}/p; /^fixer_thread_state() {/,/^}/p; /^devfix_on_its_way() {/,/^}/p' scripts/ci/review-dispatch.sh)"; for _f in dev_fixer_free fixer_thread_state devfix_on_its_way; do declare -F "$_f" >/dev/null || { echo "missing helper $_f (not extracted from the dispatcher)" >&2; exit 1; }; done
+DEV=dev; REPAIRED_ON_DEV=""; repair_effective() { [ -n "$REPAIRED_ON_DEV" ] && [ "$1" = "$REPAIRED_ON_DEV" ] && [ "$3" = origin/dev ]; }   # the shared repair rule, stubbed
 log() { echo "$*" >> "$STATE/log"; }
 AS=$(printf 'a%.0s' $(seq 1 40)); NS=$(printf 'b%.0s' $(seq 1 40))
 rm -f "$STATE"/sent/*; echo "$AS" > "$STATE/dev-fixer.active"
@@ -136,7 +137,11 @@ t3() { echo "Thread $3 is no longer available."; }
 dev_fixer_free "$NS"; dev_fixer_free "$NS"; dev_fixer_free "$NS"
 test "$(grep -c 'slot freed' "$STATE/log")" = 1
 t3() { printf '%s %s\n' "$3" "$t3_status"; }
-echo 'dev fixer slot: every fixer of the round counts'
+# 11-17: the active sha's repair (Review-Fix-Of:) is on dev → the slot is free although its fixer thread still runs
+rm -f "$STATE"/sent/* "$STATE/log"; echo "$AS" > "$STATE/dev-fixer.active"; echo "mcp:run" > "$STATE/sent/$AS.fixer-blocked"; t3_status=running
+! dev_fixer_free "$NS" || { echo "negative check failed: a running fixer with no repair on dev released the slot" >&2; exit 1; }
+REPAIRED_ON_DEV=$AS; dev_fixer_free "$NS" || { echo "FAIL: the slot stayed held after the active sha's repair reached dev" >&2; exit 1; }; REPAIRED_ON_DEV=""
+echo 'dev fixer slot: every fixer of the round counts; a repair on dev frees it'
 # 11-12 22:37Z: a commit the dispatcher made (Loop: review-dispatch) has no author thread
 TD=$(mktemp -d); git -C "$TD" init -q; git -C "$TD" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "revert on dev" -m "Loop: review-dispatch
 Thread: 00000000-0000-4000-8000-0000000000c1"; RC=$(git -C "$TD" rev-parse HEAD)

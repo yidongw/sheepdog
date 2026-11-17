@@ -14,10 +14,11 @@ D=scripts/ci/review-dispatch.sh
 fns() { local n b; for n in "$@"; do b=$(sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh")  # a missing helper fails the test (it used to only print to stderr)
   if [ -z "$b" ]; then printf '{ echo "fns: helper %s not found in %s" >&2; exit 1; }\n' "$n" "$D"; else printf '%s\n' "$b"; fi; done; }
 eval "$(fns repair_effective author_group_key findings_cap gate_section review_step_ran thread_of fixer_receipt_thread range_threads culprit_threads or_supervisor notify_threads devfix_fix_of fixer_ended launch_failed \
-  dev_carries_fix fix_reverted reverted hotfix_fix_pushed escalate_ended_fixer named_files blocked_author_reason \
+  dev_carries_fix effective_repairs fix_reverted reverted hotfix_fix_pushed escalate_ended_fixer named_files blocked_author_reason \
   dev_blocked budget_spent norm_tid finding_blocks finding_meta finding_route review_round_route route_reason attribute_finding \
   attribution findings_subset att_of culprit_lines notify_attributed author_fixed author_turn split_fixer_failed \
-  split_fixer dev_blocked_split revert_after_for own_findings fyi_author culprits_repaired att_threads)"
+  split_fixer dev_blocked_split revert_after_for own_findings fyi_author culprits_repaired att_threads devfix_on_its_way dev_gate_round dev_gate_failed dev_gate_record_pushed dev_task_on_dev)"
+dev_lower_unrepaired() { dev_lower=${LOWER:-}; }   # the walk's list of blocked commits without their repair (cases below set LOWER)
 eval "$(sed -n '/^digest_file() {/p; /^digest_add() {/,/^}/p' scripts/ci/review-notify.sh)"   # fyi_author → the authors' digest
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 SRC=$T/src STATE=$T/state MAIN=main DEV=dev REPO=test/repo DEV_REVERT_AFTER_SEC=3600 FIXER_GATE_STALE_MIN=90 AUTHOR_FIX_WINDOW_SEC=3600
@@ -92,12 +93,16 @@ test ! -e "$woken"
 test "$(sort "$sent" | cut -d' ' -f2 | tr '\n' ' ')" = "$A $B "
 grep -q 'a.ts siblings' "$T/msg-${A##*:}"; ! grep -q 'b.ts' "$T/msg-${A##*:}" || { echo "negative check failed: test/ci/review-dispatch-route.sh:90" >&2; exit 1; }
 grep -q 'patch hides b' "$T/msg-${B##*:}"; ! grep -q 'a.ts siblings' "$T/msg-${B##*:}" || { echo "negative check failed: test/ci/review-dispatch-route.sh:91" >&2; exit 1; }
-# supervisor 11-12: every finding's culprit commit already repaired on dev (one full sha, one short) → no fixer, nobody told
+# every finding's culprit commit already repaired on dev (one full sha, one short; supervisor 11-12) — but the coverage chain
+# needs Review-Fix-Of: S (11-17 8bab832c9: "no fixer, nobody told" left dev unable to land): ONE fixer records the repair of S
+# on dev (no second fix, no devfix), no author notice
 reset
-g checkout -q -B devw origin/dev; commit src/a.ts "$A" "Review-Fix-Of: $CA" >/dev/null; commit src/b.ts "$B" "Review-Fix-Of: ${CB:0:9}" >/dev/null
+g checkout -q -B devw origin/dev; RA=$(commit src/a.ts "$A" "Review-Fix-Of: $CA"); commit src/b.ts "$B" "Review-Fix-Of: ${CB:0:9}" >/dev/null
 g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
 dev_blocked "$S" "$F2" "" run-url task
-test ! -e "$woken"; test ! -e "$sent"; grep -q 'already repairs its culprit commit' "$LOG"
+test "$(cat "$woken")" = "$S blocked"; test ! -e "$sent"; grep -q "already repairs its culprit commit(s) (.*${RA:0:9} repairs ${CA:0:9}" "$LOG"; grep -q 'carries no Review-Fix-Of' "$LOG"
+grep -q "trailer Review-Fix-Of: $S" "$T/task-blocked"; grep -q 'HEAD:refs/heads/dev' "$T/task-blocked"; grep -q 'NOT a second fix' "$T/task-blocked"
+! grep -q 'devfix/' "$T/task-blocked" || { echo "FAIL: the record task sends the fixer to a devfix branch" >&2; exit 1; }
 # only one culprit repaired → handled as before (both authors hear of their own finding)
 reset
 g checkout -q -B devw "$S"; commit src/a.ts "$A" "Review-Fix-Of: $CA" >/dev/null
@@ -105,7 +110,7 @@ g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
 dev_blocked "$S" "$F2" "" run-url task
 ! grep -q 'already repairs its culprit commit' "$LOG" || { echo "negative check failed: test/ci/review-dispatch-route.sh:103" >&2; exit 1; }; test -s "$sent"
 g push -q -f origin "$S:refs/heads/dev"; g fetch -q origin
-echo 'blocked head whose culprit commits dev already repairs: no fixer, nobody told'
+echo 'blocked head whose culprit commits dev already repairs: one fixer records Review-Fix-Of: S on dev, no author notice'
 grep -q 'other findings' "$T/msg-${A##*:}"
 # later runs inside the window: nobody new, no fixer
 dev_blocked "$S" "$F2" "" run-url task

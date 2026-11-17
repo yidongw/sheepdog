@@ -40,6 +40,8 @@
 #     that touched a file named in the findings are reverted on dev (git revert, a new commit) so the rest
 #     can land; their authors are told. Findings naming no file: nothing is reverted, the authors are reminded once.
 #     Fixer reports go to dispatch.log (and the fixer's own thread), never to the authors.
+#   · every blocked dev commit without its Review-Fix-Of: repair — not only the head — gets an owner each run, oldest
+#     first; one nobody owns is reported to the supervisor (dev_owner_walk, owner 11-17). No revert, no round cap (11-17).
 set -euo pipefail
 : "${REPO:?REPO=owner/name is required}" "${STATE:?STATE (state directory) is required}" "${SRC:?SRC (local clone of REPO) is required}"
 : "${GH_TOKEN:?GH_TOKEN is required}" "${T3_PROJECT:?T3_PROJECT is required}" "${SUPERVISOR_THREAD:?SUPERVISOR_THREAD is required}"
@@ -390,6 +392,13 @@ devfix_fix_of() { # devfix_fix_of <devfix ref> → the S it fixes when the landi
   done
   printf '%s\n' "$fs"
 }
+devfix_on_its_way() { # devfix_on_its_way <S> → 0 while devfix/<S> carries a landable fix of S that can still land: not marked
+  # stuck by the landing step ($STATE/sent/<its head>.devfix-stuck: it cannot land on main and could not be merged into $DEV)
+  local fh
+  [ "$(devfix_fix_of "devfix/${1:0:12}")" = "$1" ] || return 1
+  fh=$(git -C "$SRC" rev-parse -q --verify "refs/remotes/origin/devfix/${1:0:12}") || return 1
+  [ ! -e "$STATE/sent/$fh.devfix-stuck" ]
+}
 fixer_at_work() { # fixer_at_work <receipt file> [<devfix ref>] → 0 while that fixer's fix is on its way
   local f=$1 ref=${2:-} tid st
   # Only a live fixer suppresses author notices; a branch can fail trusted tests.
@@ -410,8 +419,9 @@ REVIEW_NOTIFY_HELPER=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review-notify
 T3_MCP=${T3_MCP:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/t3-mcp.sh}   # the T3 MCP tools (steer, effort): t3-mcp.sh
 # One dev-block fixer at a time. The train reviews several dev shas in parallel; a fixer per blocked
 # sha raced on the same code (11-10: 4e46f012b, 6ad54108a, 58911753f), and a devfix landing of one S
-# could carry another S's still-open findings to main. A later block waits for the active fix to land
-# (or 60 min, when the revert path takes over); the next review round re-reports what is still open.
+# could carry another S's still-open findings to main. A later block waits until the slot is free: the active sha's repair
+# is on $DEV or main, its fixers ended, or 60 min passed. The next review does NOT re-report a waiting block (dev reviews
+# each commit once): dev_owner_walk returns to every blocked commit without its repair each run (11-16 7caac614a).
 # A launch receipt is ownership only while its thread is still live.
 fixer_live() {
   local mark="$STATE/sent/$1.fixer-$2" tid st
@@ -427,6 +437,8 @@ dev_fixer_free() { # dev_fixer_free <sha> → 0 when a fixer may be woken for th
   a=$(cat "$f" 2>/dev/null || true)
   [ -z "$a" ] || [ "$a" = "$1" ] && return 0
   git -C "$SRC" merge-base --is-ancestor "$a" "origin/$MAIN" 2>/dev/null && return 0
+  # its repair (an effective Review-Fix-Of: <a>) is on $DEV: that block is settled, whatever its fixer thread says
+  repair_effective "$a" "" "origin/$DEV" >/dev/null 2>&1 && return 0
   [ -n "$(find "$f" -mmin +60 2>/dev/null)" ] && return 0
   # The active fixers' threads ended (finished, interrupted, archived) — the round's own fixer-blocked one (without a
   # devfix branch) and every per-group authorto-<hash> one (re-check of 46686e7a3 #8: those also claim the slot):
@@ -436,7 +448,7 @@ dev_fixer_free() { # dev_fixer_free <sha> → 0 when a fixer may be woken for th
     [ -f "$r" ] || continue
     tid=$(head -1 "$r" 2>/dev/null || true); [ -n "$tid" ] || continue   # an empty receipt is a marker, not a fixer
     seen=1
-    if [ "${r##*.fixer-}" = blocked ] && [ "$(devfix_fix_of "devfix/${a:0:12}")" = "$a" ]; then live=1; continue; fi   # its fix is on its way
+    if [ "${r##*.fixer-}" = blocked ] && devfix_on_its_way "$a"; then live=1; continue; fi   # its fix is on its way
     st=$(fixer_thread_state "$tid")   # the shared reading: "gone" when T3 no longer has it (re-check of 0b463b6c0 #9)
     case "$st" in preparing|running|starting|queued|"") live=1 ;; esac
   done
@@ -460,7 +472,7 @@ fixer_phrase() { # fixer_phrase <sha> → what the blocked notice says about the
   elif [ -e "$STATE/sent/$1.fixer-blocked" ]; then echo "woke a fixer agent to fix it on $DEV"
   elif [ -e "$STATE/fixer-gate/queue/$1.blocked" ]; then echo "a fixer agent is queued: one fixer agent per repository at a time, the dispatcher wakes it when the previous one ends"
   elif dev_fixer_free "$1" >/dev/null 2>&1; then echo "the fixer agent has not started yet; the dispatcher retries"
-  else echo "no new fixer agent this time: the fixer agent of ${a:0:9} is still at work (one at a time); once it lands, the next review reports whatever is still unfixed"; fi
+  else echo "no new fixer agent this time: the fixer agent of ${a:0:9} is still at work (one at a time); every run the dispatcher walks the blocked $DEV commits that have no repair yet, oldest first, and wakes the fixer for this one when the slot is free"; fi
 }
 launch_phrase() {
   if [ -e "$STATE/sent/$1.fixer-$2" ]; then echo "woke a fixer agent"
@@ -562,7 +574,7 @@ FIXER_QUEUE_TTL_MIN=${FIXER_QUEUE_TTL_MIN:-10}
 FIXER_GATE=$STATE/fixer-gate
 fixer_gate_holder=""; fixer_gate_scanned=""   # per run: the live holder ("<sha> <key> <tid>"), once scanned
 fixer_prio() { # fixer_prio <key> → 1 (first) .. 4
-  case "$1" in hotfixfix|recheck|landmain-*|mainfix-*) echo 1 ;; mainmerge-*|train-*) echo 2 ;; blocked|authorto|authorto-*) echo 4 ;; *) echo 3 ;; esac
+  case "$1" in hotfixfix|recheck|gate|landmain-*|mainfix-*) echo 1 ;; mainmerge-*|train-*) echo 2 ;; blocked|authorto|authorto-*) echo 4 ;; *) echo 3 ;; esac
 }
 fixer_thread_state() { # fixer_thread_state <tid> → its T3 status; "gone" when T3 no longer knows it; "" when unknown
   local tid=$1 out
@@ -593,7 +605,7 @@ fixer_gate_scan() { # sets fixer_gate_holder to the live fixer of this repo ("" 
   fi
   # receipts of the last 6 h, newest first; released ones are cached in ended/ (receipts stay: landing needs them)
   for r in $(find "$STATE/sent" -maxdepth 1 -type f -name '*.fixer-*' -printf '%T@ %f\n' 2>/dev/null | sort -rn | cut -d' ' -f2); do
-    [[ "$r" =~ ^([0-9a-f]{40})\.fixer-(blocked|authorto|recheck|hotfixfix|testsfail|(landmain|mainmerge|train|authorto|mainfix)-[0-9a-f]{9})$ ]] || continue
+    [[ "$r" =~ ^([0-9a-f]{40})\.fixer-(blocked|authorto|recheck|hotfixfix|testsfail|gate|(landmain|mainmerge|train|authorto|mainfix)-[0-9a-f]{9})$ ]] || continue
     sha=${BASH_REMATCH[1]}; key=${BASH_REMATCH[2]}; name=$r
     [ -e "$FIXER_GATE/ended/$name" ] && continue
     tid=$(head -1 "$STATE/sent/$name" 2>/dev/null || true)
@@ -716,20 +728,24 @@ when the fix fails (thread ended without a pushed fix, tests failing again, roun
   # flag: with wf_effort the thread is launched through the T3 MCP tool t3_thread_launch (t3-mcp.sh) with the model's effort
   # option (claudeAgent: effort, codex: reasoningEffort; STRONG_FIXER_EFFORT_OPTION overrides); if that is unavailable the
   # CLI starts it at the model's default effort (logged).
-  local model_args=() prov=${wf_provider:-${FIXER_PROVIDER:-}} model=${wf_model:-${FIXER_MODEL:-}} launched="" opt
+  local model_args=() prov=${wf_provider:-${FIXER_PROVIDER:-}} model=${wf_model:-${FIXER_MODEL:-}} launched="" opt br n=2
+  # its worktree branch: devfix-<sha9>-<key>; taken by an earlier fixer of the same sha + key (a verdict routed afresh after
+  # an attempt without one, dev_verdict_rotate) → -r2, -r3 … (T3 refuses an existing branch; fixer_worktrees_reap strips it)
+  br="devfix-${1:0:9}-$2"
+  while git -C "${SRC:-.}" show-ref -q --verify "refs/heads/$br" 2>/dev/null; do br="devfix-${1:0:9}-$2-r$n"; n=$((n + 1)); done
   [ -n "$prov" ] && model_args+=(--provider "$prov")
   [ -n "$model" ] && model_args+=(--model "$model")
   if [ -n "${wf_effort:-}" ] && [ -n "$prov" ] && [ -n "$model" ]; then
     opt=${STRONG_FIXER_EFFORT_OPTION:-}; if [ -z "$opt" ]; then case "$prov" in codex*) opt=reasoningEffort ;; *) opt=effort ;; esac; fi
     if out=$(timeout 120 bash "$T3_MCP" t3_thread_launch "$(jq -nc --arg p "$T3_PROJECT" --arg t "$3" --arg m "$msg" --arg b "origin/${5:-$DEV}" \
-          --arg br "devfix-${1:0:9}-$2" --arg i "$prov" --arg mo "$model" --arg o "$opt" --arg e "$wf_effort" \
+          --arg br "$br" --arg i "$prov" --arg mo "$model" --arg o "$opt" --arg e "$wf_effort" \
           '{projectId:$p,title:$t,message:$m,workspaceStrategy:{type:"worktree",baseRef:$b,branch:$br},modelSelection:{instanceId:$i,model:$mo,options:[{id:$o,value:$e}]}}')" 2>&1); then
       launched="$prov/$model $opt=$wf_effort"; out=$(jq -r '.threadId // empty' <<<"$out" 2>/dev/null || true)
     else
       log "fixer $2 ${1:0:9}: launch with effort $wf_effort unavailable ($(tail -1 <<<"$out" | head -c 200)) — starting $prov/$model at its default effort"
     fi
   fi
-  if [ -n "$launched" ] || out=$(printf '%s\n' "$msg" | timeout 90 t3 thread start "$T3_PROJECT" - --title "$3" --worktree "origin/${5:-$DEV}" --branch "devfix-${1:0:9}-$2" \
+  if [ -n "$launched" ] || out=$(printf '%s\n' "$msg" | timeout 90 t3 thread start "$T3_PROJECT" - --title "$3" --worktree "origin/${5:-$DEV}" --branch "$br" \
       "${model_args[@]}" 2>&1); then
     log "FIXER woken for $2 ${1:0:9}${launched:+ ($launched)}: $(head -c 160 <<<"$out" | tr '\n' ' ')${6:+ (authors, not woken: $(tr '\n' ' ' <<<"$6"))}"
     rm -f "$STATE/sent/$1.$2.launchfail"
@@ -780,11 +796,16 @@ dev_carries_fix() { # dev_carries_fix <S> [<exclude ref>] → 0 (sets dupfix_why
   # (the old file-touch rule, owner 11-12) suppressed the fixer and refused green devfixes while the coverage chain
   # still waited for a Review-Fix-Of: S repair — tralyx dev deadlocked silently on 11-16 (2a21ce302, fe25438c3,
   # be2a50e67, bd0f361ea; CI owner 11-16).
+  # Exactly review-repair.sh's effective_repairs (the full 40-hex trailer; repair_effective also takes an old short one,
+  # which the coverage chain does not: "already carries a fix" while no dev head could land).
   local s=$1 c
   dupfix_why=""
-  c=$(repair_effective "$s" "" "origin/$DEV" ${2:+"^$2"}) || return 1
-  dupfix_why="${c:0:9} carries Review-Fix-Of: ${s:0:9}"
-  return 0
+  for c in $(cd "$SRC" && effective_repairs "$s" "origin/$DEV"); do
+    if [ -n "${2:-}" ] && git -C "$SRC" merge-base --is-ancestor "$c" "$2" 2>/dev/null; then continue; fi
+    dupfix_why="${c:0:9} carries Review-Fix-Of: ${s:0:9}"
+    return 0
+  done
+  return 1
 }
 fix_reverted() { # <R> <ref>... → 0 when R is reverted on a ref that contains it: review-repair.sh reverted(), THE one rule
   # (a standing direct revert, recursively; ANY later merge revert — conservative by policy, docs/contract.md; past 64
@@ -1124,8 +1145,8 @@ blocked_author_reason() { # blocked_author_reason <S> → why the authors must a
   # a spent round budget is no reason: it is terminal, nobody is woken (owner 11-12; dev_blocked returns before asking)
   local s=$1 m="$STATE/sent/$1.fixer-blocked" why
   if [ -e "$m" ]; then
-    [ "$(devfix_fix_of "devfix/${s:0:12}")" = "$s" ] && return 0   # its fix is pushed: the landing step reports repeated test failures
-    if why=$(fixer_ended "$m"); then echo "${why}, without pushing the fix branch devfix/${s:0:12}"; fi
+    devfix_on_its_way "$s" && return 0   # its fix is pushed: the landing step reports repeated test failures
+    if why=$(fixer_ended "$m"); then echo "${why}, without pushing a fix that can land (devfix/${s:0:12}, or a Review-Fix-Of: ${s:0:9} commit on $DEV)"; fi
     return 0
   fi
   [ -e "$FIXER_GATE/queue/$s.blocked" ] && return 0   # queued behind another fixer of this repo
@@ -1151,29 +1172,40 @@ culprits_repaired() { # culprits_repaired <S> <attribution> → 0 (sets dupfix_w
 }
 dev_blocked() { # dev_blocked <S> <findings> <culprit threads (fixer log only)> <run url> <fixer task> → the reviewer's route per
   # finding (author groups, see dev_blocked_split); otherwise fixer first, authors only when it failed
-  local s=$1 f=$2 cul=$3 url=$4 why att task=$5
+  local s=$1 f=$2 cul=$3 url=$4 why att task=$5 cw
+  # The commit gates refused the round before the reviewer ran: no verdict, nothing the coverage chain needs repaired. Its
+  # remedy is a record on main (dev_gate_failed), under its own key: never the dev fixer slot, never S's "blocked" receipt
+  # (11-17 8bab832c9: the gate round's "blocked" receipt swallowed the BLOCKED verdict of its rerun).
+  if dev_gate_round "$f"; then dev_gate_failed "$s" "$f" "$url" "$cul"; return 0; fi
   att=$(attribution "$s" "$f")
   if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$s.findings" ]; then printf '%s\n' "$f" > "$STATE/sent/$s.findings"; fi   # for the FYI when its fix lands
-  # Every blocking finding pinned on a culprit commit C that $DEV already repairs (an effective Review-Fix-Of: C beyond C):
-  # this head is an older copy of an already-fixed bug — no fixer, no author, no budget (supervisor 11-12: fc8381277's
-  # findings, fixed by ca1de4505, re-blocked every later head without it, each spending a full fix budget).
-  if culprits_repaired "$s" "$att"; then
-    if [ -n "${DRY:-}" ]; then echo "DRY blocked ${s:0:9}: $DEV already repairs its culprit commit(s) ($dupfix_why) — no fixer"
-    elif [ ! -e "$STATE/sent/$s.dupfix" ]; then log "blocked ${s:0:9}: $DEV already repairs its culprit commit(s) ($dupfix_why) — no fixer"; touch "$STATE/sent/$s.dupfix"; fi
-    return 0
-  fi
-  if [ -n "$(awk '$2 == "author" && $4 != "-"' <<<"$att")" ] && fix_budget_ok "$s" blocked "$f"; then
-    dev_blocked_split "$s" "$f" "$url" "$att"
-    return 0
+  # Every blocking finding pinned on a culprit commit C that $DEV already repairs (an effective Review-Fix-Of: C beyond C;
+  # supervisor 11-12: fc8381277's findings, fixed by ca1de4505): the code is fixed, but the coverage chain still needs a
+  # Review-Fix-Of: S commit (review-repair.sh) — "no fixer, nobody told" left dev unable to land, silently (11-17 8bab832c9).
+  # Not a second fix: a fixer checks the findings on $DEV and records the repair there (dev_task_on_dev record).
+  if culprits_repaired "$s" "$att" && { cw=$dupfix_why; ! dev_carries_fix "$s"; }; then
+    dupfix_why=$cw
+    if [ -n "${DRY:-}" ]; then echo "DRY blocked ${s:0:9}: $DEV already repairs its culprit commit(s) ($dupfix_why) but has no Review-Fix-Of: ${s:0:9} — a fixer records it on $DEV"
+    elif [ ! -e "$STATE/sent/$s.dupfix" ]; then log "blocked ${s:0:9}: $DEV already repairs its culprit commit(s) ($dupfix_why) but carries no Review-Fix-Of: ${s:0:9}, which coverage needs — a fixer records the repair on $DEV"; touch "$STATE/sent/$s.dupfix"; fi
+    task=$(dev_task_on_dev "$s" "$f" "$url" record "$dupfix_why")
+  else
+    if [ -n "$(awk '$2 == "author" && $4 != "-"' <<<"$att")" ] && fix_budget_ok "$s" blocked "$f"; then
+      dev_blocked_split "$s" "$f" "$url" "$att"
+      return 0
+    fi
+    if dev_carries_fix "$s"; then
+      if [ -n "${DRY:-}" ]; then echo "DRY blocked ${s:0:9}: $DEV already carries a fix for ${s:0:9} ($dupfix_why) — no fixer"
+      elif [ ! -e "$STATE/sent/$s.dupfix" ]; then log "blocked ${s:0:9}: $DEV already carries a fix for ${s:0:9} ($dupfix_why) — no fixer"; touch "$STATE/sent/$s.dupfix"; fi
+      return 0
+    fi
+    # a blocked commit below S without its repair: S + a devfix can never land on main (review-covered.sh) — the fix goes
+    # to $DEV (11-16 856137bb9: its devfix sat green, unlandable, holding the fixer slot)
+    dev_lower_unrepaired "$s"
+    if [ -n "$dev_lower" ]; then task=$(dev_task_on_dev "$s" "$f" "$url" below "$dev_lower"); fi
   fi
   if [ -n "$att" ]; then task="$task
 Whose code each finding is (culprit commit → its Thread:):
 $(culprit_lines "$att")"; fi
-  if dev_carries_fix "$s"; then
-    if [ -n "${DRY:-}" ]; then echo "DRY blocked ${s:0:9}: $DEV already carries a fix for ${s:0:9} ($dupfix_why) — no fixer"
-    elif [ ! -e "$STATE/sent/$s.dupfix" ]; then log "blocked ${s:0:9}: $DEV already carries a fix for ${s:0:9} ($dupfix_why) — no fixer"; touch "$STATE/sent/$s.dupfix"; fi
-    return 0
-  fi
   if dev_fixer_free "$s" && fix_budget_ok "$s" blocked "$f"; then
     if wake_fixer "$s" blocked "dev: fix review findings on ${s:0:9}" "$task" "$DEV" "$cul" && [ -z "${DRY:-}" ]; then dev_fixer_claim "$s"; fi
   fi
@@ -1196,6 +1228,283 @@ $(culprit_lines "$att")"; fi
   # each culprit thread gets only its own findings; unattributable ones go to the supervisor (owner 11-12)
   notify_attributed "$s" fixfailed "$f" "$att" "[review-dispatch] $DEV (${s:0:9}) was blocked by the review and the fix did not succeed: ${why}. Please handle it (the findings attributed to your commits are below):" "run: $url
 Push a fix commit on $DEV with Review-Fix-Of: ${s} — it lands once the trusted tests pass.$( [ "${DEV_AUTO_REVERT:-0}" = 1 ] && echo " Not fixed within $((DEV_REVERT_AFTER_SEC / 60)) min, the commits involved are reverted automatically so that the others can land on main.")"
+}
+dev_devfix_task() { # dev_devfix_task <S> <findings> <run url> → the fixer task of the devfix fast path (S is the oldest blocked commit
+  # without its repair: S + the fix land on main on green trusted tests, the fix is re-checked there)
+  printf '%s' "Task: the blocking review stopped $DEV at ${1:0:9}. Findings:
+${2:-(none parsed; read the run)}
+Run: $3
+Fix every finding at its source on $DEV (the commits not yet on main: git log origin/$MAIN..origin/$DEV). If a finding is wrong, dispute it (Review-Disputed: trailer, see below) instead of working around it.
+Your worktree starts at origin/$DEV; first git reset --hard ${1} so the fix sits directly on the reviewed commit (later dev commits are NOT part of this fix). Change only what the findings name. Make it ONE commit carrying both trailers Review-Fix-Of: ${1} and Hotfix: review fix of ${1:0:9}. Push it with git push origin HEAD:refs/heads/devfix/${1:0:12} (NOT to $DEV, not to main). Owner 11-10: once the trusted tests pass there, ${1:0:9} plus your fix land on main without a second review (your fix is re-checked on main afterwards), so keep it tight and tested."
+}
+dev_task_on_dev() { # dev_task_on_dev <S> <findings> <run url> record|below <detail> → a fixer task whose fix goes to $DEV, not devfix/:
+  #  record — $DEV already repairs every culprit commit (<detail>: those repairs); the coverage chain needs Review-Fix-Of: S
+  #  below  — <detail>: the blocked commits below S without their repair; S + a devfix could never land on main
+  local s=$1 why
+  if [ "$4" = record ]; then
+    why="$DEV already carries commits that repair the culprit commits of these findings ($5), but none carries the trailer Review-Fix-Of: ${s} — and the coverage rule (review-passed.sh) accepts only that one, so no $DEV head can land on $MAIN until a commit on $DEV carries it. This is NOT a second fix: check on origin/$DEV that each finding is fixed; fix in the same commit only what is still open (git commit --allow-empty when nothing is). Name every finding with one line Fixes-Finding: #<n> <the finding's text> (repaired by <commit>)."
+  else
+    why="The blocked commit(s) $(for b in $5; do printf '%s ' "${b:0:9}"; done)below ${s:0:9} have no Review-Fix-Of: repair under ${s:0:9}, so ${s:0:9} plus a fix cannot land on $MAIN through the devfix fast path: the fix goes to $DEV. Fix every finding at its source."
+  fi
+  printf '%s' "Task: the blocking review stopped $DEV at ${s:0:9}. Findings:
+${2:-(none parsed; read the run)}
+Run: $3
+$why
+Your worktree starts at origin/$DEV — stay there (do NOT reset to ${s:0:9}). ONE commit with the trailer Review-Fix-Of: ${s} (no Hotfix: trailer), pushed with git push origin HEAD:refs/heads/$DEV (git pull --rebase origin $DEV and retry if it moved). It rides the next $DEV review. If a finding is wrong, dispute it (Review-Disputed: trailer, see below)."
+}
+dev_gate_round() { # dev_gate_round <findings> → 0 when the round failed in the commit gates before the reviewer ran: a gate ERROR
+  # and no reviewer BLOCKED line (gate_section prints only the gates' errors when the blocking step never ran)
+  ! grep -q '^review-gate: BLOCKED' <<<"$1" && grep -qE '^\[gates .*ERROR' <<<"$1"
+}
+dev_gate_record_pushed() { # dev_gate_record_pushed <receipt> → 0 when origin/$MAIN got a commit-verification record after that fixer started
+  local since
+  since=$(stat -c %Y "$1" 2>/dev/null) || return 1
+  [ -n "$(git -C "$SRC" log --since="@$since" --format=%H "origin/$MAIN" -- ':(glob)**/commit-verification/**' 2>/dev/null | head -1)" ]
+}
+dev_gate_failed() { # dev_gate_failed <S> <findings> <run url> <culprit threads> → a fixer adds the gates' trusted input on $MAIN
+  # (owner 11-16, e873de849: the gates read a published commit's verification record only from the default branch's
+  # checkout; a record a fixer wrote on devfix/ or $DEV was never read, and its devfix — a round without a verdict — could
+  # never land, holding the slot). Main-side: its own key "gate", no dev fixer slot; the fixer ended without a record on
+  # $MAIN → the culprits, else the supervisor (once).
+  local s=$1 f=$2 url=$3 cul=$4 r="$STATE/sent/$1.fixer-gate" why
+  if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$s.gate-logged" ]; then
+    log "$DEV ${s:0:9}: the commit gates refused its review before the reviewer ran (no verdict) — a fixer adds the record on $MAIN (Hotfix), no dev fixer slot"; touch "$STATE/sent/$s.gate-logged"
+  fi
+  wake_fixer "$s" gate "dev: the commit gates refused the review of ${s:0:9}" "Task: the $DEV review of ${s:0:9} failed in the commit gates BEFORE the reviewer ran — there is no verdict, nothing on $DEV was reviewed or blocked by it:
+$f
+Run: $url
+Repair it on $MAIN, never on $DEV or a devfix branch: the gates read their trusted inputs only from the default branch's checkout. For a published commit whose Verify: checklist is missing or unchecked (its message cannot change), add its SHA-bound record: the file <full sha>.txt in the repository's commit-verification directory (review.yml input verification-dir, default scripts/ci/commit-verification) with the line 'Commit: <full sha>', then a bare 'Verify:' line and '- [x] <evidence>' items (real evidence only). Fix any other gate error there the same way. ONE commit on top of origin/$MAIN with a Hotfix: trailer (no Review-Fix-Of: — ${s:0:9} is not on $MAIN), pushed with git push origin HEAD:refs/heads/$MAIN (rebase on origin/$MAIN and retry if it moved). A record on $DEV or devfix/ is never read. Do not rerun the review: the dispatcher merges $MAIN into $DEV, and the next $DEV review covers these commits." "$MAIN" "$cul" || true
+  why=""
+  if [ -e "$r" ]; then
+    if why=$(fixer_ended "$r") && ! dev_gate_record_pushed "$r"; then why="${why}, without pushing a verification record to $MAIN"; else why=""; fi
+  elif launch_failed "$s" gate; then why="the fixer agent failed to start (t3 thread start failed repeatedly)"
+  fi
+  [ -n "$why" ] || return 0
+  if [ -n "${DRY:-}" ]; then echo "DRY $DEV ${s:0:9}: gate fixer failed ($why) — would tell $(or_supervisor "$cul" | tr '\n' ' ')"; return 0; fi
+  key_prefix=""
+  notify_threads "$s" gatefailed "$(or_supervisor "$cul")" "[review-dispatch] the $DEV review of ${s:0:9} failed in the commit gates before the reviewer ran, and the fix did not succeed: ${why}. Please add the missing record (or fix the other gate error) on $MAIN as a Hotfix: commit — the gates read it only from $MAIN:
+$f
+run: $url"
+}
+
+# ── every blocked $DEV commit has an owner (owner 11-17) ──
+# The coverage chain (review-coverage.sh) needs EVERY commit of origin/$MAIN..origin/$DEV whose verdict (review_first_verdict)
+# is blocked to carry an effective Review-Fix-Of: repair on the head (review-repair.sh repaired) — not only the head the
+# dispatcher looks at. 11-16/17 tralyx: a block followed by a "merge main into dev" (a66a062c9), a block waiting for the one
+# fixer slot (7caac614a), a rerun's verdict after an attempt without one (8bab832c9): each was left with no fixer and no
+# notice, and dev could not land for hours. dev_owner_walk runs every dispatcher run: oldest first, each such commit goes
+# through dev_blocked (author per the reviewer's route, else a fixer — the slot goes to the oldest), and one that nobody
+# owns afterwards (dev_owner_state) is reported to the supervisor once per verdict.
+DEV_WALK_MAX=${DEV_WALK_MAX:-80}                       # commits of origin/$MAIN..origin/$DEV walked (the newest ones)
+DEV_VERDICTS=$STATE/verdicts                            # decided verdicts: <sha> "<kind> <run> <attempt> <completed epoch> <job>"
+DEV_FULL_LISTING_MIN=${DEV_FULL_LISTING_MIN:-60}        # the complete run listing at least this often (blocks older than 100 runs)
+DEV_ORPHAN_GRACE_SEC=${DEV_ORPHAN_GRACE_SEC:-300}       # nobody owns it this long → the supervisor
+DEV_UNKNOWN_NOTICE_SEC=${DEV_UNKNOWN_NOTICE_SEC:-3600}  # a verdict unreadable this long → the supervisor
+dcv="" dev_lower="" dev_unrepaired="" dev_unrepaired_done="" dev_full_listing=0
+dev_commit_verdict() { # dev_commit_verdict <sha> → 0 and dcv="<kind> <run> <attempt> <review job completed epoch> <review job id>";
+  # 1 no verdict; 2 unknown (unreadable); 3 a run of it is still going. THE verdict — review_first_verdict "any", what the
+  # coverage chain reads — which never changes once decided: kept in $DEV_VERDICTS (a blocked one with its findings,
+  # <sha>.findings), so it costs no API call again. Which runs a sha has comes from the routing listing (the newest 100,
+  # memoised) or, when dev_unrepaired_load read it, the complete one; "no verdict" is kept against those runs' state for
+  # 30 min. Call it WITHOUT a subshell (review_first_verdict's memo and listing live in this process).
+  local s=$1 c="$DEV_VERDICTS/$1" sig rc=0 ct jid
+  dcv=""
+  if [ -s "$c" ]; then dcv=$(cat "$c"); return 0; fi
+  if [ "$dev_full_listing" = 1 ]; then
+    sig=$(jq -r --arg r "review $s" --arg k "recheck $s" 'select(.display_title == $r or .display_title == $k) | "\(.id):\(.status // "completed"):\(.conclusion // "-"):\(.run_attempt // 1)"' <<<"$review_verdict_runs" 2>/dev/null | sort)
+  else
+    sig=$(review_list 100 databaseId,displayTitle,status,conclusion ".[] | select(.displayTitle == \"review $s\" or .displayTitle == \"recheck $s\") | \"\(.databaseId):\(.status):\(.conclusion // \"-\")\"" | sort)
+  fi
+  [ -n "$sig" ] || return 1                                     # never reviewed itself (a commit inside a reviewed range)
+  ! grep -qvE '^[0-9]+:completed:' <<<"$sig" || return 3       # still deciding: asked again once it completed
+  if [ -s "$c.none" ] && [ "$(cat "$c.none")" = "$sig" ] && [ -z "$(find "$c.none" -mmin +30 2>/dev/null)" ]; then return 1; fi
+  review_first_verdict "$s" any || rc=$?
+  case "$rc" in
+    1) [ -n "${DRY:-}" ] || printf '%s\n' "$sig" > "$c.none"; return 1 ;;
+    2) return 2 ;;
+  esac
+  ct=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].completed_at // "" | if . == "" then 0 else (fromdateiso8601? // 0) end' <<<"$rfv_jobs" 2>/dev/null) || ct=0
+  jid=$(jq -r '[.jobs[]? | select((.name | sub("^.* / "; "")) == "review")][0].id // 0' <<<"$rfv_jobs" 2>/dev/null) || jid=0
+  dcv="$rfv_kind $rfv_id $rfv_attempt ${ct:-0} ${jid:-0}"
+  [ -z "${DRY:-}" ] || return 0
+  if [ "$rfv_kind" = blocked ]; then
+    # its findings (the verdict's attempt; the run's latest tests), kept only when they are readable: the next run retries
+    local f; f=$(findings "$rfv_id" "$rfv_jobs" "$rfv_latest_jobs")
+    grep -q '^review-gate: BLOCKED' <<<"$f" || return 0
+    printf '%s\n' "$f" > "$c.findings"
+  fi
+  printf '%s\n' "$dcv" > "$c"; rm -f "$c.none"
+}
+dev_unrepaired_load() { # once per run: dev_unrepaired = "<S> <run> <attempt> <completed epoch> <job>" per commit of
+  # origin/$MAIN..origin/$DEV (oldest first, the newest DEV_WALK_MAX) whose verdict is blocked and that has no effective
+  # Review-Fix-Of: repair on origin/$DEV — review-repair.sh repaired, the coverage chain's own test
+  local head s rc
+  [ -z "$dev_unrepaired_done" ] || return 0
+  dev_unrepaired_done=1 dev_unrepaired=""
+  head=$(git -C "$SRC" rev-parse -q --verify "origin/$DEV^{commit}" 2>/dev/null) || return 0
+  ! git -C "$SRC" merge-base --is-ancestor "$head" "origin/$MAIN" 2>/dev/null || return 0
+  if [ -z "${DRY:-}" ]; then mkdir -p "$DEV_VERDICTS"; find "$DEV_VERDICTS" -maxdepth 1 -type f -mtime +14 -delete 2>/dev/null || true; fi
+  # the complete listing: when this run read it already, else at most every DEV_FULL_LISTING_MIN (a run beyond the newest 100)
+  if [ "${review_verdict_listed:-0}" = 1 ] || [ ! -e "$DEV_VERDICTS/.full" ] || [ -n "$(find "$DEV_VERDICTS/.full" -mmin +"$DEV_FULL_LISTING_MIN" 2>/dev/null)" ]; then
+    if review_verdict_load; then dev_full_listing=1; [ -n "${DRY:-}" ] || touch "$DEV_VERDICTS/.full"; fi
+  fi
+  for s in $(git -C "$SRC" rev-list -n "$DEV_WALK_MAX" "origin/$MAIN..$head" 2>/dev/null | tac); do
+    rc=0; dev_commit_verdict "$s" || rc=$?
+    case "$rc" in
+      0) rm -f "$STATE/sent/$s.verdict-unknown-since" ;;
+      2) dev_unknown_verdict "$s"; continue ;;
+      *) continue ;;
+    esac
+    [ "${dcv%% *}" = blocked ] || continue
+    dev_merge_only "$s" && continue                              # nothing of its own beyond main: never blocks coverage
+    if (cd "$SRC" && repaired "$s" "$head"); then continue; fi
+    dev_unrepaired+="$s ${dcv#* }"$'\n'
+  done
+  return 0
+}
+dev_blocked_below() { # dev_blocked_below <S> <head> → dev_lower: the commits of origin/$MAIN..S below S (oldest first) whose verdict is
+  # blocked and that have no effective repair on <head> (review-repair.sh repaired) — what keeps S + its fix off main
+  local b rc
+  dev_lower=""
+  for b in $(git -C "$SRC" rev-list -n "$DEV_WALK_MAX" "origin/$MAIN..$1" 2>/dev/null | tac); do
+    [ "$b" != "$1" ] || continue
+    rc=0; dev_commit_verdict "$b" || rc=$?
+    [ "$rc" = 0 ] && [ "${dcv%% *}" = blocked ] || continue
+    dev_merge_only "$b" && continue
+    if (cd "$SRC" && repaired "$b" "$2"); then continue; fi
+    dev_lower+="$b "
+  done
+  return 0
+}
+dev_lower_unrepaired() { # dev_lower_unrepaired <S> → dev_lower: blocked commits below S without a repair UNDER S — a devfix of S (S + the
+  # fix) could never land on main (review-covered.sh), even when their repair sits on $DEV above S (11-16 856137bb9)
+  dev_blocked_below "$1" "$1"
+}
+dev_unknown_verdict() { # dev_unknown_verdict <S> → its verdict cannot be read (coverage treats it as blocked): the supervisor
+  # once it stayed so DEV_UNKNOWN_NOTICE_SEC
+  local m="$STATE/sent/$1.verdict-unknown-since" t
+  [ -z "${DRY:-}" ] || return 0
+  [ -s "$m" ] || date +%s > "$m"
+  t=$(cat "$m"); [[ "$t" =~ ^[0-9]+$ ]] || t=0
+  [ $(( $(date +%s) - t )) -ge "$DEV_UNKNOWN_NOTICE_SEC" ] || return 0
+  [ ! -e "$STATE/sent/$1.verdict-unknown.delivered.$1.${rfv_id:-0}" ] || return 0
+  INFRA_WHERE=$DEV infra_alert "$1" "${rfv_id:-0}" "verdict-unknown" "$STATE/sent/$1.verdict-unknown" "[review-dispatch] the review verdict of $DEV ${1:0:9} has been unreadable for $(( ($(date +%s) - t) / 60 )) min (run ${rfv_id:-?} attempt ${rfv_attempt:-?}: its jobs, log or attestation cannot be read, or an earlier run never finished). The coverage chain treats it as blocked, so no $DEV head above it can land on $MAIN. Please look at the run (a rerun of its failed jobs), or push a repair of ${1:0:9} (Review-Fix-Of: $1) on $DEV."
+}
+dev_verdict_rotate() { # dev_verdict_rotate <S> <verdict completed epoch> <run> <attempt> → receipts of S OLDER than its verdict belong
+  # to an earlier attempt that had none (a gate failure, a cancel: 11-17 8bab832c9, run 44021700721 attempt 1 → attempt 2
+  # BLOCKED): its fixer, its notices and "authors spared" markers made dev_blocked treat the verdict as handled. Once that
+  # fixer is over they are set aside ($STATE/sent/pre-verdict/) and the verdict is routed afresh.
+  local s=$1 ct=$2 r="$STATE/sent/$1.fixer-blocked" f n=0 d
+  [ -f "$r" ] && [[ "$ct" =~ ^[0-9]+$ ]] && [ "$ct" -gt 0 ] || return 0
+  [ "$(stat -c %Y "$r")" -lt "$ct" ] || return 0
+  fixer_ended "$r" >/dev/null || return 0   # still at work: it keeps the slot; the verdict is routed once it ended
+  if [ -n "${DRY:-}" ]; then echo "DRY blocked ${s:0:9}: receipts older than its verdict (run $3 attempt $4) would be set aside"; return 0; fi
+  d="$STATE/sent/pre-verdict"; mkdir -p "$d"
+  for f in "$STATE/sent/$s".*; do
+    [ -f "$f" ] && [ "$(stat -c %Y "$f")" -lt "$ct" ] || continue
+    case "${f#"$STATE/sent/$s".}" in
+      fixer-blocked|fixer-authorto-*|authors-spared|findings|dupfix|fixer-deferred|slot-freed|blocked.launchfail|budget-*|open-logged|fixfailed*|route-author.*|authorroute.*) ;;
+      *) continue ;;
+    esac
+    mv "$f" "$d/${f##*/}.before-$3-$4"; n=$((n + 1))
+  done
+  log "blocked ${s:0:9}: its verdict (run $3 attempt $4) came after the fixer / notices of an earlier attempt without a verdict — $n receipt(s) set aside (sent/pre-verdict/), the verdict is routed afresh"
+}
+dev_owner_state() { # dev_owner_state <S> → who has blocked S now; "" = nobody (read after dev_blocked acted on it this run)
+  local s=$1 m st r a now
+  now=$(date +%s)
+  for m in "$STATE/sent/$s".route-author.*; do
+    [ -f "$m" ] || continue
+    case "$m" in *.fixed) continue ;; esac
+    st=$(head -1 "$m" 2>/dev/null || true)
+    case "$st" in "author "*) if [ $((now - ${st#author })) -lt "$AUTHOR_FIX_WINDOW_SEC" ]; then echo "its author (${m##*.route-author.})"; return 0; fi ;; esac
+  done
+  for r in "$STATE/sent/$s.fixer-blocked" "$STATE/sent/$s".fixer-authorto-*; do
+    [ -f "$r" ] || continue
+    if [ "${r##*.fixer-}" = blocked ] && devfix_on_its_way "$s"; then echo "its fix on devfix/${s:0:12} (the landing step)"; return 0; fi
+    if ! fixer_ended "$r" >/dev/null; then echo "a fixer agent ($(head -1 "$r" 2>/dev/null || true))"; return 0; fi
+  done
+  if compgen -G "$FIXER_GATE/queue/$s.*" >/dev/null; then echo "a queued fixer agent"; return 0; fi
+  if [ -e "$STATE/sent/$s.blocked.launchfail" ] && ! launch_failed "$s" blocked; then echo "a fixer launch (retried next run)"; return 0; fi
+  a=$(cat "$STATE/dev-fixer.active" 2>/dev/null || true)
+  if [ -n "$a" ] && [ "$a" != "$s" ] && ! dev_fixer_free "$s" >/dev/null 2>&1; then echo "the fixer slot (busy with ${a:0:9}; it is next)"; return 0; fi
+  for m in "$STATE/sent/$s".fixfailed*; do   # a delivered notice (a "skipped" receipt: the recipient is archived, nobody read it)
+    [ -f "$m" ] && [ "$(head -c 7 "$m" 2>/dev/null)" != skipped ] || continue
+    echo "the authors / supervisor (told that the fix failed)"; return 0
+  done
+  if compgen -G "$STATE/sent/$s.main-on-dev*" >/dev/null; then echo "the supervisor (main-side findings)"; return 0; fi
+  return 0
+}
+dev_owner_walk() { # every run: each blocked commit of origin/$MAIN..origin/$DEV without its repair, oldest first → dev_blocked;
+  # nobody owns it DEV_ORPHAN_GRACE_SEC later → the supervisor (the CI owner when it is gone), once per verdict
+  local s run at ct jid f url own since now list
+  dev_unrepaired_load
+  list=$(awk 'NF {printf "%s ", substr($1, 1, 9)}' <<<"$dev_unrepaired")
+  if [ -z "${DRY:-}" ] && [ "$(cat "$STATE/dev.unrepaired" 2>/dev/null || true)" != "$list" ]; then
+    if [ -n "$list" ]; then log "$DEV: blocked commits without their Review-Fix-Of: repair (oldest first): $list— each gets an owner"
+    elif [ -s "$STATE/dev.unrepaired" ]; then log "$DEV: every blocked commit has its repair"; fi
+    printf '%s' "$list" > "$STATE/dev.unrepaired"
+  fi
+  while read -r s run at ct jid; do
+    [ -n "$s" ] || continue
+    dev_verdict_rotate "$s" "$ct" "$run" "$at"
+    f=$(cat "$DEV_VERDICTS/$s.findings" 2>/dev/null || true)
+    if [ -z "$f" ]; then   # not kept (DRY, or unreadable when decided): read it again, routed only once readable
+      review_first_verdict "$s" any >/dev/null 2>&1 && f=$(findings "$rfv_id" "$rfv_jobs" "$rfv_latest_jobs")
+      grep -q '^review-gate: BLOCKED' <<<"$f" || continue
+    fi
+    url="https://github.com/$REPO/actions/runs/$run"
+    if dev_main_hold "$s" "$run" "$f" "{\"jobs\":[{\"name\":\"review\",\"id\":${jid:-0}}]}"; then continue; fi
+    dev_blocked "$s" "$f" "$(culprit_threads "$s" "$f")" "$url" "$(dev_devfix_task "$s" "$f" "$url")"
+    own=$(dev_owner_state "$s")
+    if [ -n "$own" ]; then rm -f "$STATE/sent/$s.orphan-since"; continue; fi
+    if [ -n "${DRY:-}" ]; then echo "DRY $DEV ${s:0:9}: blocked, no repair, nobody owns it — would tell the supervisor"; continue; fi
+    now=$(date +%s)
+    [ -s "$STATE/sent/$s.orphan-since" ] || echo "$now" > "$STATE/sent/$s.orphan-since"
+    since=$(cat "$STATE/sent/$s.orphan-since"); [[ "$since" =~ ^[0-9]+$ ]] || since=$now
+    [ $((now - since)) -ge "$DEV_ORPHAN_GRACE_SEC" ] || continue
+    [ ! -e "$STATE/sent/$s.orphan.delivered.$s.$run" ] || continue
+    if [ ! -e "$STATE/sent/$s.orphan-logged.$run.$at" ]; then log "$DEV ${s:0:9}: blocked (run $run attempt $at), no repair, and nobody the dispatcher can wake owns it — supervisor told"; touch "$STATE/sent/$s.orphan-logged.$run.$at"; fi
+    INFRA_WHERE=$DEV infra_alert "$s" "$run" "orphan.$run.$at" "$STATE/sent/$s.orphan" "[review-dispatch] $DEV ${s:0:9} was blocked by its review (run $url attempt $at) and has no effective repair — a commit on $DEV carrying Review-Fix-Of: $s — so no $DEV head can land on $MAIN (the coverage chain needs it). Nobody the dispatcher can wake owns it any more (no author window, no live fixer, no queued fixer, no delivered notice). Please hand it to someone: its author, or push the repair on $DEV yourself.
+$f"
+  done <<<"$dev_unrepaired"
+  return 0
+}
+dev_devfix_to_dev() { # dev_devfix_to_dev <devfix ref> <its head> <S> → a green devfix that cannot land on main because a commit below S
+  # is not covered (review-covered.sh: a blocked commit there without its repair) is merged into $DEV instead: its
+  # Review-Fix-Of: S repair counts there (review-repair.sh), the next $DEV review reviews it, and it stops holding the fixer
+  # slot (11-16 856137bb9 / e873de849: such devfixes sat green for hours, holding the slot, landing nothing)
+  local fref=$1 fh=$2 s=$3 d m rc=0
+  [ ! -e "$STATE/sent/$fh.devfix-stuck" ] || return 0
+  dev_commit_verdict "$s" || rc=$?
+  case "$rc" in 2|3) return 0 ;; esac   # not decided yet: the next run
+  if [ "$rc" != 0 ] || [ "${dcv%% *}" != blocked ]; then
+    log "devfix $fref ${fh:0:9}: cannot land on $MAIN (the commits below ${s:0:9} are not covered) and ${s:0:9} has no blocked verdict, so coverage needs no repair of it — not landed; it holds no fixer slot"
+    touch "$STATE/sent/$fh.devfix-stuck"; return 0
+  fi
+  # only when a blocked commit below S lacks its repair under the fix — missing proof (an expired attestation, an unreadable
+  # run) is no reason to leave the fast path: that devfix waits, as before
+  dev_blocked_below "$s" "$fh"
+  [ -n "$dev_lower" ] || return 0
+  d=$(git -C "$SRC" rev-parse "origin/$DEV")
+  if git -C "$SRC" merge-base --is-ancestor "$fh" "$d" 2>/dev/null; then git -C "$SRC" push -q origin --delete "$fref" 2>/dev/null || true; return 0; fi
+  rm -rf "$WORK"; git -C "$SRC" worktree prune; git -C "$SRC" worktree add -q --detach "$WORK" "$d"
+  if (cd "$WORK" && git -c core.hooksPath=/dev/null -c user.name="review-dispatch" -c user.email="review-dispatch@localhost" \
+        merge -q --no-ff "$fh" -m "$(dispatch_msg "land review fix ${fh:0:9} (of ${s:0:9}) on $DEV" "the fix passed the trusted tests; a blocked commit below ${s:0:9} has no repair yet, so it cannot land on $MAIN; merged into $DEV without conflicts")" >/dev/null 2>&1); then
+    m=$(git -C "$WORK" rev-parse HEAD)
+    if git -C "$WORK" push -q --force-with-lease="$DEV:$d" origin "HEAD:refs/heads/$DEV" 2>/dev/null; then
+      log "devfix $fref ${fh:0:9} (fix of ${s:0:9}): cannot land on $MAIN yet (blocked $(for b in $dev_lower; do printf '%s ' "${b:0:9}"; done)below it without a repair under the fix) — merged into $DEV as ${m:0:9}: the repair counts there and rides the next $DEV review"
+      git -C "$SRC" push -q origin --delete "$fref" 2>/dev/null || true
+      touch "$STATE/sent/$fh.devfix-todev"
+      git -C "$SRC" fetch -q origin "$DEV" 2>/dev/null || true
+    else log "devfix $fref ${fh:0:9}: push of its merge into $DEV failed ($DEV moved meanwhile; next run retries)"; fi
+  else
+    (cd "$WORK" && git merge --abort >/dev/null 2>&1 || true)
+    log "devfix $fref ${fh:0:9} (fix of ${s:0:9}): cannot land on $MAIN (a commit below it is not covered) and conflicts with $DEV — supervisor told; it holds no fixer slot"
+    touch "$STATE/sent/$fh.devfix-stuck"
+    notify_best_effort "$s" "devfix-stuck-${fh:0:9}" "$SUPERVISOR_THREAD" "[review-dispatch] the review fix ${fh:0:9} on $fref (fix of $DEV ${s:0:9}) passed its trusted tests but cannot land on $MAIN: a blocked commit below ${s:0:9} has no Review-Fix-Of: repair yet (review-covered.sh), and merging it into $DEV instead conflicts. Please merge $fref into $DEV by hand (or push the repair of ${s:0:9} on $DEV), then delete $fref."
+  fi
+  git -C "$SRC" worktree remove --force "$WORK" >/dev/null 2>&1 || true
 }
 
 # A dev round that cannot be blocked (11-13, vpn-sub 090c048d0 / foxhole-backend 02b663bf0): dev beyond main holds no
@@ -1303,6 +1612,7 @@ fixer_worktrees_reap() {
     [ -d "$path" ] || continue
     [[ "$branch" =~ ^refs/heads/devfix-([0-9a-f]{9})-([a-z0-9-]+)$ ]] || continue
     sha9=${BASH_REMATCH[1]}; key=${BASH_REMATCH[2]}
+    if [[ "$key" =~ ^(.+)-r[0-9]+$ ]]; then key=${BASH_REMATCH[1]}; fi   # a relaunch's branch (wake_fixer): the same receipt
     case "$path" in "$FIXER_WT_ROOT"/*) ;; *) continue ;; esac   # only T3's fixer worktrees
     r=""; for r in "$STATE/sent/$sha9"*".fixer-$key"; do [ -f "$r" ] && break; r=""; done
     [ -n "$r" ] || continue                                        # not one this dispatcher launched
@@ -2036,6 +2346,12 @@ for hsha in $(hotfix_candidates); do
   fi
 done
 
+# ── every blocked dev commit without its repair has an owner (dev_owner_walk), before the train and the head loop: the
+#    oldest one gets the fixer slot first ──
+if git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/null && ! git -C "$SRC" merge-base --is-ancestor "origin/$DEV" "origin/$MAIN"; then
+  dev_owner_walk || log "dev owner walk failed (ignored; retried next run)"
+fi
+
 # ── dev merge-train: the newest dev commit whose review passed lands on main even when dev has
 #    moved on meanwhile (its later commits ride the next review). Newest first, ff of main only. ──
 merged_one=0
@@ -2224,7 +2540,8 @@ $gaps}"
     # own repair first — always sheepdog's own review-covered.sh (next to this file), also for a repository on its own
     # scripts/ci/ copies: a copy without it must not skip the proof (review of 1b2f4484e #5)
     if ! (cd "$TRUSTED" && bash "$SHEEPDOG_CI/review-covered.sh" "$fs" "$(git -C "$SRC" merge-base "origin/$MAIN" "$fh")" "$fh" "$REPO" >/dev/null 2>&1); then
-      [ -e "$STATE/sent/$fh.devfix-uncovered" ] || { log "devfix $fref ${fh:0:9}: the commits below ${fs:0:9} are not covered (a blocked review there without its repair, or missing proof) — not landed yet"; touch "$STATE/sent/$fh.devfix-uncovered"; }
+      [ -e "$STATE/sent/$fh.devfix-uncovered" ] || { log "devfix $fref ${fh:0:9}: the commits below ${fs:0:9} are not covered (a blocked review there without its repair, or missing proof) — not landed on $MAIN"; touch "$STATE/sent/$fh.devfix-uncovered"; }
+      dev_devfix_to_dev "$fref" "$fh" "$fs"   # its repair goes to $DEV instead; it never holds the fixer slot unlandable
       continue
     fi
     msha=$(git -C "$SRC" rev-parse origin/$MAIN); landed=""

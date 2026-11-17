@@ -15,6 +15,13 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   thread.
 - **Fix landing**: a `devfix/<sha>` whose trusted tests pass lands on dev / the default branch — unless it changes
   review machinery (contract rule (h)): then it is not landed and its authors are told to push it through a full review.
+- **Every blocked dev commit has an owner** (owner 11-17): each run walks `main..dev` oldest first for commits whose
+  verdict (`review_first_verdict`, kept on disk once decided) is blocked and that have no effective `Review-Fix-Of:`
+  repair on dev — the commits the coverage chain needs repaired — and routes each one (author per the reviewer's route,
+  else a fixer; the fixer slot goes to the oldest). A fix above a blocked commit that has no repair under it is pushed
+  to dev, and a green `devfix/<sha>` that cannot land for that reason is merged into dev. A round the commit gates refused
+  before the reviewer ran (no verdict) gets a fixer that puts the record on the default branch as a `Hotfix:` (key
+  `gate`, no dev slot). One that nobody owns any more is reported to the supervisor once per verdict.
 - **No automatic revert, no round cap** (owner 11-17): a blocked dev commit is fixed forward — its `Review-Fix-Of:` repair
   lands on green trusted tests — however many repairs it takes. `DEV_AUTO_REVERT=1` / a positive `FIX_ROUNDS_MAX`
   re-enable the old 60-min revert / round cap (test suites only).
