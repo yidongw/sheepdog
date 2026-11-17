@@ -183,8 +183,13 @@ EOF
   grep -q 'BLOCKED #2' "$T/routed" || fail 'real dev finding not routed'
   ! grep -q 'BLOCKED #1\|commit='"$M" "$T/routed" || fail 'pre-gate candidate text reached routing'
   eval "$train"; ! grep -q '^notify ' "$T/calls" || fail 'forged main attribution held dev'
-  overdue; CLOCK=overdue; eval "$loop"
-  [ "$(g rev-parse origin/dev)" != "$S" ] || fail 'genuine overdue dev defect was not reverted'
+  overdue; CLOCK=overdue
+  # owner 11-17: by default nothing is reverted, however long dev stays blocked — the defect is fixed forward
+  ( unset DEV_AUTO_REVERT; eval "$loop" )
+  [ "$(g rev-parse origin/dev)" = "$S" ] || fail 'default dispatcher reverted an overdue dev block (owner 11-17: fix forward, never revert)'
+  # the legacy revert, opt-in only
+  DEV_AUTO_REVERT=1; eval "$loop"; unset DEV_AUTO_REVERT
+  [ "$(g rev-parse origin/dev)" != "$S" ] || fail 'genuine overdue dev defect was not reverted (DEV_AUTO_REVERT=1)'
   rv=$(g log -1 --format=%B origin/dev)
   grep -q "This reverts commit $S" <<<"$rv" || fail 'dev culprit not reverted'
   ! grep -q "This reverts commit $D0" <<<"$rv" || fail 'pre-gate evidence reverted unrelated dev work'
