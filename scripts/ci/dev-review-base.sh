@@ -61,7 +61,7 @@ API=${GITHUB_API_URL:-https://api.github.com}
 DEPTH=${REVIEW_BASE_DEPTH:-80}
 WAIT=${REVIEW_BASE_WAIT_SEC:-2400}
 POLL=${REVIEW_BASE_POLL_SEC:-60}
-api() { curl -fsSL -m 30 -H "Authorization: Bearer ${GH_TOKEN:-}" -H "Accept: application/vnd.github+json" "$API/repos/$REPO/$1"; }
+api() { curl -fsSL -m 30 -H @- -H "Accept: application/vnd.github+json" "$API/repos/$REPO/$1" <<<"Authorization: Bearer ${GH_TOKEN:-}"; }   # the token via stdin, never in argv (ps)
 review_api() { api "$1"; }
 . "$(dirname "${BASH_SOURCE[0]}")/review-runs.sh"   # review_runs / review_attested: the one provenance rule
 . "$(dirname "${BASH_SOURCE[0]}")/review-coverage.sh"
