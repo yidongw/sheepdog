@@ -130,11 +130,11 @@ Verify:
 - [x] t"; g rev-parse HEAD; }
 push() { g push -q -f origin "$@"; }
 clone() { rm -rf "$SRC"; git clone -q "$X/remote.git" "$SRC"; }
-listing() { # listing <id> <title> <status> <conclusion> [<attempts>]
-  RUNS+=("$(jq -nc --argjson id "$1" --arg t "$2" --arg st "$3" --arg c "$4" --argjson at "${5:-1}" \
+listing() { # listing <id> <title> <status> <conclusion> [<attempts>] [<updatedAt>]
+  RUNS+=("$(jq -nc --argjson id "$1" --arg t "$2" --arg st "$3" --arg c "$4" --argjson at "${5:-1}" --arg up "${6:-2026-11-17T00:00:00Z}" \
     '{databaseId: $id, displayTitle: $t, path: ".github/workflows/review.yml", workflowName: "Review", event: "workflow_run",
       headBranch: "main", headSha: "x", status: $st, conclusion: (if $c == "null" then null else $c end), attempt: $at,
-      createdAt: "2026-11-17T00:00:00Z", updatedAt: "2026-11-17T00:00:00Z", number: $id, name: "x"}')")
+      createdAt: "2026-11-17T00:00:00Z", updatedAt: $up, number: $id, name: "x"}')")
   (IFS=,; echo "[${RUNS[*]}]") | jq 'sort_by(-.databaseId)' > "$FX/runs.json"
 }
 jobs() { # jobs <id> <attempt> <latest attempt> <kind: pass|blocked|gate|fixes> [<completed_at>]
@@ -149,7 +149,7 @@ jobs() { # jobs <id> <attempt> <latest attempt> <kind: pass|blocked|gate|fixes> 
   case "$4" in
     blocked) printf '%s\n' "2026-11-17T00:00:00Z review-gate: reviewing a..b" "2026-11-17T00:00:00Z review-gate: FINDING #1 route=fixer commit=- — x" \
                "2026-11-17T00:00:00Z review-gate: BLOCKED #1 regression [should]: run $1 attempt $2 drops rows" "2026-11-17T00:00:00Z evidence: f-x.ts:1 drops it" ;;
-    gate) printf '%s\n' "2026-11-17T00:00:00Z [gates 00:00:00] ERROR: commit abc missing trailer(s):  Verify: (Verify: is a bare line followed by '- [x] …' items)" ;;
+    gate) printf '%s\n' "2026-11-17T00:00:00Z [gates 00:00:00] ERROR: commit ${GATE_SHA:-abc} missing trailer(s):  Verify: (Verify: is a bare line followed by '- [x] …' items)" ;;
     *) printf '%s\n' "2026-11-17T00:00:00Z review-gate: reviewing a..b" "2026-11-17T00:00:00Z review-gate: PASS" ;;
   esac > "$FX/log-$jid.txt"
 }
@@ -262,12 +262,14 @@ mkdir -p "$STATE/sent"; echo "$Q" > "$STATE/dev-fixer.active"
 echo "mcp:eeeeeeee-0000-4000-8000-000000000001" > "$STATE/sent/$Q.fixer-blocked"; echo completed > "$FX/state-eeeeeeee-0000-4000-8000-000000000001"
 touch "$STATE/sent/$Q.fixfailed.0" "$STATE/sent/$Q.authors-spared"; printf 'gate\n' > "$STATE/sent/$Q.findings"
 touch -d '-10 min' "$STATE/sent/$Q".*
+mkdir -p "$STATE/fixer-gate/ended"; touch "$STATE/fixer-gate/ended/$Q.fixer-blocked"   # the repo gate cached the old fixer as ended
 g branch -q "devfix-${Q:0:9}-blocked" "$Q"; git -C "$SRC" branch -q "devfix-${Q:0:9}-blocked" "$Q"   # the old fixer's branch
 dispatch e3
 f=$(task_for "$Q"); [ -n "$f" ] || fail "(e) legacy: the verdict after an older attempt's fixer got none: $(cat "$STATE/dispatch.log")"
 grep -q "args: .*devfix-${Q:0:9}-blocked-r2" "$f" || fail "(e) legacy: the relaunch reused the old fixer's branch: $(head -2 "$f")"
 ls "$STATE/sent/pre-verdict/" | grep -q "$Q.fixer-blocked.before-$QR-2" || fail "(e) legacy: the old receipts were not set aside"
-echo "ok - (e) an older dispatcher's pre-verdict fixer / notice no longer swallow the verdict"
+[ ! -e "$STATE/fixer-gate/ended/$Q.fixer-blocked" ] || fail "(e) legacy: the gate still caches the replacement fixer's receipt as ended (re-check of 0fdd85b5a #1/#2)"
+echo "ok - (e) an older dispatcher's pre-verdict fixer / notice no longer swallow the verdict; the gate sees the new fixer"
 
 # orphan: X blocked, its fixer ended without a fix, and its fixfailed notice reached nobody (the supervisor's thread is archived)
 # → the orphan notice goes to the supervisor, and — archived — to the CI owner (infra_alert), once
@@ -278,6 +280,7 @@ run1 "$XO" blocked "$P"
 mkdir -p "$STATE/sent"; echo "$XO" > "$STATE/dev-fixer.active"
 echo "mcp:ffffffff-0000-4000-8000-000000000001" > "$STATE/sent/$XO.fixer-blocked"; echo completed > "$FX/state-ffffffff-0000-4000-8000-000000000001"
 touch -d '-10 min' "$STATE/sent/$XO.fixer-blocked"
+cp "$T/bin/t3" "$T/t3.normal"
 cat > "$T/bin/t3" <<'SH'
 #!/usr/bin/env bash
 case "$1 $2" in
@@ -291,3 +294,62 @@ grep -q "nobody the dispatcher can wake owns it" "$STATE/dispatch.log" || fail "
 [ "$(grep -c "^send $DISPATCH_THREAD" "$FX/t3")" = 1 ] || fail "orphan: the CI owner was not told exactly once (supervisor archived): $(cat "$FX/t3")"
 [ "$(grep -c "nobody the dispatcher can wake owns it" "$STATE/dispatch.log")" = 1 ] || fail "orphan: reported more than once"
 echo 'ok - a blocked commit nobody can own reaches the supervisor (or the CI owner) once'
+cp "$T/t3.normal" "$T/bin/t3"   # the normal T3 stub again
+
+# re-check of 0fdd85b5a #4: a later unfinished run of the same commit does not hide its completed first verdict
+# (a newer failed run — Y's, already repaired — is what the train scan's "newest failure" looks at, as on tralyx)
+setup f
+P=$(c p); push main; g checkout -q -b dev; XF=$(c xf); YF=$(c yf); RYF=$(c ryf "Review-Fix-Of: $YF"); push dev
+clone
+run1 "$XF" blocked "$P"; RID=$((RID + 1)); listing "$RID" "review $XF" in_progress null; run1 "$YF" blocked "$XF"
+dispatch f
+[ -n "$(task_for "$XF")" ] || fail "(#4) a later unfinished run hid the completed blocked verdict: $(cat "$STATE/dispatch.log")"
+echo 'ok - a later unfinished run does not hide a completed blocked verdict'
+
+# re-check of 0fdd85b5a #5: Q (now below the head) had a gate-failed attempt 1, kept as "no verdict"; its rerun BLOCKED is
+# the same "completed failure" in the routing listing — the rerun's identity (updatedAt) must invalidate that
+setup n
+P=$(c p); push main; g checkout -q -b dev; Q=$(c q); Y=$(c y); RY=$(c ry "Review-Fix-Of: $Y"); push dev
+clone
+mkdir -p "$STATE/verdicts"; touch "$STATE/verdicts/.full"   # the complete listing was read recently: the routing view decides
+RID=$((RID + 1)); QR=$RID
+GATE_SHA=${Q:0:9} listing "$QR" "review $Q" completed failure 1 2026-11-17T01:00:00Z; GATE_SHA=${Q:0:9} jobs "$QR" 1 1 gate
+run1 "$Y" blocked "$Q"; YRUN=$RUN   # newer, repaired: the train scan's "newest failure"
+dispatch n1
+[ -s "$STATE/verdicts/$Q.none" ] || fail "(#5) setup: no-verdict not cached: $(ls "$STATE/verdicts")"
+RUNS=(); listing "$QR" "review $Q" completed failure 2 2026-11-17T02:00:00Z; listing "$YRUN" "review $Y" completed failure
+mv "$FX/jobs-$QR.json" "$FX/jobs-$QR-a1.json"; jobs "$QR" 2 2 blocked "$NOWISO"
+echo completed > "$FX/state-aaaaaaaa-0000-4000-8000-000000000001"   # the gate fixer of attempt 1 ended
+dispatch n2
+f=$(task_for "$Q"); [ -n "$f" ] && grep -q "args: .*devfix-${Q:0:9}-blocked" "$f" || fail "(#5) the cached no-verdict hid the rerun's BLOCKED verdict: $(cat "$STATE/dispatch.log")"
+echo "ok - a rerun invalidates the cached no-verdict"
+
+# re-check of 0fdd85b5a #3: the gate fixer ended — complete only with the failing commit's OWN valid record in the CONFIGURED dir
+gate_case() { # gate_case <name> <how: unrelated|wrongdir|configured> → whether the "fix did not succeed" notice went out
+  setup "$1"
+  P=$(c p); push main; g checkout -q -b dev; Q=$(c q); push dev; g checkout -q main
+  clone
+  RID=$((RID + 1)); GATE_SHA=${Q:0:9} listing "$RID" "review $Q" completed failure; GATE_SHA=${Q:0:9} jobs "$RID" 1 1 gate
+  dispatch "$1-1"
+  [ -n "$(task_for "$Q")" ] || fail "(#3) setup: no gate fixer"
+  echo completed > "$FX/state-aaaaaaaa-0000-4000-8000-000000000001"
+  rec() { mkdir -p "$X/w/$(dirname "$1")"; printf 'Commit: %s\nVerify:\n- [x] evidence\n' "$2" > "$X/w/$1"; }
+  case "$2" in
+    unrelated) rec "scripts/ci/commit-verification/$P.txt" "$P" ;;                       # another commit's record
+    wrongdir) rec "scripts/ci/commit-verification/$Q.txt" "$Q"
+              mkdir -p "$X/w/.github/workflows"; printf 'jobs:\n  r:\n    with:\n      verification-dir: custom-proof\n' > "$X/w/.github/workflows/review.yml" ;;
+    configured) rec "custom-proof/$Q.txt" "$Q"
+              mkdir -p "$X/w/.github/workflows"; printf 'jobs:\n  r:\n    with:\n      verification-dir: custom-proof\n' > "$X/w/.github/workflows/review.yml" ;;
+  esac
+  g add -A; g commit -q -m "record" -m "Hotfix: record
+Loop: adhoc/test
+Thread: $TH
+Verify:
+- [x] t"; push main
+  dispatch "$1-2"
+  grep -q "sent gatefailed" "$STATE/dispatch.log"
+}
+gate_case gu unrelated || fail "(#3) another commit's record counted as the repair: $(cat "$STATE/dispatch.log")"
+gate_case gw wrongdir || fail "(#3) a record outside the configured verification-dir counted as the repair"
+! gate_case gc configured || fail "(#3) a valid record in the configured verification-dir was not accepted: $(cat "$STATE/dispatch.log")"
+echo "ok - a gate fixer is done only when main holds the failing commit's own record in the configured directory"
