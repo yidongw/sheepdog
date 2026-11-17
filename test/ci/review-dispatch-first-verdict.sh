@@ -33,7 +33,7 @@ DEV_REVERT_AFTER_SEC=3600 DEV_REVERT_WARN_SEC=900 key_prefix="" merged_one=1
 source "$ROOT/scripts/ci/review-runs.sh"
 source "$ROOT/scripts/ci/review-evidence.sh"
 fns() { local n; for n in "$@"; do sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D"; done; }
-eval "$(fns review_api review_verdict_list review_list dev_verdict_run run_verdict finding_jobs findings findings_cap hotfix_pass_confirmed)"
+eval "$(fns review_api review_verdict_list review_list dev_verdict_run run_verdict finding_jobs findings findings_tests findings_cap hotfix_pass_confirmed)"
 ghm() { gh "$@"; }; ghc_note_jobs() { cat >/dev/null; }
 log() { :; }
 dev_merge_only() { return 1; }; dev_round_noop() { return 1; }; dev_main_hold() { return 1; }

@@ -313,7 +313,7 @@ mklog() { # mklog old|new <n> → a review job log of n author-routed findings i
     for i in $(seq 1 "$2"); do echo "2026-11-12T00:00:00Z review-gate: FINDING #$i route=author commit=- — r$i"; echo "2026-11-12T00:00:00Z review-gate: BLOCKED #$i regression [should]: bug $i"; echo "2026-11-12T00:00:00Z evidence: src/a.ts:3 e$i"; done
   fi
 }
-eval "$(fns findings)"
+eval "$(fns findings findings_tests)"
 for fmt in old new; do
   gh() { case "$*" in *"/jobs/"*logs*) mklog "$LOGFMT" 60 ;; *) echo '{"jobs":[{"name":"tests","conclusion":"success","id":1},{"name":"review","conclusion":"failure","id":2,"steps":[{"name":"Review (blocking)","conclusion":"failure"}]}]}' ;; esac; }
   LOGFMT=$fmt; out=$(FINDINGS_MAX=25 findings 1)   # an explicit cap (display only)

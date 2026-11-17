@@ -8,7 +8,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # a helper the suite did not extract fails it (review of 96c16d11a #3: a missing findings / review_infra_reason made the negated
 # completion check pass silently)
 command_not_found_handle() { echo "FAIL: command not found: $1 (a helper the test did not extract or stub)" >&2; kill -TERM $$ 2>/dev/null; exit 127; }
-for fn in review_job_state recheck_infra_failed recheck_reviewed main_infra infra_alert infra_episode_open findings findings_cap gate_section review_step_ran review_infra_reason; do
+for fn in review_job_state recheck_infra_failed recheck_reviewed main_infra infra_alert infra_episode_open findings findings_tests findings_cap gate_section review_step_ran review_infra_reason; do
   eval "$(sed -n "/^$fn() {/,/^}/p" "$D" "${D%/*}/review-evidence.sh")"
   declare -F "$fn" >/dev/null || fail "missing $fn"
 done
