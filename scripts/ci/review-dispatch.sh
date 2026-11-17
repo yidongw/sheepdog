@@ -447,9 +447,15 @@ dev_fixer_free() { # dev_fixer_free <sha> → 0 when a fixer may be woken for th
   [ -e "$STATE/sent/$1.fixer-deferred" ] || { log "dev fixer for ${a:0:9} still active: no second fixer for blocked ${1:0:9}"; touch "$STATE/sent/$1.fixer-deferred"; }
   return 1
 }
+budget_spent() { # budget_spent <sha> → 0 only while a round cap is configured AND <sha>'s budget-spent receipt exists.
+  # Owner 11-17 removed the cap (default 0): receipts written under the old cap are then ignored everywhere (re-check
+  # of 301e82ef6 #1/#2: a stale receipt still ended the dev path and silenced the fixfailed escalation).
+  [ "${FIX_ROUNDS_MAX:-0}" -gt 0 ] || [ "${FIX_ROUNDS_MAX_RISK:-0}" -gt 0 ] || return 1
+  [ -e "$STATE/sent/$1.budget-spent" ]
+}
 fixer_phrase() { # fixer_phrase <sha> → what the blocked notice says about the fixer (true, not always "woken")
   local a; a=$(cat "$STATE/dev-fixer.active" 2>/dev/null || true)
-  if [ -e "$STATE/sent/$1.budget-spent" ]; then echo "the same problem is still blocked after $(cut -d' ' -f1 "$STATE/sent/$1.budget-spent") fix rounds; the fix rounds are spent, this stops here (nobody else is woken)"
+  if budget_spent "$1"; then echo "the same problem is still blocked after $(cut -d' ' -f1 "$STATE/sent/$1.budget-spent") fix rounds; the fix rounds are spent, this stops here (nobody else is woken)"
   elif grep -qs '^author ' "$STATE/sent/$1".route-author.*; then echo "the review routed some findings to their authors, who have been told (not fixed within $((AUTHOR_FIX_WINDOW_SEC / 60)) min, they go to a fixer agent)"
   elif [ -e "$STATE/sent/$1.fixer-blocked" ]; then echo "woke a fixer agent to fix it on $DEV"
   elif [ -e "$STATE/fixer-gate/queue/$1.blocked" ]; then echo "a fixer agent is queued: one fixer agent per repository at a time, the dispatcher wakes it when the previous one ends"
@@ -1173,7 +1179,7 @@ $(culprit_lines "$att")"; fi
   fi
   # owner 11-12: "two rounds, then it ends" on every path — fix_budget_ok logged it (open-findings.log); no notice to
   # anyone (re-check of 6616b3138 #1/#2: the dev path still woke the authors / supervisor with fixfailed.0)
-  if [ -e "$STATE/sent/$s.budget-spent" ]; then
+  if budget_spent "$s"; then
     if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$s.budget-ended" ]; then
       log "blocked ${s:0:9}: fix rounds spent — it ends here, nobody woken (findings in open-findings.log)"; touch "$STATE/sent/$s.budget-ended"
     fi

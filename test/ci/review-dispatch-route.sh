@@ -15,7 +15,7 @@ fns() { local n b; for n in "$@"; do b=$(sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$
   if [ -z "$b" ]; then printf '{ echo "fns: helper %s not found in %s" >&2; exit 1; }\n' "$n" "$D"; else printf '%s\n' "$b"; fi; done; }
 eval "$(fns repair_effective author_group_key findings_cap gate_section review_step_ran thread_of fixer_receipt_thread range_threads culprit_threads or_supervisor notify_threads devfix_fix_of fixer_ended launch_failed \
   dev_carries_fix fix_reverted reverted hotfix_fix_pushed escalate_ended_fixer named_files blocked_author_reason \
-  dev_blocked norm_tid finding_blocks finding_meta finding_route review_round_route route_reason attribute_finding \
+  dev_blocked budget_spent norm_tid finding_blocks finding_meta finding_route review_round_route route_reason attribute_finding \
   attribution findings_subset att_of culprit_lines notify_attributed author_fixed author_turn split_fixer_failed \
   split_fixer dev_blocked_split revert_after_for own_findings fyi_author culprits_repaired att_threads)"
 eval "$(sed -n '/^digest_file() {/p; /^digest_add() {/,/^}/p' scripts/ci/review-notify.sh)"   # fyi_author → the authors' digest
@@ -210,13 +210,13 @@ echo 'tests-only failure → fixer'
 
 # 7. budget spent → it ends, regardless of route: no author routing, no fixer, NOBODY woken (owner 11-12; re-check of
 #    6616b3138 #1/#2: the dev path still sent fixfailed.0 to the authors)
-reset; BUDGET_OK=0; echo "3 3" > "$STATE/sent/$S.budget-spent"
+reset; BUDGET_OK=0; FIX_ROUNDS_MAX=3; echo "3 3" > "$STATE/sent/$S.budget-spent"   # the legacy cap, set explicitly
 dev_blocked "$S" "$F2" "" run-url task
 dev_blocked "$S" "$F2" "" run-url task
 test ! -e "$woken"; test ! -e "$sent"
 ! ls "$STATE/sent" | grep -q route-author || { echo "negative check failed: test/ci/review-dispatch-route.sh:214" >&2; exit 1; }
 test "$(grep -c 'fix rounds spent — it ends here, nobody woken' "$LOG")" -eq 1
-echo 'budget spent → nobody woken'
+FIX_ROUNDS_MAX=0; echo 'budget spent → nobody woken'
 
 # 8. unattributable author finding (two threads touched the file, no commit, no blameable line) → fixer, no broadcast
 reset

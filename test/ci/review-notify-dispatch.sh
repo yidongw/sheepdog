@@ -107,7 +107,7 @@ wake_fixer() {
   return 1
 }
 # Exercise the actual blocked-dev caller (dev_blocked) and require the culprit authors as the fixer's record.
-eval "$(sed -n '/^dev_blocked() {/,/^}/p' scripts/ci/review-dispatch.sh)"; for _f in dev_blocked; do declare -F "$_f" >/dev/null || { echo "missing helper $_f (not extracted from the dispatcher)" >&2; exit 1; }; done
+eval "$(sed -n '/^dev_blocked() {/,/^}/p; /^budget_spent() {/,/^}/p' scripts/ci/review-dispatch.sh)"; for _f in dev_blocked budget_spent; do declare -F "$_f" >/dev/null || { echo "missing helper $_f (not extracted from the dispatcher)" >&2; exit 1; }; done
 culprits_repaired() { return 1; }   # dev_blocked's "dev already repairs its culprits" check: not what this test is about
 bsha=abc brid=123 bf=finding
 # recipients are the culprits (commits touching a named file); "finding" names none → nobody (owner 11-12: no broadcast)

@@ -16,7 +16,7 @@ D=scripts/ci/review-dispatch.sh ROOT=$PWD
 fns() { local n b; for n in "$@"; do b=$(sed -n "/^$n() {/,/^}/p; /^$n() { .*}\$/p" "$D" "${D%/*}/review-evidence.sh" "${D%/*}/review-repair.sh")  # a missing helper fails the test (it used to only print to stderr)
   if [ -z "$b" ]; then printf '{ echo "fns: helper %s not found in %s" >&2; exit 1; }\n' "$n" "$D"; else printf '%s\n' "$b"; fi; done; }
 eval "$(fns repair_effective fix_reverted reverted thread_of fixer_receipt_thread range_threads culprit_threads notify_threads devfix_fix_of fixer_ended launch_failed \
-  dev_carries_fix hotfix_fix_pushed named_files blocked_author_reason dev_blocked \
+  dev_carries_fix hotfix_fix_pushed named_files blocked_author_reason budget_spent dev_blocked \
   or_supervisor norm_tid finding_blocks finding_meta finding_route review_round_route route_reason attribute_finding \
   attribution findings_subset att_of culprit_lines notify_attributed author_fixed author_turn split_fixer_failed \
   split_fixer dev_blocked_split revert_after_for own_findings fyi_author culprits_repaired)"
@@ -119,6 +119,18 @@ dev_blocked "$S" "$F" "$cul" run-url task
 test ! -e "$woken"; test ! -e "$sent"
 fix_budget_ok() { return 0; }
 echo 'budget spent: nobody told'
+
+# 3d. no cap (owner 11-17 default 0): a stale budget-spent receipt from the old cap is ignored — an ended fixer still
+#     escalates (re-check of 301e82ef6 #1/#2)
+reset; echo "3 3" > "$STATE/sent/$S.budget-spent"
+( FIX_ROUNDS_MAX=0 FIX_ROUNDS_MAX_RISK=0
+  dev_blocked "$S" "$F" "$cul" run-url task
+  THREAD_STATE=interrupted
+  dev_blocked "$S" "$F" "$cul" run-url task
+  test "$(cat "$sent")" = "fixfailed.0 $A"
+  ! budget_spent "$S" )
+THREAD_STATE=running
+echo 'no cap: stale budget receipt ignored, ended fixer escalates'
 
 # 4. review clean, only the trusted tests failed (prettier / lint) → fixer only
 reset
