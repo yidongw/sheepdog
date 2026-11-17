@@ -30,7 +30,7 @@ parent=$(git rev-parse -q --verify "$head^1^{commit}") || { echo 'Review range r
 REPO=${REPO:-${GITHUB_REPOSITORY:?REPO=owner/name is required}}
 API=${GITHUB_API_URL:-https://api.github.com}
 DEPTH=${REVIEW_BASE_DEPTH:-50}
-api() { curl -fsSL -m 30 -H "Authorization: Bearer ${GH_TOKEN:-}" -H "Accept: application/vnd.github+json" "$API/repos/$REPO/$1"; }
+api() { curl -fsSL -m 30 -H @- -H "Accept: application/vnd.github+json" "$API/repos/$REPO/$1" <<<"Authorization: Bearer ${GH_TOKEN:-}"; }   # the token via stdin, never in argv (ps)
 
 # A main review COMPLETED only when its blocking step ran to a verdict (the review contract, CLAUDE.md "Review contract"):
 # the step "Review (blocking …" succeeded, or failed WITH the reviewer's "review-gate: BLOCKED #n" in the job log. A review

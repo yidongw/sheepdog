@@ -2,3 +2,4 @@
 #   <suite file name> <the 40-char pin sha> <the protection that is not in the pinned snapshot yet>
 # Allowed only for that exact pin: a pin bump runs every suite against the new pin again. Keep this list empty whenever
 # the newest reviewed main carries the protection — bump the pin instead (docs/self-review.md).
+prior-findings-token.sh ac73d21d3d7e0f9f882fc25dd2b74115312cc8a9 the GitHub token goes to curl on stdin (-H @-), not in argv — lands with this hotfix, the next pin bump carries it

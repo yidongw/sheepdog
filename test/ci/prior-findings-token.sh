@@ -28,7 +28,9 @@ Hotfix: fix"; F=$(g rev-parse HEAD)
 mkdir -p "$T/bin"
 cat > "$T/bin/curl" <<CURL
 #!/usr/bin/env bash
-case "\$*" in *"Authorization: Bearer tok-123"*) ;; *) exit 22 ;; esac   # private repo: no token → 404
+case "\$*" in *"tok-123"*) echo "token in curl argv (visible in ps)" >&2; exit 99 ;; esac   # never in argv
+case "\$*" in *"-H @-"*) hdr=\$(cat) ;; *) hdr="" ;; esac
+case "\$hdr" in *"Authorization: Bearer tok-123"*) ;; *) exit 22 ;; esac   # private repo: no token (on stdin) → 404
 case "\$*" in
   *repos/o/r/actions/workflows/review.yml/runs*page=1*) echo '{"workflow_runs":[{"id":9,"display_title":"recheck $S","status":"completed","conclusion":"failure","event":"push","head_branch":"x","path":".github/workflows/review.yml"},{"id":7,"display_title":"recheck $S","status":"completed","conclusion":"failure","event":"workflow_run","head_branch":"main","path":".github/workflows/review.yml"}]}' ;;
   *repos/o/r/actions/workflows/review.yml/runs*) echo '{"workflow_runs":[]}' ;;

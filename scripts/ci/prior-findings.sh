@@ -7,7 +7,7 @@
 set -uo pipefail
 REPO=${REPO:-${GITHUB_REPOSITORY:?REPO=owner/name is required}}
 API=${GITHUB_API_URL:-https://api.github.com}
-api() { curl -fsSL -m 30 -H "Authorization: Bearer ${GH_TOKEN:-}" -H "Accept: application/vnd.github+json" "$API/repos/$REPO/$1"; }
+api() { curl -fsSL -m 30 -H @- -H "Accept: application/vnd.github+json" "$API/repos/$REPO/$1" <<<"Authorization: Bearer ${GH_TOKEN:-}"; }   # the token via stdin, never in argv (ps)
 note() { echo "prior-findings: $*" >&2; }   # diagnostics go to the job log; stdout is the ledger
 # only trailers that name an ancestor of their commit: a previous round's findings narrow the re-review (the reviewer
 # treats ancestors of S as reviewed then), so a trailer naming a non-ancestor (tralyx fd935e7c5 → dev 1de3ade46, 11-14)
