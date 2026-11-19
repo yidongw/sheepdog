@@ -163,4 +163,65 @@ Thread: $A" >/dev/null; push
 main_blocked "$H4" "$F4" "$H3" 10
 test -e "$STATE/sent/$H4.hotfix-complete" || fail "Review-Disputed: #n did not count as covered"
 echo 'Review-Disputed: #n counts as covered'
+# (e) (re-check of 0c799ece7 #1/#2) an obsolete repair only on dev does not hold H pending once the repairs on main cover
+#     every finding; a dev repair still needed for an open number does
+for who in "$A" "$CI"; do
+  H5=$(commit src/e.ts "Hotfix: e
+Thread: $A"); push
+  F5=$(five src/e.ts)
+  main_blocked "$H5" "$F5" "$H4" 11
+  g checkout -q -B devw main; commit src/e.ts "Review-Fix-Of: $H5
+Thread: $A" >/dev/null; g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
+  commit src/e.ts "Hotfix: fix e on main
+Review-Fix-Of: $H5
+Thread: $who" >/dev/null; push
+  main_blocked "$H5" "$F5" "$H4" 11
+  test -e "$STATE/sent/$H5.hotfix-complete" || fail "an obsolete dev repair holds H pending (main repair by $who covers all): $(tail -1 "$LOG")"
+done
+H6=$(commit src/f.ts "Hotfix: f
+Thread: $A"); push
+F6=$(five src/f.ts)
+main_blocked "$H6" "$F6" "$H5" 12
+g checkout -q -B devw main; RD=$(commit src/f.ts "Review-Fix-Of: $H6
+Fixes-Finding: #5 problem5-text
+Thread: $A"); g push -q -f origin HEAD:refs/heads/dev; g fetch -q origin; g checkout -q main
+commit src/f.ts "Hotfix: fix f on main
+Review-Fix-Of: $H6
+Fixes-Finding: #1 problem1-text
+Fixes-Finding: #2 problem2-text
+Fixes-Finding: #3 problem3-text
+Fixes-Finding: #4 problem4-text
+Thread: $A" >/dev/null; push
+main_blocked "$H6" "$F6" "$H5" 12
+test ! -e "$STATE/sent/$H6.hotfix-complete" || fail "a dev repair still needed for #5 did not keep H pending"
+grep -q "HOTFIX ${H6:0:9}: repair(s) ${RD:0:9} on dev only — pending" "$LOG" || fail "pending not logged for the needed dev repair"
+echo 'obsolete dev repair: no pending once main covers everything; a needed one keeps H pending'
+
+# (f) (re-check of 0c799ece7 #3) the owner digest credits each fixer repair only with the findings it names
+reset
+two() { printf 'review-gate: reviewing a..b\nreview-gate: FINDING #1 route=fixer commit=- — x\nreview-gate: FINDING #2 route=fixer commit=- — x\nreview-gate: BLOCKED #1 regression [should]: one-text\nevidence: src/g.ts:1 proof\nreview-gate: BLOCKED #2 regression [should]: two-text\nevidence: src/g.ts:1 proof\n'; }
+G0=$(commit src/g.ts "Hotfix: g
+Thread: $A"); push
+G1=$(commit src/g.ts "Hotfix: fix g
+Review-Fix-Of: $G0
+Loop: dev-fixer
+Thread: $FX"); push
+GA=$(commit src/h.ts "Hotfix: fix #1 of g1
+Review-Fix-Of: $G1
+Fixes-Finding: #1 one-text
+Loop: dev-fixer
+Thread: $FX"); push
+GB=$(commit src/h.ts "Hotfix: fix #2 of g1
+Review-Fix-Of: $G1
+Fixes-Finding: #2 two-text
+Loop: dev-fixer
+Thread: $FX"); push
+rm -f "$(digest_file "$A")"
+main_blocked "$G1" "$(two)" "$G0" 13
+test -e "$STATE/sent/$G1.hotfix-complete" || fail "two fixer repairs naming #1 and #2: not complete"
+dg=$(cat "$(digest_file "$A")")
+grep -q "^${GA:0:9} main ${G1:0:9} #1 " <<<"$dg" && grep -q "^${GB:0:9} main ${G1:0:9} #2 " <<<"$dg" || fail "digest misses a repair: $dg"
+if grep -qE "^${GA:0:9} main ${G1:0:9} #2 |^${GB:0:9} main ${G1:0:9} #1 " <<<"$dg"; then fail "digest credits a repair with a finding it does not name: $dg"; fi
+test "$(wc -l <<<"$dg")" = 2 || fail "digest entries: $dg"
+echo 'digest: each repair credited with the findings it names'
 echo 'main partial-repair checks passed'
