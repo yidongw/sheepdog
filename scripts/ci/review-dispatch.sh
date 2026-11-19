@@ -868,8 +868,9 @@ repair_effective() { # repair_effective <S> <thread|""> <ref>... → THE definit
   # used by every completion / escalation detector (dev_carries_fix, hotfix_fix_pushed, author_fixed, split_fixer_failed):
   # prints the newest commit on the refs, beyond S ("^<sha>" excludes that commit's history), carrying the exact trailer
   # "Review-Fix-Of: S", not reverted since on a ref that contains it (fix_reverted), and — <thread> given — committed by
-  # that thread (Thread: trailer: the author / the fixer that owns the finding group); 1 when none
-  local s=$1 want=$2 c; shift 2
+  # that thread (Thread: trailer: the author / the fixer that owns the finding group); 1 when none.
+  # _re_all=1: every such commit, newest first (main_blocked: which finding numbers the repairs cover)
+  local s=$1 want=$2 c found=0; shift 2
   # every matching commit (re-check of e3aca30fd #7: "head -20" before the thread filter lost a thread's repair behind
   # twenty newer ones of other threads)
   # a short sha in the trailer (≥ 7 hex, a prefix of S) is accepted too: the commit-msg hook refuses new ones, older ones exist
@@ -894,9 +895,10 @@ repair_effective() { # repair_effective <S> <thread|""> <ref>... → THE definit
       if ! fix_reverted "$c" "$ref" && [ "$_fix_reverted_unsure" = 0 ]; then ok=1; break; fi
     done
     [ "$ok" = 1 ] || continue
-    printf '%s\n' "$c"; return 0
+    printf '%s\n' "$c"; [ "${_re_all:-0}" = 1 ] || return 0
+    found=1
   done
-  return 1
+  [ "$found" = 1 ]
 }
 hotfix_fix_pushed() { # hotfix_fix_pushed <H> → prints the effective repair of H on origin/$MAIN or origin/$DEV; 1 when none
   local refs=("origin/$MAIN")
@@ -2226,23 +2228,56 @@ main_launch_check() { # main_launch_check <H> <key> <findings> <run url> <nums> 
 $(main_subset "$3" $5)
 run: $4"
 }
+# Which findings a repair covers (owner 11-19; tralyx main 2e4b3b4d4: its repair e3a132c29 named #4 of five findings, and
+# the dispatcher stopped routing #1 #2 #3 #5). ROUTING only: landing / coverage (review-repair.sh, review-passed.sh) still
+# asks for one effective repair. A repair of H with Fixes-Finding: #n / Review-Disputed: #n lines covers exactly those
+# numbers; one with no such line covers all of H's findings (as before). n=0 — the unnumbered diagnostics (failed tests, no
+# verdict), no BLOCKED #n — is covered by any repair.
+repair_nums() { # repair_nums <commit> → the finding numbers its Fixes-Finding: / Review-Disputed: lines name ("" = none: it covers all)
+  { git -C "$SRC" show -s --format=%B "$1" 2>/dev/null || true; } | sed -nE 's/^(Fixes-Finding|Review-Disputed):[[:space:]]*#?([0-9]+)([^0-9].*)?$/\2/p' | awk '{ print $1 + 0 }' | sort -un | tr '\n' ' '
+}
+nums_open() { # nums_open <nums> <repair>... → the numbers of <nums> no repair covers (none given: all of <nums>)
+  local want=$1 r k named=" " out=""; shift
+  if [ "$#" = 0 ]; then printf '%s' "$want"; return 0; fi
+  for r in "$@"; do
+    k=$(repair_nums "$r")
+    [ -n "$k" ] || return 0   # names no finding: covers them all
+    named="$named$k"
+  done
+  for k in $want; do
+    [ "$k" != 0 ] || continue
+    [[ "$named" == *" $k "* ]] || out="$out$k "
+  done
+  printf '%s' "$out"
+}
 main_blocked() { # main_blocked <H> <findings> <range base> <run id> → assign H's findings (see above); H complete once all are repaired on main
   local h=$1 f=$2 hbase=$3 run=$4 url pf plan now t tk nums sub risk mark st age rep msg head fx="" fxnums="" d maxd=0 key eff
-  local open=0 pending="" claims="" n o refs=("origin/$MAIN") tids="" r any
+  local open=0 pending="" claims="" n o refs=("origin/$MAIN") tids="" r any mreps owreps freps fxall fxdig="" stillopen="" seen
   url="https://github.com/$REPO/actions/runs/$run"
   if git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/null 2>&1; then refs+=("origin/$DEV"); fi
   pf="$STATE/sent/$h.main-plan"
   if [ -s "$pf" ]; then plan=$(cat "$pf"); else plan=$(main_plan "$h" "$f" "$hbase"); if [ -z "${DRY:-}" ]; then printf '%s\n' "$plan" > "$pf"; fi; fi
   now=$(date +%s)
+  # every repair of H on main, by anyone (the supervisor, the CI owner, an owner, a fixer), counts for every group; a repair
+  # only on $DEV counts for the group whose thread made it. Each group is routed with the numbers still uncovered only.
+  mreps=$(_re_all=1 repair_effective "$h" "" "origin/$MAIN" | tr '\n' ' ' || true)
   head="[review-dispatch] the review of ${h:0:9} on main did not pass (main must be right: deploys are not affected, but the problems must be fixed on main). "
   # 1. owner groups: findings whose culprit is no repair (depth 0) and whose chain root has an owner thread
   for t in $(awk '$2 == 0 && $5 != "-" {print $5}' <<<"$plan" | sort -u); do
     nums=$(awk -v t="$t" '$2 == 0 && $5 == t {print $1}' <<<"$plan" | tr '\n' ' ')
-    risk=$(awk -v t="$t" '$2 == 0 && $5 == t && $6 == 1' <<<"$plan")
     tk=${t//[^A-Za-z0-9-]/_}; mark="$STATE/sent/$h.main-owner.$tk"
     st=$(head -1 "$mark" 2>/dev/null || true)
     tids="$tids $t"
-    if rep=$(repair_effective "$h" "$t" "${refs[@]}"); then claims="$claims $rep"; continue; fi
+    owreps=$(_re_all=1 repair_effective "$h" "$t" "${refs[@]}" | tr '\n' ' ' || true)
+    # shellcheck disable=SC2086 # one sha per word
+    nums=$(nums_open "$nums" $mreps $owreps)
+    if [ -z "${nums// }" ]; then
+      claims="$claims $mreps $owreps"
+      case "$st" in fallback*|timeout*) fxdig="$fxdig $(awk -v t="$t" '$2 == 0 && $5 == t {print $1}' <<<"$plan" | tr '\n' ' ')" ;; esac   # the fixer had them: digest
+      continue
+    fi
+    stillopen="$stillopen $nums"
+    risk=$(for n in $nums; do awk -v n="$n" '$1 == n && $6 == 1' <<<"$plan"; done)
     # shellcheck disable=SC2086 # one number per word
     sub=$(main_subset "$f" $nums)
     case "$st" in
@@ -2285,20 +2320,28 @@ Still no fix $((MAIN_OWNER_CLAIM_SEC / 60)) min from now, they go to the stronge
       *) fx="$fx $nums" ;;   # fallback / timeout: the fixer has them
     esac
   done
-  # 2. the strongest fixer: culprit is a repair (depth ≥ 1), no owner thread, or the owner path handed them over
-  fxnums=$(for n in $(awk '$2 >= 1 || $5 == "-" {print $1}' <<<"$plan") $fx; do echo "$n"; done | sort -un | tr '\n' ' ')
+  # 2. the strongest fixer: culprit is a repair (depth ≥ 1), no owner thread, or the owner path handed them over — the
+  #    numbers the repairs on main do not cover (a partial repair on main: a new fixer task for the rest)
+  fxall=$(for n in $(awk '$2 >= 1 || $5 == "-" {print $1}' <<<"$plan") $fx; do echo "$n"; done | sort -un | tr '\n' ' ')
+  # shellcheck disable=SC2086 # one sha per word
+  fxnums=$(nums_open "$fxall" $mreps)
+  if [ -n "${fxall// }" ] && [ -z "${fxnums// }" ]; then claims="$claims $mreps"; fi
   if [ -n "${fxnums// }" ]; then
     for n in $fxnums; do d=$(awk -v n="$n" '$1 == n {print $2}' <<<"$plan"); if [ "${d:-0}" -gt "$maxd" ]; then maxd=$d; fi; done
     eff=$STRONG_FIXER_EFFORT; if [ "$maxd" -ge 2 ]; then eff=$STRONG_FIXER_EFFORT_ESCALATED; fi
     # shellcheck disable=SC2086 # one number per word
     key=$(main_fixer_key 1 $fxnums)
     r="$STATE/sent/$h.fixer-$key"
-    if [ -e "$r" ] && rep=$(repair_effective "$h" "$(head -1 "$r")" "${refs[@]}"); then claims="$claims $rep"
+    freps=""; if [ -e "$r" ]; then freps=$(_re_all=1 repair_effective "$h" "$(head -1 "$r")" "${refs[@]}" | tr '\n' ' ' || true); fi
+    # shellcheck disable=SC2086 # one sha per word
+    if [ -n "${freps// }" ] && [ -z "$(nums_open "$fxnums" $mreps $freps)" ]; then claims="$claims $freps"
     elif [ -e "$r" ] && fixer_ended "$r" >/dev/null; then
-      # ended without a repair → once more at the escalated effort, then the supervisor
+      # ended without a repair (of all its findings) → once more at the escalated effort, then the supervisor
       # shellcheck disable=SC2086 # one number per word
       key=$(main_fixer_key 2 $fxnums); r="$STATE/sent/$h.fixer-$key"
-      if [ -e "$r" ] && rep=$(repair_effective "$h" "$(head -1 "$r")" "${refs[@]}"); then claims="$claims $rep"
+      freps=""; if [ -e "$r" ]; then freps=$(_re_all=1 repair_effective "$h" "$(head -1 "$r")" "${refs[@]}" | tr '\n' ' ' || true); fi
+      # shellcheck disable=SC2086 # one sha per word
+      if [ -n "${freps// }" ] && [ -z "$(nums_open "$fxnums" $mreps $freps)" ]; then claims="$claims $freps"
       elif [ -e "$r" ] && fixer_ended "$r" >/dev/null; then
         open=1
         # shellcheck disable=SC2086 # one number per word
@@ -2318,10 +2361,14 @@ run: $url"
       main_launch_check "$h" "$key" "$f" "$url" "$fxnums"
     fi
   fi
-  # a repair of H by anyone else (the supervisor, the CI owner) on main settles whatever is still open: the next main review re-checks it
-  if [ "$open" = 1 ] && any=$(repair_effective "$h" "" "origin/$MAIN"); then
-    if [ -z "${DRY:-}" ]; then log "MAIN ${h:0:9}: repaired by ${any:0:9} ($(thread_of "$any")) — the next main review re-checks it"; fi
-    open=0; claims="$claims $any"
+  if [ "$open" = 1 ] && [ -n "${mreps// }" ]; then
+    # H has repairs on main, but they leave findings uncovered: logged once per open set (those stay routed above)
+    stillopen=$(for n in $stillopen $fxnums; do [ "$n" = 0 ] || echo "$n"; done | sort -un | tr '\n' ' ')
+    seen=$(cat "$STATE/sent/$h.main-open" 2>/dev/null || true)
+    if [ -z "${DRY:-}" ] && [ -n "${stillopen// }" ] && [ "$seen" != "$stillopen" ]; then
+      log "MAIN ${h:0:9}: repair(s) $(for r in $mreps; do printf '%s ' "${r:0:9}"; done)on main cover only some findings — still open: $(for n in $stillopen; do printf '#%s ' "$n"; done)(routed to their owner / the strongest fixer)"
+      printf '%s\n' "$stillopen" > "$STATE/sent/$h.main-open"
+    fi
   fi
   [ "$open" = 0 ] || return 0
   # every group repaired: complete once the repairs are on main (a repair only on dev keeps H pending)
@@ -2333,10 +2380,16 @@ run: $url"
     return 0
   fi
   if [ -n "${DRY:-}" ]; then echo "DRY HOTFIX ${h:0:9}: every finding repaired on main ($claims)"; return 0; fi
+  # a repair of H by anyone (the supervisor, the CI owner) on main that covers every finding settles them all: the next
+  # main review re-checks it
+  # shellcheck disable=SC2086 # one sha per word
+  if [ -n "${mreps// }" ] && [ -z "$(nums_open "$(awk '{print $1}' <<<"$plan")" $mreps)" ]; then
+    any=${mreps%% *}; log "MAIN ${h:0:9}: repaired by ${any:0:9} ($(thread_of "$any")) — the next main review re-checks it"
+  fi
   # owner digest: the owners of findings a fixer repaired hear it with their next notice (review-notify.sh)
   for rep in $claims; do
     grep -qx 'Loop: dev-fixer' <<<"$(git -C "$SRC" show -s --format=%B "$rep")" || continue
-    for n in $fxnums; do
+    for n in $(printf '%s\n' $fxall $fxdig | sort -un); do
       o=$(awk -v n="$n" '$1 == n {print $5}' <<<"$plan"); [ "$o" != - ] && [ -n "$o" ] || continue
       digest_add "$o" "${rep:0:9} main ${h:0:9} #$n $(main_subset "$f" "$n" | sed -nE 's/^review-gate: BLOCKED #[0-9]+ //p' | head -1 | head -c 160)"
     done

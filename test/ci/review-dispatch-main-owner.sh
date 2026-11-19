@@ -239,7 +239,8 @@ echo 'numbered findings + failed tests: both assigned'
 # 13. (#1/#2) the strongest fixer's launch refused twice → the supervisor is told (once, retryable); launches keep being retried
 reset
 wake_fixer() { echo "$1 $2" >> "$T/attempts"; echo x >> "$STATE/sent/$1.$2.launchfail"; return 1; }
-for i in 1 2 3; do main_blocked "$R2" "$(blocked should "still drops rows" src/c.ts)" "$R1" 11; done
+# (H3 has no repair; R2 is repaired on main since section 7 — its findings are covered, nobody is launched for them)
+for i in 1 2 3; do main_blocked "$H3" "$(blocked should "still drops rows" src/c.ts)" "$H2" 9; done
 test "$(wc -l < "$T/attempts")" = 3 || fail "launch not retried every run"
 test "$(grep -c "mainfix-launchfail.mainfix-.* $SUPERVISOR_THREAD" "$T/sent")" = 1 || fail "no (single) escalation of refused launches: $(cat "$T/sent" 2>/dev/null)"
 grep -q 'still drops rows' "$T"/msg-mainfix-launchfail.*
