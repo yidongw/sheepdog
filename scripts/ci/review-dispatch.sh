@@ -405,6 +405,37 @@ devfix_on_its_way() { # devfix_on_its_way <S> → 0 while devfix/<S> carries a l
   fh=$(git -C "$SRC" rev-parse -q --verify "refs/remotes/origin/devfix/${1:0:12}") || return 1
   [ ! -e "$STATE/sent/$fh.devfix-stuck" ]
 }
+# A red devfix: its testsfail fixer must REPRODUCE at the failing head before it may answer "nothing to change" (11-18
+# tralyx a5f8f91c1, run 44309218296: ONE test failed deterministically at the fix head — 1 failed / 9 passed in its file —
+# but the fixer ran the focused tests elsewhere, reported "they pass, no changes", and its ended thread plus ONE fixfailed
+# notice were the end of it for 12.5 h). The task names the failed test files from the trusted run's log (a fixer's worktree
+# may have no GitHub login to read the run) and pins the fixer to the exact failing head. A testsfail fixer that ends without
+# pushing a new head leaves the failure UNRESOLVED ($STATE/sent/<S>.devfix-unresolved): the strongest fixer takes it over at
+# once (dev_escalate). No automatic re-run: a "flaky" guess is exactly what hid this real failure.
+devfix_failed_tests() { # devfix_failed_tests <findings_tests text of the run> → the test files its FAIL lines name, one per line;
+  # "" when they name none (unreadable log, or a runner whose FAIL lines name no file)
+  { grep -E '^ *FAIL ' <<<"$1" || true; } | { grep -oE '[A-Za-z0-9_./@-]+\.(test|spec)\.[cm]?[jt]sx?' || true; } | sed -E 's#^\./##' | sort -u
+}
+devfix_testsfail_task() { # devfix_testsfail_task <devfix ref> <fix head> <S> <run> <findings_tests text> <proof gaps> → the testsfail fixer's task
+  local files; files=$(devfix_failed_tests "$5" | tr '\n' ' ')
+  printf '%s' "Task: your review fix ${2:0:9} on $1 failed the trusted tests: https://github.com/$REPO/actions/runs/$4
+What failed in the trusted run (from its log — you may have no GitHub login to read the run yourself):
+${5:-(the log could not be read: run the whole trusted test suite)}
+Failed test file(s): ${files:-(none named: run the whole trusted test suite)}
+REPRODUCE FIRST, at exactly the failing commit. Your worktree starts at origin/$1 = ${2}. Before you change anything run
+  git rev-parse HEAD        (it must print ${2})
+then run the failed test file(s) above with the repository's own test runner (the command its trusted tests script uses),
+in THIS worktree at THIS commit — never in another checkout, never on another commit, never only a different focused set.
+Paste those commands and their output in your report. A test that fails there is a real failure: fix it at its source
+(the code or the test fixture the reviewed change broke).
+Fix it on the same branch (git checkout -B fix ${2}), keep the trailers Review-Fix-Of: ${3} and Hotfix:, run the failed
+file(s) again (they must pass), and push with git push origin HEAD:refs/heads/$1.
+Ending without a push is never \"done\": the dispatcher treats it as unresolved and hands it to the strongest fixer agent at
+once. If the failed file(s) truly pass at ${2:0:9}, your report must show it for that agent: the git rev-parse HEAD line and
+the passing run's output.${6:+
+Unproven so far (run the tests yourself this time):
+$6}"
+}
 fixer_at_work() { # fixer_at_work <receipt file> [<devfix ref>] → 0 while that fixer's fix is on its way
   local f=$1 ref=${2:-} tid st
   # Only a live fixer suppresses author notices; a branch can fail trusted tests.
@@ -611,7 +642,7 @@ fixer_gate_scan() { # sets fixer_gate_holder to the live fixer of this repo ("" 
   fi
   # receipts of the last 6 h, newest first; released ones are cached in ended/ (receipts stay: landing needs them)
   for r in $(find "$STATE/sent" -maxdepth 1 -type f -name '*.fixer-*' -printf '%T@ %f\n' 2>/dev/null | sort -rn | cut -d' ' -f2); do
-    [[ "$r" =~ ^([0-9a-f]{40})\.fixer-(blocked|authorto|recheck|hotfixfix|testsfail|gate|(landmain|mainmerge|train|authorto|mainfix)-[0-9a-f]{9})$ ]] || continue
+    [[ "$r" =~ ^([0-9a-f]{40})\.fixer-(blocked|authorto|recheck|hotfixfix|testsfail|gate|devstrong-[0-9]+|(landmain|mainmerge|train|authorto|mainfix)-[0-9a-f]{9})$ ]] || continue
     sha=${BASH_REMATCH[1]}; key=${BASH_REMATCH[2]}; name=$r
     [ -e "$FIXER_GATE/ended/$name" ] && continue
     tid=$(head -1 "$STATE/sent/$name" 2>/dev/null || true)
@@ -1334,6 +1365,7 @@ DEV_VERDICTS=$STATE/verdicts                            # decided verdicts: <sha
 DEV_FULL_LISTING_MIN=${DEV_FULL_LISTING_MIN:-60}        # the complete run listing at least this often (blocks older than 100 runs)
 DEV_ORPHAN_GRACE_SEC=${DEV_ORPHAN_GRACE_SEC:-300}       # nobody owns it this long → the supervisor
 DEV_UNKNOWN_NOTICE_SEC=${DEV_UNKNOWN_NOTICE_SEC:-3600}  # a verdict unreadable this long → the supervisor
+DEV_ESCALATE_AFTER_MIN=${DEV_ESCALATE_AFTER_MIN:-60}     # a fix-failed / orphan notice this old, still no repair → the strongest fixer
 dcv="" dev_lower="" dev_unrepaired="" dev_unrepaired_done="" dev_full_listing=0
 dev_commit_verdict() { # dev_commit_verdict <sha> → 0 and dcv="<kind> <run> <attempt> <review job completed epoch> <review job id>";
   # 1 no verdict; 2 unknown (unreadable); 3 still deciding (no run of it completed, or an earlier one is unfinished). THE verdict — review_first_verdict "any", what the
@@ -1462,7 +1494,7 @@ dev_owner_state() { # dev_owner_state <S> → who has blocked S now; "" = nobody
     st=$(head -1 "$m" 2>/dev/null || true)
     case "$st" in "author "*) if [ $((now - ${st#author })) -lt "$AUTHOR_FIX_WINDOW_SEC" ]; then echo "its author (${m##*.route-author.})"; return 0; fi ;; esac
   done
-  for r in "$STATE/sent/$s.fixer-blocked" "$STATE/sent/$s".fixer-authorto-*; do
+  for r in "$STATE/sent/$s.fixer-blocked" "$STATE/sent/$s".fixer-authorto-* "$STATE/sent/$s".fixer-devstrong-*; do
     [ -f "$r" ] || continue
     if [ "${r##*.fixer-}" = blocked ] && devfix_on_its_way "$s"; then echo "its fix on devfix/${s:0:12} (the landing step)"; return 0; fi
     if ! fixer_ended "$r" >/dev/null; then echo "a fixer agent ($(head -1 "$r" 2>/dev/null || true))"; return 0; fi
@@ -1477,6 +1509,73 @@ dev_owner_state() { # dev_owner_state <S> → who has blocked S now; "" = nobody
   done
   if compgen -G "$STATE/sent/$s.main-on-dev*" >/dev/null; then echo "the supervisor (main-side findings)"; return 0; fi
   return 0
+}
+# A fix-failed / unresolved-block notice is never the end (11-18 tralyx e596eb3a5: ONE fixfailed notice at 13:10Z, then
+# 12.5 h with no fixer, no notice and no $DEV merge — the delivered notice and the parked red devfix branch both counted as
+# "an owner"). A blocked commit still without its repair DEV_ESCALATE_AFTER_MIN after its first fixfailed / orphan notice,
+# with nobody at work on it, goes to the strongest fixer (the same STRONG_FIXER_PROVIDER / MODEL / EFFORT main uses), on
+# $DEV — at once when its devfix's testsfail fixer ended without pushing a new head ($STATE/sent/<S>.devfix-unresolved: an
+# unresolved failure, not a finished job). Level n = the receipt $STATE/sent/<S>.fixer-devstrong-<n>: level 1 at STRONG_FIXER_EFFORT, every later level at
+# STRONG_FIXER_EFFORT_ESCALATED, launched once the previous one ended and DEV_ESCALATE_AFTER_MIN after its launch, for
+# as long as S has no repair (no cap); from level 3 on the supervisor is told once that the strongest fixers keep failing.
+dev_escalate() { # dev_escalate <S> <findings> <run url> <culprit threads (log only)> → S: blocked, no repair (dev_owner_walk)
+  local s=$1 f=$2 url=$3 m t t0="" n=1 r fh prev eff now hist="" x tf unres=0
+  now=$(date +%s)
+  ! budget_spent "$s" || return 0                                            # a configured round cap ended it (FIX_ROUNDS_MAX)
+  for m in "$STATE/sent/$s".fixfailed* "$STATE/sent/$s".orphan.delivered.*; do
+    [ -f "$m" ] || continue
+    t=$(stat -c %Y "$m" 2>/dev/null) || continue
+    if [ -z "$t0" ] || [ "$t" -lt "$t0" ]; then t0=$t; fi
+  done
+  if [ -e "$STATE/sent/$s.devfix-unresolved" ]; then
+    unres=1; t=$(stat -c %Y "$STATE/sent/$s.devfix-unresolved" 2>/dev/null || echo "$now")
+    if [ -z "$t0" ] || [ "$t" -lt "$t0" ]; then t0=$t; fi
+  fi
+  [ -n "$t0" ] || return 0                                                   # nobody was told it failed: the normal path has it
+  [ "$unres" = 1 ] || [ $((now - t0)) -ge $((DEV_ESCALATE_AFTER_MIN * 60)) ] || return 0
+  # somebody still at work on S: its dev fixer, an author-group fixer, an earlier strongest fixer, the testsfail fixer of its
+  # devfix head — or a NEW head on devfix/<S> (none of S's failed ones) the landing step has yet to judge
+  for r in "$STATE/sent/$s.fixer-blocked" "$STATE/sent/$s".fixer-authorto-* "$STATE/sent/$s".fixer-devstrong-*; do
+    [ -f "$r" ] || continue
+    fixer_ended "$r" >/dev/null || return 0
+  done
+  fh=$(git -C "$SRC" rev-parse -q --verify "refs/remotes/origin/devfix/${s:0:12}" 2>/dev/null || true)
+  if [ -n "$fh" ]; then
+    if [ -f "$STATE/sent/$fh.fixer-testsfail" ] && ! fixer_ended "$STATE/sent/$fh.fixer-testsfail" >/dev/null; then return 0; fi
+    if devfix_on_its_way "$s" && ! grep -qx "$fh" "$STATE/sent/$s.devfix-fails" 2>/dev/null; then return 0; fi
+  fi
+  while [ -e "$STATE/sent/$s.fixer-devstrong-$n" ]; do n=$((n + 1)); done
+  if [ "$n" -gt 1 ]; then
+    prev="$STATE/sent/$s.fixer-devstrong-$((n - 1))"
+    [ $((now - $(stat -c %Y "$prev" 2>/dev/null || echo "$now"))) -ge $((DEV_ESCALATE_AFTER_MIN * 60)) ] || return 0
+  fi
+  eff=$STRONG_FIXER_EFFORT; if [ "$n" -ge 2 ]; then eff=$STRONG_FIXER_EFFORT_ESCALATED; fi
+  for x in $(cat "$STATE/sent/$s.devfix-fails" 2>/dev/null || true); do
+    tf=$(cat "$STATE/sent/$x.tests-failed" 2>/dev/null || true)
+    hist="$hist
+- fix ${x} (devfix/${s:0:12}) failed the trusted tests; failed test file(s): $(devfix_failed_tests "$tf" | tr '\n' ' ')${tf:+
+$tf}"
+  done
+  if [ "$unres" = 1 ]; then hist="$hist
+- its testsfail fixer ended without pushing a new head (it did not reproduce the failure at the failing commit)"; fi
+  if [ "$n" -gt 1 ]; then hist="$hist
+- $((n - 1)) strongest fixer agent(s) before you ended without a repair"; fi
+  if [ -n "${DRY:-}" ]; then echo "DRY $DEV ${s:0:9}: still no repair $(( (now - t0) / 60 )) min after its fix-failed notice — would wake the strongest fixer (level $n, effort $eff)"; return 0; fi
+  if [ ! -e "$STATE/sent/$s.devstrong-logged.$n" ]; then
+    log "$DEV ${s:0:9}: still no repair $(( (now - t0) / 60 )) min after its fix-failed notice$([ "$unres" = 1 ] && echo " (its testsfail fixer ended without a push: unresolved)"), nobody at work on it — the strongest fixer (level $n, $STRONG_FIXER_PROVIDER/$STRONG_FIXER_MODEL effort $eff)"
+    touch "$STATE/sent/$s.devstrong-logged.$n"
+  fi
+  if [ "$n" -ge 3 ]; then
+    notify_best_effort "$s" devstrong-failed "$SUPERVISOR_THREAD" "[review-dispatch] $DEV ${s:0:9} is still blocked without a repair (Review-Fix-Of: $s): $((n - 1)) strongest fixer agents ($STRONG_FIXER_MODEL) ended without one. The dispatcher keeps waking one every $DEV_ESCALATE_AFTER_MIN min (effort $STRONG_FIXER_EFFORT_ESCALATED) until it is repaired; a human look would help. Run: $url"
+  fi
+  wf_provider=$STRONG_FIXER_PROVIDER wf_model=$STRONG_FIXER_MODEL wf_effort=$eff wake_fixer "$s" "devstrong-$n" "$DEV: blocked ${s:0:9} still unrepaired (strongest fixer, level $n)" "Task: the blocking review stopped $DEV at ${s:0:9}, and it is STILL unrepaired $(( (now - t0) / 60 )) min after the dispatcher reported that its fix failed: no commit carries Review-Fix-Of: ${s}, so no $DEV head can land on $MAIN. You are the strongest fixer agent (escalation level $n). Findings:
+${f:-(none parsed; read the run)}
+Run: $url
+What was tried:${hist:-
+- a fixer agent ended without a fix that landed}
+Read what was tried before you change anything (git log -p origin/$MAIN..origin/devfix/${s:0:12} when that branch exists; the runs above).
+REPRODUCE FIRST: for each failed fix commit above, check it out exactly (git checkout --detach <that full sha>; git rev-parse HEAD must print it) and run its failed test file(s) with the repository's own test runner — in this worktree, at that commit, never in another checkout. Paste the commands and their output in your report. A failure there is real: fix it at its source (the code, or the test fixture the reviewed change broke); you may cherry-pick that fix commit onto origin/$DEV and repair it. If they truly pass there, show that output, then run the whole suite to find what fails.
+Your worktree starts at origin/$DEV; do the fix on origin/$DEV (git checkout -B fix origin/$DEV; do NOT reset to ${s:0:9}). Fix every finding at its source and run the failed test file(s) again (they must pass). ONE commit with the trailer Review-Fix-Of: ${s} (no Hotfix: trailer), pushed with git push origin HEAD:refs/heads/$DEV (git pull --rebase origin $DEV and retry if it moved). It rides the next $DEV review. If a finding is wrong, dispute it (Review-Disputed: trailer, see below)." "$DEV" "$4" || true
 }
 dev_owner_walk() { # every run: each blocked commit of origin/$MAIN..origin/$DEV without its repair, oldest first → dev_blocked;
   # nobody owns it DEV_ORPHAN_GRACE_SEC later → the supervisor (the CI owner when it is gone), once per verdict
@@ -1515,6 +1614,7 @@ dev_owner_walk() { # every run: each blocked commit of origin/$MAIN..origin/$DEV
     url="https://github.com/$REPO/actions/runs/$run"
     if dev_main_hold "$s" "$run" "$f" "{\"jobs\":[{\"name\":\"review\",\"id\":${jid:-0}}]}"; then continue; fi
     dev_blocked "$s" "$f" "$(culprit_threads "$s" "$f")" "$url" "$(dev_devfix_task "$s" "$f" "$url")"
+    dev_escalate "$s" "$f" "$url" "$(culprit_threads "$s" "$f")"
     own=$(dev_owner_state "$s")
     if [ -n "$own" ]; then rm -f "$STATE/sent/$s.orphan-since"; continue; fi
     if [ -n "${DRY:-}" ]; then echo "DRY $DEV ${s:0:9}: blocked, no repair, nobody owns it — would tell the supervisor"; continue; fi
@@ -2565,23 +2665,35 @@ if [ "$merged_one" = 0 ] && [ -z "${DRY:-}" ]; then
     frun=$(review_list 80 databaseId,displayTitle,status \
            ".[] | select(.displayTitle==\"review $fh\" and .status==\"completed\") | .databaseId" | head -1)
     [ -n "$frun" ] || continue
-    if [ "$(gh api "repos/$REPO/actions/runs/$frun/jobs" -q '[.jobs[] | select((.name | sub("^.* / "; "")) == "tests" and .conclusion=="success")] | length' 2>/dev/null)" != 1 ]; then
+    # the run's LATEST attempt: read once; unreadable = no answer yet (asked again next run, never "failed"); a tests job
+    # still running (someone re-ran it) = no answer yet either
+    fjobs=$(gh api "repos/$REPO/actions/runs/$frun/jobs" 2>/dev/null) || fjobs=""
+    jq -e '.jobs | type == "array"' >/dev/null 2>&1 <<<"$fjobs" || continue
+    [ "$(jq -r '[.jobs[] | select((.name | sub("^.* / "; "")) == "tests")][0].status // "completed"' <<<"$fjobs")" = completed ] || continue
+    if [ "$(jq '[.jobs[] | select((.name | sub("^.* / "; "")) == "tests" and .conclusion=="success")] | length' <<<"$fjobs")" != 1 ]; then
       [ -e "$STATE/sent/$fh.devfix-failed" ] || { log "devfix $fref ${fh:0:9}: trusted tests failed (run $frun)"
-        wake_fixer "$fh" testsfail "devfix: tests failed on ${fh:0:9}" "Task: your review fix ${fh:0:9} on $fref failed the trusted tests: https://github.com/$REPO/actions/runs/$frun
-Fix it on the same branch (git fetch origin && git checkout -B fix origin/$fref), keep the trailers Review-Fix-Of: ${fs} and Hotfix:, and push to $fref again.${gaps:+
-Unproven so far (run the tests yourself this time):
-$gaps}" "$fref" "$(range_threads "$fh")" && touch "$STATE/sent/$fh.devfix-failed" || true; }
+        ftext=$(findings_tests "$fjobs" 1 || true)
+        [ -n "${DRY:-}" ] || printf '%s\n' "$ftext" > "$STATE/sent/$fh.tests-failed"   # what failed: the strongest fixer's task
+        wake_fixer "$fh" testsfail "devfix: tests failed on ${fh:0:9}" "$(devfix_testsfail_task "$fref" "$fh" "$fs" "$frun" "$ftext" "$gaps")" \
+          "$fref" "$(range_threads "$fh")" && touch "$STATE/sent/$fh.devfix-failed" || true; }
       # Authors only when the fix keeps failing (owner 11-12): the trusted tests failed on a 2nd fix head of S, or
       # the fixer woken for this failure ended without pushing a new head. Once per S (same key as dev_blocked's).
       grep -qx "$fh" "$STATE/sent/$fs.devfix-fails" 2>/dev/null || echo "$fh" >> "$STATE/sent/$fs.devfix-fails"
-      nfail=$(wc -l < "$STATE/sent/$fs.devfix-fails"); fwhy=""
+      nfail=$(wc -l < "$STATE/sent/$fs.devfix-fails"); fwhy=""; fnext="Still unrepaired ${DEV_ESCALATE_AFTER_MIN:-60} min after this notice, it goes to the strongest fixer agent."
       if [ "$nfail" -ge 2 ]; then fwhy="the trusted tests of the fix branch $fref failed $nfail times"
-      elif fwhy=$(fixer_ended "$STATE/sent/$fh.fixer-testsfail"); then fwhy="after the trusted tests of the fix branch $fref failed, ${fwhy}, without pushing a new fix"
+      elif fwhy=$(fixer_ended "$STATE/sent/$fh.fixer-testsfail"); then
+        fwhy="after the trusted tests of the fix branch $fref failed, ${fwhy}, without pushing a new fix"
+        # ended without a push: UNRESOLVED, not done — the strongest fixer takes it over at once (dev_escalate)
+        fnext="That is unresolved: the strongest fixer agent takes it over now."
+        if [ -z "${DRY:-}" ] && [ ! -e "$STATE/sent/$fs.devfix-unresolved" ]; then
+          echo "$fh" > "$STATE/sent/$fs.devfix-unresolved"
+          log "devfix $fref ${fh:0:9}: its testsfail fixer ended without pushing a new head — unresolved, not done: the strongest fixer takes ${fs:0:9} over"
+        fi
       elif launch_failed "$fh" testsfail; then fwhy="the trusted tests of the fix branch $fref failed and the fixer agent failed to start"
       else fwhy=""; fi
       if [ -n "$fwhy" ]; then
         key_prefix=""
-        notify_threads "$fs" fixfailed "$(or_supervisor "$(culprit_threads "$fs" "$(git -C "$SRC" diff --name-only "$fs" "$fh" 2>/dev/null || true)")")" "[review-dispatch] $DEV (${fs:0:9}) was blocked by the review and the fix did not succeed: ${fwhy} (run: https://github.com/$REPO/actions/runs/$frun). Please handle it: push a fix commit on $DEV with Review-Fix-Of: $fs (it lands once the trusted tests pass), or repair $fref.$( [ "${DEV_AUTO_REVERT:-0}" = 1 ] && echo " Not fixed within $((DEV_REVERT_AFTER_SEC / 60)) min, the commits involved are reverted automatically.")${gaps:+
+        notify_threads "$fs" fixfailed "$(or_supervisor "$(culprit_threads "$fs" "$(git -C "$SRC" diff --name-only "$fs" "$fh" 2>/dev/null || true)")")" "[review-dispatch] $DEV (${fs:0:9}) was blocked by the review and the fix did not succeed: ${fwhy} (run: https://github.com/$REPO/actions/runs/$frun). $fnext Please handle it if you can: push a fix commit on $DEV with Review-Fix-Of: $fs (it lands once the trusted tests pass), or repair $fref.$( [ "${DEV_AUTO_REVERT:-0}" = 1 ] && echo " Not fixed within $((DEV_REVERT_AFTER_SEC / 60)) min, the commits involved are reverted automatically.")${gaps:+
 The fix is not proven:
 $gaps}"
       fi

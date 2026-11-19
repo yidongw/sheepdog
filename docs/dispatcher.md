@@ -15,6 +15,13 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   thread.
 - **Fix landing**: a `devfix/<sha>` whose trusted tests pass lands on dev / the default branch — unless it changes
   review machinery (contract rule (h)): then it is not landed and its authors are told to push it through a full review.
+  A red `devfix/<sha>` gets a testsfail fixer pinned to that exact head, with the failed test files from the trusted run's
+  log in its task: it must reproduce them there first. One that ends without pushing a new head leaves the failure
+  unresolved — the strongest fixer takes it over at once (no automatic re-run: a "flaky" guess hid a real failure, 11-18).
+- **A fix-failed notice is never the end** (11-19): a blocked dev commit still without its repair
+  `DEV_ESCALATE_AFTER_MIN` (60) after its first fix-failed / orphan notice, with nobody at work on it, goes to the
+  strongest fixer (`STRONG_FIXER_*`, on dev); each one that ends without a repair is followed by another at
+  `STRONG_FIXER_EFFORT_ESCALATED` every `DEV_ESCALATE_AFTER_MIN`, until it is repaired (the supervisor is told from the third).
 - **Every blocked dev commit has an owner** (owner 11-17): each run walks `main..dev` oldest first for commits whose
   verdict (`review_first_verdict`, kept on disk once decided) is blocked and that have no effective `Review-Fix-Of:`
   repair on dev — the commits the coverage chain needs repaired — and routes each one (author per the reviewer's route,
@@ -110,7 +117,8 @@ Optional: `MAIN_BRANCH` (`main`), `SHEEPDOG_REVIEW_WORKFLOW` (the caller file, `
 itself, [self-review.md](self-review.md)), `FIXER_PROVIDER` / `FIXER_MODEL`, `STRONG_FIXER_PROVIDER` / `STRONG_FIXER_MODEL` /
 `STRONG_FIXER_EFFORT`, `FIXER_HOST_RULES` (host rules every fixer task states), `WAKE_URL` (the local wake relay for
 Discord thread ids, default `http://localhost:3011`), `FIXER_WT_ROOT`, `FIX_ROUNDS_MAX`, `FIX_ROUNDS_MAX_RISK`,
-`DEV_REVERT_AFTER_SEC`, `AUTHOR_FIX_WINDOW_SEC`, `MAIN_OWNER_CLAIM_SEC`.
+`DEV_REVERT_AFTER_SEC`, `AUTHOR_FIX_WINDOW_SEC`, `MAIN_OWNER_CLAIM_SEC`, `STRONG_FIXER_EFFORT_ESCALATED`,
+`DEV_ESCALATE_AFTER_MIN`.
 
 ## Contract scripts
 
