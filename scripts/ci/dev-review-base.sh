@@ -43,8 +43,8 @@
 #       target T that is an ancestor of the fix AND has a completed review run that blocked ("review T" / "recheck T",
 #       blocking step failure with the reviewer's verdict — the Review runs are the evidence, not the trailer); every
 #       dev-side merge in the range is clean (its tree is exactly the automatic merge of its parents: no code of its
-#       own); every line a fix removes or changes was written inside the attested range of the blocked review it
-#       repairs (or by an earlier fix of the round), and no fix is a revert (touches_only); and landing <head> would change no review machinery on main (review-machinery.sh landing_machinery_files —
+#       own); no line-range restriction on what a fix
+#       changes (owner 11-19: a repair lands on green tests); and landing <head> would change no review machinery on main (review-machinery.sh landing_machinery_files —
 #       contract rule (h): such repairs get a full review of THEIR commits, the range being just them). review.yml does
 #       not review such a range; review-passed.sh counts the run as passed when its tests pass (and re-checks this).
 #       Blocked reviews elsewhere below the range do not matter here: approval's coverage chain needs their repairs.
@@ -192,7 +192,8 @@ only_fixes() { # only_fixes <base> <head>
     # until it is repaired on the head: no tests-only round over it (review of foxhole-backend 4162ba2c3 #1)
     verdict_m "$c"; v=$vm
     case "${v%% *}" in blocked|unknown) if ! repaired "$c" "$2"; then rm -f "$TMPF"*; return 1; fi ;; esac
-    touches_only "$c" "$TMPF.allowed" || { echo "dev-review-base: ${c:0:12} changes lines outside the blocked range it repairs — a full review" >&2; rm -f "$TMPF"*; return 1; }
+    # Owner 11-19: a repair lands on its green trusted tests, wherever its lines are ("修完就合") — the old
+    # "changes lines outside the blocked range → a full review" rule (touches_only) was never the owner's and is gone.
     echo "$c" >> "$TMPF.allowed"
     n=$((n + 1))
   done

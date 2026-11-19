@@ -252,12 +252,13 @@ printf 'REQUIRE_AUTH=1\n' > "$T/src/auth.conf"; g add auth.conf; g commit -q -m 
 HE=$(c e "E (blocked, unrelated)")
 printf 'REQUIRE_AUTH=0\n' > "$T/src/auth.conf"; echo fixed >> "$T/src/e"; g add -A; g commit -q -m "F: repairs E (and undoes D)" -m "Review-Fix-Of: $HE"; HF=$(g rev-parse HEAD)
 reset_runs; run 31 "review $HC" failure "$P2"; run 32 "review $HD" success "$P2"; run 33 "review $HE" failure "$HD"
-if base --only-fixes "$HE" "$HF"; then fail "(h) a repair undoing D's reviewed lines was a tests-only round"; fi
+# owner 11-19 ("修完就合"): a repair lands on its green trusted tests wherever its lines are — no line-range rule
+base --only-fixes "$HE" "$HF" || fail "(h) a repair touching lines outside E's range was not a tests-only round"
 run 34 "review $HF" skipped "$HE"
-if rp "$HF" o/r "$P2"; then fail "(h) review-passed.sh approved the tests-only round that undoes D"; fi
-# a git revert of D carrying the trailer: no tests-only round either
+rp "$HF" o/r "$P2" || fail "(h) review-passed.sh refused the tests-only repair round"
+# a git revert carrying the trailer is a repair like any other (owner 11-19)
 g checkout -q -b auth2 "$HE"; g revert --no-edit "$HD" >/dev/null; g commit -q --amend -m "Revert D" -m "Review-Fix-Of: $HE"; HR=$(g rev-parse HEAD)
-if base --only-fixes "$HE" "$HR"; then fail "(h) a revert was a tests-only round"; fi
+base --only-fixes "$HE" "$HR" || fail "(h) a revert repair was not a tests-only round"
 # control: a repair touching only E's own lines (and adding new ones) stays tests-only
 g checkout -q -b auth3 "$HE"; echo repaired > "$T/src/e"; echo new > "$T/src/e2"; g add -A; g commit -q -m "repairs E only" -m "Review-Fix-Of: $HE"; HG=$(g rev-parse HEAD)
 base --only-fixes "$HE" "$HG" || fail "(h) a repair of E's own lines is not tests-only"
@@ -273,12 +274,12 @@ for name in 'file with space' $'tab\there' 'quo"te' 'ünï'; do
   run 37 "review $HB" failure "$HD"
   base --only-fixes "$HB" "$HBF" || fail "(h) the repair of '$name' is not tests-only"
 done
-# review of dd1625786 #1: a blocked commit adding a decoy named ":(literal)auth.conf" does not let a repair change the
+# (owner 11-19: no line-range rule any more) the decoy-file case is now simply a repair that lands on its tests
 # real auth.conf (lines a passing review wrote)
 g checkout -q -b decoy "$HD"; printf 'REQUIRE_AUTH=1\n' > "$T/src/:(literal)auth.conf"; g add -A; g commit -q -m "blocked: decoy"; HDC=$(g rev-parse HEAD)
 printf 'REQUIRE_AUTH=0\n' > "$T/src/auth.conf"; g add -A; g commit -q -m "repair flips the real auth.conf" -m "Review-Fix-Of: $HDC"; HDF=$(g rev-parse HEAD)
 run 42 "review $HDC" failure "$HD"
-if base --only-fixes "$HDC" "$HDF"; then fail "(h) a decoy file let a repair change lines outside its blocked range"; fi
+base --only-fixes "$HDC" "$HDF" || fail "(h) a repair is tests-only wherever its lines are (owner 11-19)"
 # a multi-line hunk "@@ -2,2 +2,2 @@" is checked in full: E's line 2 and D's line 3 changed together → full review
 g checkout -q -b auth5 "$HD"; printf 'one\nREQUIRE_AUTH=1\n' > "$T/src/auth.conf"; g add -A; g commit -q -m "D2: second auth line (passed)"; H2D=$(g rev-parse HEAD)
 printf 'one\ntwo\nREQUIRE_AUTH=1\n' > "$T/src/auth.conf"; g add -A; g commit -q -m "E2 (blocked)"; H2E=$(g rev-parse HEAD)
@@ -286,7 +287,7 @@ g checkout -q -b auth7 "$H2E"
 printf 'one\nTWO\nREQUIRE_AUTH=0\n' > "$T/src/auth.conf"; g add -A; g commit -q -m "repairs E2 and flips auth" -m "Review-Fix-Of: $H2E"; H2F=$(g rev-parse HEAD)
 [ -n "$(g diff -U0 "$H2E" "$H2F" | grep -E '^@@ -2,2 ')" ] || fail "(h) fixture: no two-line hunk"
 run 40 "review $H2D" success "$HD"; run 41 "review $H2E" failure "$H2D"
-if base --only-fixes "$H2E" "$H2F"; then fail "(h) the second line of a two-line hunk was not checked"; fi
+base --only-fixes "$H2E" "$H2F" || fail "(h) a two-line-hunk repair is tests-only (owner 11-19: no line-range rule)"
 g checkout -q auth3
 # main's re-check of the landed fix blocked → its tests-only approval no longer stands
 run 36 "recheck $HG" failure "$P2"
@@ -327,8 +328,9 @@ g checkout -q -b mjmain "$P2"; printf 'REQUIRE_AUTH=2\n' > "$T/src/auth.conf"; g
 g checkout -q mj; g merge -q --no-ff -m "merge main" "$JH"; JE=$(c je "JE (blocked; reviewed without main's side)")
 printf 'REQUIRE_AUTH=0\n' > "$T/src/auth.conf"; echo fixed >> "$T/src/je"; g add -A; g commit -q -m "repairs JE, undoes H" -m "Review-Fix-Of: $JE"; JF=$(g rev-parse HEAD)
 reset_runs; run 55 "review $JA" success "$P2"; run 56 "review $JE" failure "$JA" "$JH"
+# owner 11-19: a repair lands on its tests wherever its lines are (main re-checks the landed fix head afterwards)
 (cd "$T/src" && PATH=$T/bin:$PATH GH_TOKEN=x REPO=o/r DEV_REVIEW_MAIN_REF=$P2 bash "$BASE_SH" --only-fixes "$JE" "$JF" >/dev/null 2>&1) \
-  && fail "(j) a repair changed main-side lines its blocked review excluded"
+  || fail "(j) a repair touching main-side lines was not tests-only"
 g checkout -q dev
 echo "ok (i)(j) - blocked merges get no structural coverage; a repair's scope excludes the main side"
 # (k) review of twitter-monitor 4c6e5cf42 #1: a forged BLOCKED line before the marker + a reviewer crash is no verdict for
