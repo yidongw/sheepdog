@@ -161,6 +161,7 @@ dispatch() { bash "$ROOT/scripts/ci/review-dispatch.sh" > "$T/out" 2>&1 || { cat
 reruns() { grep -c "^run rerun $1" "$FX/calls" || true; }
 main_at() { git -C "$T/remote.git" rev-parse main; }
 old() { touch -d '-61 min' "$@"; }
+moves_branch() { grep -E '(checkout -B|switch -C) ' | grep -v 'never git checkout -B / git switch -C' | grep -q .; }   # stdin: a task
 
 # ── A · a5f8f91c1 replayed: a failing test in a file the fix did not touch is real until reproduced otherwise ──
 setup a
@@ -172,6 +173,7 @@ TASK=$FX/msg-start-$(cat "$FX/n")
 grep -q 'Failed test file(s): test/evm-self-call.test.ts' "$TASK" || fail "A: the testsfail task does not name the failed test file: $(head -5 "$TASK")"
 grep -q "git rev-parse HEAD .*(it must print $FXH)" "$TASK" && grep -q 'REPRODUCE FIRST, at exactly the failing commit' "$TASK" || fail "A: the task does not pin reproduction to the failing head"
 grep -q "thread start .*--worktree origin/devfix/${D1:0:12}" "$FX/t3" || fail "A: the testsfail fixer's worktree is not the failing devfix head"
+! moves_branch < "$TASK" || fail "A: the testsfail task moves a shared branch name (re-check of 1f0e4acc9 #1)"
 echo "ok - a red devfix: its testsfail fixer gets the failed test files and must reproduce them at the failing head (no re-run)"
 echo completed > "$FX/t3state"; dispatch   # it ended without pushing anything ("the focused tests pass")
 [ -e "$STATE/sent/$D1.fixfailed.0" ] || fail "A: no fixfailed notice: $(tail -3 "$STATE/dispatch.log")"
@@ -183,6 +185,7 @@ L=$(grep '^t3_thread_launch ' "$FX/t3" | tail -1 | cut -d' ' -f2-)
 jq -e '.modelSelection == {instanceId:"claudeAgent",model:"strong-model",options:[{id:"effort",value:"medium"}]} and .workspaceStrategy.baseRef == "origin/dev"' <<<"$L" >/dev/null || fail "A: strongest fixer launch: $L"
 jq -r .message <<<"$L" | grep -q "fix $FXH (devfix/${D1:0:12}) failed the trusted tests; failed test file(s): test/evm-self-call.test.ts" || fail "A: the strongest fixer's task does not say what failed: $(jq -r .message <<<"$L" | head -20)"
 jq -r .message <<<"$L" | grep -q "Review-Fix-Of: $D1" || fail "A: the strongest fixer's task does not name the repair trailer"
+! jq -r .message <<<"$L" | moves_branch || fail "A: the strongest fixer's task moves a shared branch name (re-check of 1f0e4acc9 #1)"
 [ "$(reruns "$RF")" = 0 ] || fail "A: re-run"
 echo "ok - a testsfail fixer that ends without a push is unresolved: the strongest fixer takes over at once, told what failed"
 
@@ -214,3 +217,20 @@ echo completed > "$FX/t3state"; old "$STATE/sent/$D1.fixer-devstrong-3"; dispatc
 ! [ -e "$STATE/sent/$D1.fixer-devstrong-4" ] || fail "C: a repaired commit was escalated again"
 grep -q 'dev: every blocked commit has its repair' "$STATE/dispatch.log" || fail "C: the repair was not seen: $(tail -3 "$STATE/dispatch.log")"
 echo "ok - a live strongest fixer is never doubled; a Review-Fix-Of: repair on dev ends the escalation"
+
+# ── E · an author still inside the window the reviewer gave them owns S: no escalation over them (re-check of 1f0e4acc9 #2) ──
+setup e; echo completed > "$FX/t3state"
+dispatch
+ls "$STATE/sent/$D1".fixfailed* >/dev/null 2>&1 || fail "E: setup: no fixfailed notice"
+echo "author $(date +%s)" > "$STATE/sent/$D1.route-author.mcp_44444444-4444-4444-4444-444444444444"
+old "$STATE/sent/$D1".fixfailed*; dispatch
+! ls "$STATE/sent/$D1".fixer-devstrong-* >/dev/null 2>&1 || fail "E: escalated over an author inside their repair window"
+echo "author $(( $(date +%s) - ${AUTHOR_FIX_WINDOW_SEC:-3600} - 60 ))" > "$STATE/sent/$D1.route-author.mcp_44444444-4444-4444-4444-444444444444"
+dispatch
+[ -s "$STATE/sent/$D1.fixer-devstrong-1" ] || fail "E: the author window closed and nothing escalated: $(tail -3 "$STATE/dispatch.log")"
+echo "ok - an open author window holds the escalation; once it closes, the strongest fixer"
+
+# re-check of 1f0e4acc9 #1: no fixer task creates or resets a fixed branch name — names are shared by every worktree
+! moves_branch < "$ROOT/scripts/ci/review-dispatch.sh" || fail "a fixer task still moves a shared branch name"
+echo "ok - fixer tasks stay on the branch wake_fixer created for their worktree"
+
