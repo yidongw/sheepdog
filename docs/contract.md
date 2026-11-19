@@ -14,7 +14,9 @@ what gets deployed. The workflow is [.github/workflows/review.yml](../.github/wo
 - Every commit carries `Loop: <loop>`, `Thread: <author thread id>` and a `Verify:` checklist (`Verify:` alone on its
   line, then `- [x] <evidence>` lines). A fix of a blocked review carries `Review-Fix-Of: <full sha>`; a fixer that
   disagrees with a finding records `Review-Disputed: <finding #> <evidence>`; a main repair names
-  `Fixes-Finding: #<n> <finding>` per finding. A `Review-Fix-Of:` that names no ancestor of its commit is ignored with a
+  `Fixes-Finding: #<n> <finding>` per finding. For the dispatcher's routing of a blocked main commit, a repair covers
+  exactly the findings its `Fixes-Finding:` / `Review-Disputed:` lines number (one with no such line covers them all);
+  the uncovered ones stay routed — landing still needs only one effective repair. A `Review-Fix-Of:` that names no ancestor of its commit is ignored with a
   warning (never a range abort): that commit is reviewed as an ordinary commit and gets no repair privilege — no
   tests-only round, no repair of a blocked round (`review-repair.sh`), no previous-round ledger.
 
