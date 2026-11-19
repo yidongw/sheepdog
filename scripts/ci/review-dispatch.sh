@@ -481,17 +481,27 @@ dev_fixer_free() { # dev_fixer_free <sha> → 0 when a fixer may be woken for th
   # The active fixers' threads ended (finished, interrupted, archived) — the round's own fixer-blocked one (without a
   # devfix branch) and every per-group authorto-<hash> one (re-check of 46686e7a3 #8: those also claim the slot):
   # nobody is fixing it any more, so the slot is free now instead of after the 60 min timeout.
-  local r tid st seen=0 live=0
+  # A devfix the landing step found NOT covered below <a> (sent/<its head>.devfix-uncovered) cannot land on $MAIN: it holds
+  # the slot only while its fixer thread is live (11-19 tralyx e04f635cd: its fixer ended at 18:25Z, the devfix waited
+  # uncovered, and every other blocked commit was told "dev fixer for e04f635cd still active").
+  local r tid st seen=0 live=0 fh uncov=""
   for r in "$STATE/sent/$a.fixer-blocked" "$STATE/sent/$a".fixer-authorto-*; do
     [ -f "$r" ] || continue
     tid=$(head -1 "$r" 2>/dev/null || true); [ -n "$tid" ] || continue   # an empty receipt is a marker, not a fixer
     seen=1
-    if [ "${r##*.fixer-}" = blocked ] && devfix_on_its_way "$a"; then live=1; continue; fi   # its fix is on its way
+    if [ "${r##*.fixer-}" = blocked ] && devfix_on_its_way "$a"; then   # its fix is on its way — unless it cannot land
+      fh=$(git -C "$SRC" rev-parse -q --verify "refs/remotes/origin/devfix/${a:0:12}" 2>/dev/null || true)
+      if [ -n "$fh" ] && [ -e "$STATE/sent/$fh.devfix-uncovered" ]; then uncov=$fh; else live=1; continue; fi
+    fi
     st=$(fixer_thread_state "$tid")   # the shared reading: "gone" when T3 no longer has it (re-check of 0b463b6c0 #9)
     case "$st" in preparing|running|starting|queued|"") live=1 ;; esac
   done
   if [ "$seen" = 1 ] && [ "$live" = 0 ]; then
-    if [ ! -e "$STATE/sent/$a.slot-freed" ]; then log "dev fixer(s) for ${a:0:9} ended with no fix on its way: slot freed"; [ -n "${DRY:-}" ] || touch "$STATE/sent/$a.slot-freed"; fi
+    if [ ! -e "$STATE/sent/$a.slot-freed" ]; then
+      if [ -n "$uncov" ]; then log "dev fixer(s) for ${a:0:9} ended and its fix ${uncov:0:9} on devfix/${a:0:12} cannot land on $MAIN (the commits below ${a:0:9} are not covered): slot freed"
+      else log "dev fixer(s) for ${a:0:9} ended with no fix on its way: slot freed"; fi
+      [ -n "${DRY:-}" ] || touch "$STATE/sent/$a.slot-freed"
+    fi
     return 0
   fi
   [ -e "$STATE/sent/$1.fixer-deferred" ] || { log "dev fixer for ${a:0:9} still active: no second fixer for blocked ${1:0:9}"; touch "$STATE/sent/$1.fixer-deferred"; }
@@ -1650,11 +1660,14 @@ devfix_delete_leased() { # devfix_delete_leased <devfix ref> <the head this run 
   log "devfix $1: not deleted — it moved past ${2:0:9} after its merge into $DEV (the next run judges its new head)"
   return 0
 }
-dev_devfix_to_dev() { # dev_devfix_to_dev <devfix ref> <its head> <S> → a green devfix that cannot land on main because a commit below S
-  # is not covered (review-covered.sh: a blocked commit there without its repair) is merged into $DEV instead: its
-  # Review-Fix-Of: S repair counts there (review-repair.sh), the next $DEV review reviews it, and it stops holding the fixer
-  # slot (11-16 856137bb9 / e873de849: such devfixes sat green for hours, holding the slot, landing nothing)
-  local fref=$1 fh=$2 s=$3 d m rc=0
+dev_devfix_to_dev() { # dev_devfix_to_dev <devfix ref> <its head> <S> [1: not covered on an earlier run too] → a green devfix that
+  # cannot land on main because a commit below S is not covered (review-covered.sh: a blocked commit there without its
+  # repair) is merged into $DEV instead: its Review-Fix-Of: S repair counts there (review-repair.sh), the next $DEV review
+  # reviews it, and it stops holding the fixer slot (11-16 856137bb9 / e873de849: such devfixes sat green for hours,
+  # holding the slot, landing nothing). One that can land neither on $MAIN nor on $DEV (a conflict) is marked stuck: S is
+  # then UNREPAIRED (devfix_on_its_way fails) and takes the route of every unrepaired block — its authors (dev_blocked),
+  # then the strongest fixer (dev_escalate), then the supervisor.
+  local fref=$1 fh=$2 s=$3 seen=${4:-0} d m rc=0 why
   [ ! -e "$STATE/sent/$fh.devfix-stuck" ] || return 0
   dev_commit_verdict "$s" || rc=$?
   case "$rc" in 2|3) return 0 ;; esac   # not decided yet: the next run
@@ -1665,24 +1678,33 @@ dev_devfix_to_dev() { # dev_devfix_to_dev <devfix ref> <its head> <S> → a gree
   # only when a blocked commit below S lacks its repair under the fix — missing proof (an expired attestation, an unreadable
   # run) is no reason to leave the fast path: that devfix waits, as before
   dev_blocked_below "$s" "$fh"
-  [ -n "$dev_lower" ] || return 0
+  if [ -n "$dev_lower" ]; then why="blocked $(for b in $dev_lower; do printf '%s ' "${b:0:9}"; done)below it without a repair under the fix"
+  else
+    # every blocked commit of $MAIN..S has its repair under the fix, yet the chain below S is not covered (missing proof, or a
+    # blocked commit already on $MAIN whose repair is not under the fix: 11-19 tralyx e04f635cd, aaedf6a65's repair landed on
+    # $MAIN only — the devfix waited 3 h, its fixer long ended). Re-asked every run; once it was not covered on an earlier
+    # run too and S's fixer ended (nobody changes the branch any more), it goes to $DEV like the case above.
+    [ "$seen" = 1 ] || return 0
+    fixer_ended "$STATE/sent/$s.fixer-blocked" >/dev/null || return 0
+    why="the commits below it are still not covered and its fixer ended"
+  fi
   d=$(git -C "$SRC" rev-parse "origin/$DEV")
   if git -C "$SRC" merge-base --is-ancestor "$fh" "$d" 2>/dev/null; then devfix_delete_leased "$fref" "$fh"; return 0; fi
   rm -rf "$WORK"; git -C "$SRC" worktree prune; git -C "$SRC" worktree add -q --detach "$WORK" "$d"
   if (cd "$WORK" && git -c core.hooksPath=/dev/null -c user.name="review-dispatch" -c user.email="review-dispatch@localhost" \
-        merge -q --no-ff "$fh" -m "$(dispatch_msg "land review fix ${fh:0:9} (of ${s:0:9}) on $DEV" "the fix passed the trusted tests; a blocked commit below ${s:0:9} has no repair yet, so it cannot land on $MAIN; merged into $DEV without conflicts")" >/dev/null 2>&1); then
+        merge -q --no-ff "$fh" -m "$(dispatch_msg "land review fix ${fh:0:9} (of ${s:0:9}) on $DEV" "the fix passed the trusted tests; the commits below ${s:0:9} are not covered ($why), so it cannot land on $MAIN; merged into $DEV without conflicts")" >/dev/null 2>&1); then
     m=$(git -C "$WORK" rev-parse HEAD)
     if git -C "$WORK" push -q --force-with-lease="$DEV:$d" origin "HEAD:refs/heads/$DEV" 2>/dev/null; then
-      log "devfix $fref ${fh:0:9} (fix of ${s:0:9}): cannot land on $MAIN yet (blocked $(for b in $dev_lower; do printf '%s ' "${b:0:9}"; done)below it without a repair under the fix) — merged into $DEV as ${m:0:9}: the repair counts there and rides the next $DEV review"
+      log "devfix $fref ${fh:0:9} (fix of ${s:0:9}): cannot land on $MAIN yet ($why) — merged into $DEV as ${m:0:9}: the repair counts there and rides the next $DEV review"
       devfix_delete_leased "$fref" "$fh"
       touch "$STATE/sent/$fh.devfix-todev"
       git -C "$SRC" fetch -q origin "$DEV" 2>/dev/null || true
     else log "devfix $fref ${fh:0:9}: push of its merge into $DEV failed ($DEV moved meanwhile; next run retries)"; fi
   else
     (cd "$WORK" && git merge --abort >/dev/null 2>&1 || true)
-    log "devfix $fref ${fh:0:9} (fix of ${s:0:9}): cannot land on $MAIN (a commit below it is not covered) and conflicts with $DEV — supervisor told; it holds no fixer slot"
+    log "devfix $fref ${fh:0:9} (fix of ${s:0:9}): cannot land on $MAIN ($why) and conflicts with $DEV — ${s:0:9} is unrepaired: its authors, then the strongest fixer (supervisor told); it holds no fixer slot"
     touch "$STATE/sent/$fh.devfix-stuck"
-    notify_best_effort "$s" "devfix-stuck-${fh:0:9}" "$SUPERVISOR_THREAD" "[review-dispatch] the review fix ${fh:0:9} on $fref (fix of $DEV ${s:0:9}) passed its trusted tests but cannot land on $MAIN: a blocked commit below ${s:0:9} has no Review-Fix-Of: repair yet (review-covered.sh), and merging it into $DEV instead conflicts. Please merge $fref into $DEV by hand (or push the repair of ${s:0:9} on $DEV), then delete $fref."
+    notify_best_effort "$s" "devfix-stuck-${fh:0:9}" "$SUPERVISOR_THREAD" "[review-dispatch] the review fix ${fh:0:9} on $fref (fix of $DEV ${s:0:9}) passed its trusted tests but cannot land on $MAIN: the commits below ${s:0:9} are not covered (review-covered.sh: $why), and merging it into $DEV instead conflicts. Please merge $fref into $DEV by hand (or push the repair of ${s:0:9} on $DEV), then delete $fref."
   fi
   git -C "$SRC" worktree remove --force "$WORK" >/dev/null 2>&1 || true
 }
@@ -2799,8 +2821,9 @@ $gaps}"
     # own repair first — always sheepdog's own review-covered.sh (next to this file), also for a repository on its own
     # scripts/ci/ copies: a copy without it must not skip the proof (review of 1b2f4484e #5)
     if ! (cd "$TRUSTED" && bash "$SHEEPDOG_CI/review-covered.sh" "$fs" "$(git -C "$SRC" merge-base "origin/$MAIN" "$fh")" "$fh" "$REPO" >/dev/null 2>&1); then
-      [ -e "$STATE/sent/$fh.devfix-uncovered" ] || { log "devfix $fref ${fh:0:9}: the commits below ${fs:0:9} are not covered (a blocked review there without its repair, or missing proof) — not landed on $MAIN"; touch "$STATE/sent/$fh.devfix-uncovered"; }
-      dev_devfix_to_dev "$fref" "$fh" "$fs"   # its repair goes to $DEV instead; it never holds the fixer slot unlandable
+      uncov_seen=0; [ ! -e "$STATE/sent/$fh.devfix-uncovered" ] || uncov_seen=1   # re-asked every run: it lands once covered
+      [ "$uncov_seen" = 1 ] || { log "devfix $fref ${fh:0:9}: the commits below ${fs:0:9} are not covered (a blocked review there without its repair, or missing proof) — not landed on $MAIN"; touch "$STATE/sent/$fh.devfix-uncovered"; }
+      dev_devfix_to_dev "$fref" "$fh" "$fs" "$uncov_seen"   # its repair goes to $DEV instead; it never holds the fixer slot unlandable
       continue
     fi
     msha=$(git -C "$SRC" rev-parse origin/$MAIN); landed=""
