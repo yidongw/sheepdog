@@ -31,6 +31,7 @@ culprit_threads() { echo author-thread; }
 dev_devfix_task() { echo repair-task; }
 dev_blocked() { printf '%s\n' "$2" > "$T/routed"; echo called >> "$T/repairs"; }
 dev_owner_state() { :; }   # nobody can own it: the same walk must reach orphan escalation
+dev_escalate() { :; }      # the strongest-fixer escalation: test/ci/review-dispatch-devfix-rerun-escalate.sh
 infra_alert() { printf '%s\n' "$5" > "$T/orphan"; }
 ghc_note_jobs() { :; }
 ghm() {
