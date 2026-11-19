@@ -386,3 +386,8 @@ test "$(repair_effective "$H" "" origin/main origin/dev)" = "$R"     # stands on
 if repair_effective "$H" "" origin/dev >/dev/null; then echo "unexpected: reverted on dev yet counted for dev alone" >&2; exit 1; fi
 g push -q -f origin "$S:refs/heads/dev"; g fetch -q origin
 echo 'repair judged per ref'
+
+# supervisor 11-19: fixers wrote reviewer-directed imperatives into published commit messages ("Read the … chain before
+# validating …"), which re-checks flag and nobody can repair — every fixer task forbids them
+grep -qF 'no instructions or imperatives addressed to the reviewer' "$D" || { echo "FAIL: the fixer task does not forbid reviewer-directed commit-message text" >&2; exit 1; }
+echo 'fixer task: commit messages carry facts and evidence only'

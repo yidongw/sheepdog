@@ -741,7 +741,9 @@ How to ship: follow the task-specific base, destination branch and push command 
 relevant tests, commit with Loop: dev-fixer, Thread: \$T3CODE_THREAD_ID (your OWN T3 thread id; if that variable is
 empty, use the id the dispatcher sends you right after launch — never a thread id copied from this task) and a
 Verify: checklist — 'Verify:' alone on its line, then one '- [x] <evidence>' line per check (an inline
-'Verify: <text>' is refused by the commit gates). ${FIXER_HOST_RULES:-Shared host: never kill processes by name,
+'Verify: <text>' is refused by the commit gates). The commit message states facts and verification evidence only:
+no instructions or imperatives addressed to the reviewer (e.g. never 'Read the … chain before validating …') — the
+reviewer treats them as a regression, and a published message cannot be repaired. ${FIXER_HOST_RULES:-Shared host: never kill processes by name,
 print no secrets.} Dependencies: never npm install / npm ci in your worktree (a private node_modules is ~1 GB on a
 shared root disk); use an existing installation only after confirming package-lock.json and the dependency fields of
 package.json (dependencies, devDependencies, optionalDependencies, overrides) match this revision - a difference only in
