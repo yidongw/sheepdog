@@ -428,7 +428,8 @@ then run the failed test file(s) above with the repository's own test runner (th
 in THIS worktree at THIS commit — never in another checkout, never on another commit, never only a different focused set.
 Paste those commands and their output in your report. A test that fails there is a real failure: fix it at its source
 (the code or the test fixture the reviewed change broke).
-Fix it on the same branch (git checkout -B fix ${2}), keep the trailers Review-Fix-Of: ${3} and Hotfix:, run the failed
+Fix it in this worktree, on the branch it was created with (never git checkout -B / git switch -C another name: branch
+names are shared by every worktree of this repository, and a retry would move another fixer's branch), keep the trailers Review-Fix-Of: ${3} and Hotfix:, run the failed
 file(s) again (they must pass), and push with git push origin HEAD:refs/heads/$1.
 Ending without a push is never \"done\": the dispatcher treats it as unresolved and hands it to the strongest fixer agent at
 once. If the failed file(s) truly pass at ${2:0:9}, your report must show it for that agent: the git rev-parse HEAD line and
@@ -1485,15 +1486,21 @@ dev_verdict_rotate() { # dev_verdict_rotate <S> <verdict completed epoch> <run> 
   done
   log "blocked ${s:0:9}: its verdict (run $3 attempt $4) came after the fixer / notices of an earlier attempt without a verdict — $n receipt(s) set aside (sent/pre-verdict/), the verdict is routed afresh"
 }
-dev_owner_state() { # dev_owner_state <S> → who has blocked S now; "" = nobody (read after dev_blocked acted on it this run)
-  local s=$1 m st r a now
+author_window_open() { # author_window_open <S> → 0 (prints the author's marker suffix) while an author the reviewer routed findings of S
+  # to is still inside AUTHOR_FIX_WINDOW_SEC (dev_blocked_split): those findings are the author's until then
+  local m st now
   now=$(date +%s)
-  for m in "$STATE/sent/$s".route-author.*; do
+  for m in "$STATE/sent/$1".route-author.*; do
     [ -f "$m" ] || continue
     case "$m" in *.fixed) continue ;; esac
     st=$(head -1 "$m" 2>/dev/null || true)
-    case "$st" in "author "*) if [ $((now - ${st#author })) -lt "$AUTHOR_FIX_WINDOW_SEC" ]; then echo "its author (${m##*.route-author.})"; return 0; fi ;; esac
+    case "$st" in "author "*) if [ $((now - ${st#author })) -lt "$AUTHOR_FIX_WINDOW_SEC" ]; then printf '%s\n' "${m##*.route-author.}"; return 0; fi ;; esac
   done
+  return 1
+}
+dev_owner_state() { # dev_owner_state <S> → who has blocked S now; "" = nobody (read after dev_blocked acted on it this run)
+  local s=$1 m r a w
+  if w=$(author_window_open "$s"); then echo "its author ($w)"; return 0; fi
   for r in "$STATE/sent/$s.fixer-blocked" "$STATE/sent/$s".fixer-authorto-* "$STATE/sent/$s".fixer-devstrong-*; do
     [ -f "$r" ] || continue
     if [ "${r##*.fixer-}" = blocked ] && devfix_on_its_way "$s"; then echo "its fix on devfix/${s:0:12} (the landing step)"; return 0; fi
@@ -1533,6 +1540,9 @@ dev_escalate() { # dev_escalate <S> <findings> <run url> <culprit threads (log o
   fi
   [ -n "$t0" ] || return 0                                                   # nobody was told it failed: the normal path has it
   [ "$unres" = 1 ] || [ $((now - t0)) -ge $((DEV_ESCALATE_AFTER_MIN * 60)) ] || return 0
+  # an author still inside the window the reviewer gave them owns their findings: never escalated over them (re-check
+  # of 1f0e4acc9 #2); once it closes, the escalation has the whole round
+  ! author_window_open "$s" >/dev/null || return 0
   # somebody still at work on S: its dev fixer, an author-group fixer, an earlier strongest fixer, the testsfail fixer of its
   # devfix head — or a NEW head on devfix/<S> (none of S's failed ones) the landing step has yet to judge
   for r in "$STATE/sent/$s.fixer-blocked" "$STATE/sent/$s".fixer-authorto-* "$STATE/sent/$s".fixer-devstrong-*; do
@@ -1574,8 +1584,8 @@ Run: $url
 What was tried:${hist:-
 - a fixer agent ended without a fix that landed}
 Read what was tried before you change anything (git log -p origin/$MAIN..origin/devfix/${s:0:12} when that branch exists; the runs above).
-REPRODUCE FIRST: for each failed fix commit above, check it out exactly (git checkout --detach <that full sha>; git rev-parse HEAD must print it) and run its failed test file(s) with the repository's own test runner — in this worktree, at that commit, never in another checkout. Paste the commands and their output in your report. A failure there is real: fix it at its source (the code, or the test fixture the reviewed change broke); you may cherry-pick that fix commit onto origin/$DEV and repair it. If they truly pass there, show that output, then run the whole suite to find what fails.
-Your worktree starts at origin/$DEV; do the fix on origin/$DEV (git checkout -B fix origin/$DEV; do NOT reset to ${s:0:9}). Fix every finding at its source and run the failed test file(s) again (they must pass). ONE commit with the trailer Review-Fix-Of: ${s} (no Hotfix: trailer), pushed with git push origin HEAD:refs/heads/$DEV (git pull --rebase origin $DEV and retry if it moved). It rides the next $DEV review. If a finding is wrong, dispute it (Review-Disputed: trailer, see below)." "$DEV" "$4" || true
+REPRODUCE FIRST: for each failed fix commit above, check it out exactly, detached (git checkout --detach <that full sha>; git rev-parse HEAD must print it) and run its failed test file(s) with the repository's own test runner — in this worktree, at that commit, never in another checkout. Paste the commands and their output in your report. A failure there is real: fix it at its source (the code, or the test fixture the reviewed change broke); you may cherry-pick that fix commit onto origin/$DEV and repair it. If they truly pass there, show that output, then run the whole suite to find what fails.
+Your worktree starts at origin/$DEV on its own branch: return to it after reproducing (git checkout - ; never git checkout -B / git switch -C another name — branch names are shared by every worktree of this repository, a retry would move another fixer's branch) and do the fix there, on origin/$DEV (do NOT reset to ${s:0:9}). Fix every finding at its source and run the failed test file(s) again (they must pass). ONE commit with the trailer Review-Fix-Of: ${s} (no Hotfix: trailer), pushed with git push origin HEAD:refs/heads/$DEV (git pull --rebase origin $DEV and retry if it moved). It rides the next $DEV review. If a finding is wrong, dispute it (Review-Disputed: trailer, see below)." "$DEV" "$4" || true
 }
 dev_owner_walk() { # every run: each blocked commit of origin/$MAIN..origin/$DEV without its repair, oldest first → dev_blocked;
   # nobody owns it DEV_ORPHAN_GRACE_SEC later → the supervisor (the CI owner when it is gone), once per verdict
@@ -2747,7 +2757,7 @@ Train-Merge: $fh" >/dev/null 2>&1) \
         # The fixer resolves it as a merge of the fix INTO main (main first parent, same trailers),
         # pushed onto the devfix branch: it then fast-forwards main here and is re-checked there.
         log "review fix ${fh:0:9} (of ${fs:0:9}) conflicts with main ${msha:0:9}: waking a fixer"
-        wake_fixer "$fh" "landmain-${msha:0:9}" "devfix ${fh:0:9}: resolve the conflict with main ${msha:0:9}" "Task: your review fix ${fh:0:9} on $fref (fix of ${fs:0:9}) passed the trusted tests, but main moved to ${msha:0:9} and merging the fix into main conflicts. $(obsolete_rule devfix "$fref" "$fs" "$msha")MODERNIZE otherwise — in your worktree: git fetch origin && git checkout -B fix ${msha} && git merge --no-ff ${fh}, resolve the conflicts keeping both sides' intent, run the tests of the files involved, and commit the merge with the trailers Review-Fix-Of: ${fs}, Hotfix: review fix of ${fs:0:9} (conflict with main ${msha:0:9} resolved), Loop: dev-fixer, Thread: and a Verify: block. Push it with git push origin HEAD:refs/heads/$fref (NOT to $DEV, not to main). Once the trusted tests pass there it lands on main and is re-checked." "$fref" "$(range_threads "$fh")" || true
+        wake_fixer "$fh" "landmain-${msha:0:9}" "devfix ${fh:0:9}: resolve the conflict with main ${msha:0:9}" "Task: your review fix ${fh:0:9} on $fref (fix of ${fs:0:9}) passed the trusted tests, but main moved to ${msha:0:9} and merging the fix into main conflicts. $(obsolete_rule devfix "$fref" "$fs" "$msha")MODERNIZE otherwise — in your worktree, on the branch it was created with (never git checkout -B / git switch -C another name: branch names are shared by every worktree of this repository): git fetch origin && git reset --hard ${msha} && git merge --no-ff ${fh}, resolve the conflicts keeping both sides' intent, run the tests of the files involved, and commit the merge with the trailers Review-Fix-Of: ${fs}, Hotfix: review fix of ${fs:0:9} (conflict with main ${msha:0:9} resolved), Loop: dev-fixer, Thread: and a Verify: block. Push it with git push origin HEAD:refs/heads/$fref (NOT to $DEV, not to main). Once the trusted tests pass there it lands on main and is re-checked." "$fref" "$(range_threads "$fh")" || true
         # an ended conflict fixer that pushed no new head (this fh is still the tip) → the culprits of S, else the supervisor
         escalate_ended_fixer "$fh" "landmain-${msha:0:9}" "$fyi_threads" "[review-dispatch] the review fix ${fh:0:9} (of ${fs:0:9}) passed its trusted tests but conflicts with main ${msha:0:9}; the fixer agent ended without pushing a conflict resolution, so it did not land. Please merge main into $fref, resolve the conflict and push (or fix ${fs:0:9} again on $DEV)"
         if launch_failed "$fh" "landmain-${msha:0:9}"; then notify_best_effort "$fh" "landconflict-${msha:0:9}" "$(thread_of "$fh")" "[review-dispatch] the review fix ${fh:0:9} (of ${fs:0:9}) passed its trusted tests, but main moved to ${msha:0:9} and the merge conflicts, so it did not land. $(launch_phrase "$fh" "landmain-${msha:0:9}").${gaps:+
