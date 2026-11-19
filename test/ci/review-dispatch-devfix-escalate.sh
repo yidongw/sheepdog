@@ -161,7 +161,7 @@ dispatch() { bash "$ROOT/scripts/ci/review-dispatch.sh" > "$T/out" 2>&1 || { cat
 reruns() { grep -c "^run rerun $1" "$FX/calls" || true; }
 main_at() { git -C "$T/remote.git" rev-parse main; }
 old() { touch -d '-61 min' "$@"; }
-moves_branch() { grep -E '(checkout -B|switch -C) ' | grep -v 'never git checkout -B / git switch -C' | grep -q .; }   # stdin: a task
+moves_branch() { local t; t=$(grep -E '(checkout -B|switch -C) ' | grep -v 'never git checkout -B / git switch -C' || true); [ -n "$t" ]; }   # stdin: a task
 
 # ── A · a5f8f91c1 replayed: a failing test in a file the fix did not touch is real until reproduced otherwise ──
 setup a
@@ -183,8 +183,8 @@ dispatch
 [ -s "$STATE/sent/$D1.fixer-devstrong-1" ] || fail "A: the testsfail fixer ended without a push and the strongest fixer did not take over: $(tail -5 "$STATE/dispatch.log")"
 L=$(grep '^t3_thread_launch ' "$FX/t3" | tail -1 | cut -d' ' -f2-)
 jq -e '.modelSelection == {instanceId:"claudeAgent",model:"strong-model",options:[{id:"effort",value:"medium"}]} and .workspaceStrategy.baseRef == "origin/dev"' <<<"$L" >/dev/null || fail "A: strongest fixer launch: $L"
-jq -r .message <<<"$L" | grep -q "fix $FXH (devfix/${D1:0:12}) failed the trusted tests; failed test file(s): test/evm-self-call.test.ts" || fail "A: the strongest fixer's task does not say what failed: $(jq -r .message <<<"$L" | head -20)"
-jq -r .message <<<"$L" | grep -q "Review-Fix-Of: $D1" || fail "A: the strongest fixer's task does not name the repair trailer"
+grep -q "fix $FXH (devfix/${D1:0:12}) failed the trusted tests; failed test file(s): test/evm-self-call.test.ts" <<<"$(jq -r .message <<<"$L")" || fail "A: the strongest fixer's task does not say what failed: $(jq -r .message <<<"$L" | head -20)"
+grep -q "Review-Fix-Of: $D1" <<<"$(jq -r .message <<<"$L")" || fail "A: the strongest fixer's task does not name the repair trailer"
 ! jq -r .message <<<"$L" | moves_branch || fail "A: the strongest fixer's task moves a shared branch name (re-check of 1f0e4acc9 #1)"
 [ "$(reruns "$RF")" = 0 ] || fail "A: re-run"
 echo "ok - a testsfail fixer that ends without a push is unresolved: the strongest fixer takes over at once, told what failed"
@@ -197,14 +197,14 @@ dispatch
 ! ls "$STATE/sent/$D1".fixer-devstrong-* >/dev/null 2>&1 || fail "C: the strongest fixer was woken before DEV_ESCALATE_AFTER_MIN"
 old "$STATE/sent/$D1".fixfailed*; dispatch
 [ -s "$STATE/sent/$D1.fixer-devstrong-1" ] || fail "C: 60 min after the fixfailed notice, still no repair, nobody at work — no strongest fixer: $(tail -5 "$STATE/dispatch.log")"
-grep '^t3_thread_launch ' "$FX/t3" | tail -1 | grep -q '"value":"medium"' || fail "C: level 1 is not at STRONG_FIXER_EFFORT"
+grep -q '"value":"medium"' <<<"$(grep '^t3_thread_launch ' "$FX/t3" | tail -1)" || fail "C: level 1 is not at STRONG_FIXER_EFFORT"
 grep -q "${D1:0:9}: still no repair .* the strongest fixer (level 1" "$STATE/dispatch.log" || fail "C: the escalation is not logged"
 echo "ok - still unrepaired 60 min after a fixfailed notice: the strongest fixer (STRONG_FIXER_EFFORT), on dev"
 dispatch
 ! [ -e "$STATE/sent/$D1.fixer-devstrong-2" ] || fail "C: level 2 within DEV_ESCALATE_AFTER_MIN of level 1"
 old "$STATE/sent/$D1.fixer-devstrong-1"; dispatch
 [ -s "$STATE/sent/$D1.fixer-devstrong-2" ] || fail "C: level 1 ended without a repair and nothing followed: $(tail -3 "$STATE/dispatch.log")"
-grep '^t3_thread_launch ' "$FX/t3" | tail -1 | grep -q '"value":"high"' || fail "C: level 2 is not at the escalated effort"
+grep -q '"value":"high"' <<<"$(grep '^t3_thread_launch ' "$FX/t3" | tail -1)" || fail "C: level 2 is not at the escalated effort"
 ! ls "$STATE/sent/$D1".devstrong-failed* >/dev/null 2>&1 || fail "C: the supervisor told at level 2 already"
 old "$STATE/sent/$D1.fixer-devstrong-2"; dispatch
 [ -s "$STATE/sent/$D1.fixer-devstrong-3" ] || fail "C: no level 3"
