@@ -9,7 +9,7 @@ cd "$(dirname "$0")/../.."
 REVIEW_NOTIFY_HELPER=$PWD/scripts/ci/review-notify.sh
 source scripts/ci/review-notify.sh
 # Load the actual dispatcher adapters without running its production setup.
-eval "$(sed -n '/^notify_best_effort() /p; /^notify_range() {/,/^}/p' scripts/ci/review-dispatch.sh)"; for _f in notify_best_effort notify_range; do declare -F "$_f" >/dev/null || { echo "missing helper $_f (not extracted from the dispatcher)" >&2; exit 1; }; done
+eval "$(sed -n '/^notify_best_effort() /p; /^notify_range() {/,/^}/p; /^notify_threads() {/,/^}/p; /^notice_fallback() {/,/^}/p' scripts/ci/review-dispatch.sh)"; for _f in notify_best_effort notify_range notify_threads notice_fallback; do declare -F "$_f" >/dev/null || { echo "missing helper $_f (not extracted from the dispatcher)" >&2; exit 1; }; done
 STATE=$(mktemp -d)
 trap 'rm -rf "$STATE"' EXIT
 mkdir -p "$STATE/sent"

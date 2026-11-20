@@ -96,6 +96,9 @@ cat > "$T/bin/t3" <<'SH'
 # `t3 thread show <tid>` → "<tid> <state>": running, or what $FX/t3state says (a test ends a fixer that way)
 echo "t3 $*" >> "$FX/t3"
 if [ "${1:-} ${2:-}" = "thread send" ] && [ -e "$FX/t3fail" ]; then echo "t3: transport down" >&2; exit 1; fi   # a delivery failure
+# a thread named in $FX/archived is archived (T3's refusal); a delivered message is kept in $FX/inbox-<thread>
+if [ "${1:-} ${2:-}" = "thread send" ] && grep -qxF -- "$3" "$FX/archived" 2>/dev/null; then echo "t3: thread $3 is archived" >&2; exit 1; fi
+if [ "${1:-} ${2:-}" = "thread send" ]; then { echo "--- $3"; cat; } >> "$FX/inbox-${3//[^A-Za-z0-9-]/_}"; fi
 if [ "${1:-} ${2:-}" = "thread show" ]; then echo "$3 $(cat "$FX/t3state" 2>/dev/null || echo running)"; else echo '{"status":"running"}'; fi
 SH
 chmod +x "$T/bin/gh" "$T/bin/t3mcp" "$T/bin/t3"
@@ -163,6 +166,36 @@ dispatch
 ls "$STATE/sent/$D1.machinery-${FXH:0:9}".* >/dev/null 2>&1 || fail "an undelivered machinery notice was not retried: $(tail -3 "$STATE/dispatch.log")"
 [ "$(grep -c "${FXH:0:9}: changes review machinery" "$STATE/dispatch.log")" = 1 ] || fail "the machinery devfix was logged again on the retry"
 echo "ok - an undelivered machinery notice is retried on the next run (logged once)"
+# pikeway 11-20 09:28Z: every author thread of the range archived / gone → the machinery notice reached nobody, every
+# delivery SKIPPED, $DEV stuck 3 h. All addressed threads unreachable → the supervisor; the supervisor too → the CI owner.
+inbox() { cat "$FX/inbox-${1//[^A-Za-z0-9-]/_}" 2>/dev/null || true; }
+echo "$TH" > "$FX/archived"
+fix scripts/ci/other2.sh; run "review $FXH" $R workflow_run main "$FXH" completed success skipped; publish
+dispatch
+grep -q "SKIPPED machinery-${FXH:0:9}.0 ${D1:0:9} → t3 $TH" "$STATE/dispatch.log" || fail "setup: the author thread was not archived: $(tail -3 "$STATE/dispatch.log")"
+inbox "$SUPERVISOR_THREAD" | grep -q "the review fix ${FXH:0:9} on devfix/$D1 .*changes review machinery" \
+  || fail "every author thread archived: the machinery notice did not reach the supervisor: $(tail -3 "$STATE/dispatch.log")"
+inbox "$SUPERVISOR_THREAD" | grep -q "none of the addressed threads ($TH) can receive it" || fail "the supervisor's copy does not say why it got it"
+grep -q "notice machinery-${FXH:0:9} ${D1:0:9}: none of the addressed threads ($TH) .* delivered to the supervisor" "$STATE/dispatch.log" || fail "the fallback is not logged"
+n=$(inbox "$SUPERVISOR_THREAD" | grep -c "^--- "); dispatch
+[ "$(inbox "$SUPERVISOR_THREAD" | grep -c "^--- ")" = "$n" ] || fail "the supervisor got the fallback notice again on the next run"
+inbox "$DISPATCH_THREAD" | grep -q "${FXH:0:9}" && fail "the CI owner was told although the supervisor had it"
+echo "ok - a machinery notice whose author threads are all archived goes to the supervisor (once)"
+printf '%s\n%s\n' "$TH" "$SUPERVISOR_THREAD" > "$FX/archived"
+fix scripts/ci/other3.sh; run "review $FXH" $R workflow_run main "$FXH" completed success skipped; publish
+dispatch
+inbox "$DISPATCH_THREAD" | grep -q "the review fix ${FXH:0:9} on devfix/$D1 .*changes review machinery" \
+  || fail "author and supervisor archived: the machinery notice did not reach the CI owner: $(tail -3 "$STATE/dispatch.log")"
+inbox "$DISPATCH_THREAD" | grep -q "the supervisor thread $SUPERVISOR_THREAD cannot receive it either" || fail "the CI owner's copy does not say why it got it"
+grep -q "notice machinery-${FXH:0:9} ${D1:0:9}: .* delivered to the CI owner $DISPATCH_THREAD" "$STATE/dispatch.log" || fail "the owner fallback is not logged"
+echo "ok - author and supervisor threads archived: the machinery notice goes to the CI owner"
+# a direct supervisor-only notice (notify_best_effort) with an archived supervisor goes to the CI owner too
+( source "$ROOT/scripts/ci/review-notify.sh"; LOG=$STATE/dispatch.log; log() { echo "[t] $*" >> "$LOG"; }; notify_outbox=""; key_prefix=""
+  eval "$(sed -n '/^notify_best_effort() /p; /^notice_fallback() {/,/^}/p' "$ROOT/scripts/ci/review-dispatch.sh")"
+  notify_best_effort "$D1" direct-sup "$SUPERVISOR_THREAD" "[review-dispatch] direct supervisor notice" )
+inbox "$DISPATCH_THREAD" | grep -q "direct supervisor notice" || fail "a supervisor-only notice with an archived supervisor reached nobody"
+echo "ok - a supervisor-only notice with an archived supervisor goes to the CI owner"
+rm -f "$FX/archived"
 fix src/d1.ts; run "review $FXH" $R workflow_run main "$FXH" completed success skipped; publish
 # owner 11-15 (dev reviews each commit once): without proof of what lies below D1, D1 + its fix do not land
 mv "$FX/attest-$RD1.json" "$FX/attest-$RD1.json.off"; dispatch

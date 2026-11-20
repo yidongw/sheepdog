@@ -300,30 +300,39 @@ ls "$STATE/sent/pre-verdict/" | grep -q "$Q.fixer-blocked.before-$QR-2" || fail 
 [ ! -e "$STATE/fixer-gate/ended/$Q.fixer-blocked" ] || fail "(e) legacy: the gate still caches the replacement fixer's receipt as ended (re-check of 0fdd85b5a #1/#2)"
 echo "ok - (e) an older dispatcher's pre-verdict fixer / notice no longer swallow the verdict; the gate sees the new fixer"
 
-# orphan: X blocked, its fixer ended without a fix, and its fixfailed notice reached nobody (the supervisor's thread is archived)
-# → the orphan notice goes to the supervisor, and — archived — to the CI owner (infra_alert), once
-setup o
-P=$(c p); push main; g checkout -q -b dev; XO=$(c xo); push dev
-clone
-run1 "$XO" blocked "$P"
-mkdir -p "$STATE/sent"; echo "$XO" > "$STATE/dev-fixer.active"
-echo "mcp:ffffffff-0000-4000-8000-000000000001" > "$STATE/sent/$XO.fixer-blocked"; echo completed > "$FX/state-ffffffff-0000-4000-8000-000000000001"
-touch -d '-10 min' "$STATE/sent/$XO.fixer-blocked"
-cp "$T/bin/t3" "$T/t3.normal"
-cat > "$T/bin/t3" <<'SH'
+# orphan: X blocked, its fixer ended without a fix, and its fixfailed notice cannot reach the supervisor (archived)
+# → the notice goes on to the CI owner (notice_fallback, pikeway 11-20: never zero recipients), once; a delivered notice
+# owns X, so no orphan report. With the CI owner's thread archived too nobody has it → the orphan report (logged once).
+orphan_case() { # orphan_case <setup name> <CI owner reachable 0|1>
+  setup "$1"
+  P=$(c p); push main; g checkout -q -b dev; XO=$(c xo); push dev
+  clone
+  run1 "$XO" blocked "$P"
+  mkdir -p "$STATE/sent"; echo "$XO" > "$STATE/dev-fixer.active"
+  echo "mcp:ffffffff-0000-4000-8000-000000000001" > "$STATE/sent/$XO.fixer-blocked"; echo completed > "$FX/state-ffffffff-0000-4000-8000-000000000001"
+  touch -d '-10 min' "$STATE/sent/$XO.fixer-blocked"
+  cp "$T/bin/t3" "$T/t3.normal"
+  cat > "$T/bin/t3" <<SH
 #!/usr/bin/env bash
-case "$1 $2" in
-  "thread show") echo "$3 $(cat "$FX/state-${3#mcp:}" 2>/dev/null || echo running)" ;;
-  "thread send") cat >/dev/null; echo "send $3" >> "$FX/t3"; [ "$3" = "$DISPATCH_THREAD" ] && { echo ok; exit 0; }; echo "Thread $3 is archived"; exit 1 ;;
-  *) echo "t3 $*" >> "$FX/t3"; exit 1 ;;
+case "\$1 \$2" in
+  "thread show") echo "\$3 \$(cat "\$FX/state-\${3#mcp:}" 2>/dev/null || echo running)" ;;
+  "thread send") cat >/dev/null; echo "send \$3" >> "\$FX/t3"; [ "$2" = 1 ] && [ "\$3" = "\$DISPATCH_THREAD" ] && { echo ok; exit 0; }; echo "Thread \$3 is archived"; exit 1 ;;
+  *) echo "t3 \$*" >> "\$FX/t3"; exit 1 ;;
 esac
 SH
-dispatch o; dispatch o2
-grep -q "nobody the dispatcher can wake owns it" "$STATE/dispatch.log" || fail "orphan: not reported: $(cat "$STATE/dispatch.log")"
+  dispatch "$1"; dispatch "$1"2
+  cp "$T/t3.normal" "$T/bin/t3"   # the normal T3 stub again
+}
+orphan_case o 1
+grep -q "sent fixfailed.sup.unreached-owner ${XO:0:9} → t3 $DISPATCH_THREAD" "$STATE/dispatch.log" || fail "orphan: the fixfailed notice did not go on to the CI owner (supervisor archived): $(cat "$STATE/dispatch.log")"
 [ "$(grep -c "^send $DISPATCH_THREAD" "$FX/t3")" = 1 ] || fail "orphan: the CI owner was not told exactly once (supervisor archived): $(cat "$FX/t3")"
+! grep -q "nobody the dispatcher can wake owns it" "$STATE/dispatch.log" || fail "orphan: reported although the CI owner has its fixfailed notice"
+echo 'ok - a fixfailed notice the supervisor cannot receive reaches the CI owner once (X is owned)'
+orphan_case o3 0
+grep -q "ERROR notice fixfailed.sup ${XO:0:9}: .*neither the supervisor nor the CI owner can receive it" "$STATE/dispatch.log" || fail "orphan: a notice nobody received was not logged: $(cat "$STATE/dispatch.log")"
+grep -q "nobody the dispatcher can wake owns it" "$STATE/dispatch.log" || fail "orphan: not reported: $(cat "$STATE/dispatch.log")"
 [ "$(grep -c "nobody the dispatcher can wake owns it" "$STATE/dispatch.log")" = 1 ] || fail "orphan: reported more than once"
-echo 'ok - a blocked commit nobody can own reaches the supervisor (or the CI owner) once'
-cp "$T/t3.normal" "$T/bin/t3"   # the normal T3 stub again
+echo 'ok - a blocked commit nobody can own (supervisor and CI owner archived) is reported once'
 
 # re-check of 0fdd85b5a #4: a later unfinished run of the same commit does not hide its completed first verdict
 # (a newer failed run — Y's, already repaired — is what the train scan's "newest failure" looks at, as on tralyx)
