@@ -65,12 +65,16 @@ $(head -20 "$dg")$(if [ "$dgrest" -gt 0 ]; then printf '\n(%s more, attached to 
     fi
     # A bare uuid may be an agent thread (mcp:<uuid>) or an imported Claude session (import:claudeAgent:<uuid>; 11-20:
     # trailers "Thread: 3afd24a5-…" of a live imported thread were judged missing) — try each form in turn.
-    local cand sent_ok=0 outs=""
+    # permanent only when EVERY form failed permanently (archived / missing): a transient failure of any form keeps the
+    # notice retryable (re-check of bdf70d1cd #1)
+    local cand sent_ok=0 outs="" transient=0
     for cand in "$thread" $([[ "$thread" != mcp:* && "$thread" != import:* ]] && printf '%s ' "mcp:$thread" "import:claudeAgent:$thread"); do
       if out=$(printf '%s\n' "$msg" | timeout 60 t3 thread send "$cand" - 2>&1); then sent_ok=1; break; fi
+      grep -qE 'is archived|was not found|no longer available' <<<"$out" || transient=1
       outs+="$out"$'\n'
     done
     [ "$sent_ok" = 1 ] || out=$outs
+    if [ "$sent_ok" = 0 ] && [ "$transient" = 1 ]; then log "UNDELIVERED $key ${sha:0:9} → t3 $thread (t3 thread send failed)"; return 1; fi
     if [ "$sent_ok" = 1 ]; then
       log "sent $key ${sha:0:9} → t3 $thread"; touch "$mark"; digest_done "$dg" "$dgn"; notify_outcome=sent
     elif grep -qE 'is archived|was not found|no longer available' <<<"$out"; then
