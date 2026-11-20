@@ -28,3 +28,18 @@ grep -q "sent k1" "$T/state/dispatch.log" || fail "bare uuid of an agent thread 
 run "nobody" "$U"
 grep -q "SKIPPED k1 abcdef012 → t3 $U (was not found)" "$T/state/dispatch.log" || fail "unknown uuid not skipped: $(cat "$T/state/dispatch.log")"
 echo "bare uuid: tried as is, mcp:, import:claudeAgent:"
+
+# re-check of bdf70d1cd #1: one form failing transiently (the others missing) keeps the notice retryable — no receipt
+cat > "$T/bin/t3" <<SH
+#!/usr/bin/env bash
+echo "\$3" >> "$T/attempts"; cat > /dev/null
+[ "\$3" = "mcp:$U" ] && { echo "connection refused"; exit 1; }
+echo "Thread \$3 was not found"; exit 1
+SH
+chmod +x "$T/bin/t3"; : > "$T/state/dispatch.log"; rm -f "$T/attempts" "$T/state/sent/"*
+rc=0; printf 'hello\n' | PATH="$T/bin:$PATH" STATE="$T/state" bash scripts/ci/review-notify.sh abcdef0123456789abcdef0123456789abcdef01 k2 "$U" || rc=$?
+[ "$rc" != 0 ] || fail "a transient failure was not reported as undelivered"
+grep -q "UNDELIVERED k2" "$T/state/dispatch.log" || fail "no UNDELIVERED log: $(cat "$T/state/dispatch.log")"
+! grep -q "SKIPPED k2" "$T/state/dispatch.log" || fail "a transient failure wrote a permanent skip"
+[ -z "$(ls "$T/state/sent/" 2>/dev/null)" ] || fail "a receipt was written for a retryable notice: $(ls "$T/state/sent/")"
+echo "bare uuid: a transient failure of one form stays retryable"
