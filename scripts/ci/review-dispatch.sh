@@ -133,7 +133,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/review-machinery.sh"   # landing_machiner
 # Delivery failures stay retryable, but must never stop dispatch or fixer launch. With notify_outbox=<episode sha> set, a notice
 # goes to the outbox instead (terminal revert notices: delivered by revert_notices_flush, retried until delivered).
 notify_outbox=""
-notify_best_effort() { if [ -n "${notify_outbox:-}" ]; then outbox_add "$notify_outbox" "$@"; else notify "$@" || :; fi; }
+# A direct notice whose one recipient is unreachable (archived / gone: notify_outcome=skipped) goes on to the supervisor, then
+# the CI owner (notice_fallback); notify_threads sets notify_grouped and falls back once for the whole group instead.
+notify_best_effort() { if [ -n "${notify_outbox:-}" ]; then outbox_add "$notify_outbox" "$@"; return 0; fi; notify "$@" || :; if [ -z "${notify_grouped:-}" ] && [ "${notify_outcome:-}" = skipped ]; then notice_fallback "$@"; fi; return 0; }
 # ── terminal revert notices (re-check of 7b7b4b5c2 #1): ONE retry design for the overdue / reverted / revert-conflict notices.
 # The git action has its own marker ($STATE/sent/<sha>.reverted: reverted, conflicted or nothing to revert — never repeated);
 # each recipient's notice is an outbox entry $OUTBOX/<episode sha>/<file> (notify sha, key, thread, message) that every run
@@ -365,8 +367,8 @@ thread_of() { local t b f; b=$(git -C "$SRC" show -s --format=%B "$1" 2>/dev/nul
 range_threads() { # distinct Thread: trailers of origin/$MAIN..<sha>
   local c; for c in $(git -C "$SRC" rev-list --no-merges "origin/$MAIN..$1"); do thread_of "$c"; done | { grep -v '^$' || true; } | sort -u   # a merges-only range has no authors: not an error
 }
-notify_range() { # notify_range <sha> <key> <message>  → every author of a commit not yet on main
-  local t n=0; for t in $(range_threads "$1"); do notify_best_effort "$1" "$key_prefix$2.$((n++))" "$t" "$3"; done
+notify_range() { # notify_range <sha> <key> <message>  → every author of a commit not yet on main (none reachable: notice_fallback)
+  notify_threads "$1" "$2" "$(range_threads "$1")" "$3"
 }
 # Wake only the authors who have to act (owner 11-11: "wake the author only when the author has to act"): every wake re-reads the
 # author's whole session, and notices that every range author got for every blocked dev sha — mostly other
@@ -450,7 +452,45 @@ fixer_at_work() { # fixer_at_work <receipt file> [<devfix ref>] → 0 while that
   case "$st" in preparing|running|starting|queued|"") return 0 ;; *) return 1 ;; esac
 }
 notify_threads() { # notify_threads <sha> <key> <threads (newline / space separated)> <message>
-  local t n=0; for t in $3; do notify_best_effort "$1" "$key_prefix$2.$((n++))" "$t" "$4"; done
+  local t n=0 reached="" notify_grouped=1
+  for t in $3; do
+    notify_best_effort "$1" "$key_prefix$2.$((n++))" "$t" "$4"
+    if [ -n "${notify_outbox:-}" ] || [ "${notify_outcome:-}" != skipped ]; then reached=1; fi
+  done
+  # the outbox (revert notices) forwards an unreachable recipient itself (revert_notices_flush)
+  if [ -z "$reached" ] && [ -z "${notify_outbox:-}" ]; then notice_fallback "$1" "$key_prefix$2" "$3" "$4"; fi
+  return 0
+}
+# A notice someone must act on never ends with zero recipients (pikeway 11-20 09:28Z: a devfix machinery notice went only to
+# author threads that were archived / not found — every delivery SKIPPED, nobody told, $DEV did not land for 3 h). When
+# every addressed thread is unreachable (archived / gone / no thread id: notify_outcome=skipped), or there was none, the
+# notice goes to the supervisor; an unreachable supervisor → the CI owner (DISPATCH_THREAD), as revert_notices_flush does.
+# Each hop has its own receipt (<key>.unreached-sup / .unreached-owner), so a later run re-sends nothing already delivered;
+# an undelivered hop (transport failure) is retried on the next run, when the caller sends the notice again.
+notice_fallback() { # notice_fallback <sha> <key> <threads tried (newline / space separated)> <message>
+  local sha=$1 key=$2 tried why nb="$STATE/sent/$1.$2.unreached-none"
+  tried=$(tr -s '[:space:]' ' ' <<<"$3" | sed -E 's/^ //; s/ $//')
+  if [ -n "$tried" ]; then why="none of the addressed threads ($tried) can receive it (archived / missing)"; else why="it had no addressed thread"; fi
+  if [[ " $tried " != *" $SUPERVISOR_THREAD "* ]]; then
+    notify "$sha" "$key.unreached-sup" "$SUPERVISOR_THREAD" "$4
+
+(review-dispatch: $why, so it goes to the supervisor thread instead.)" || :
+    if [ "$notify_outcome" = sent ]; then log "notice $key ${sha:0:9}: $why — delivered to the supervisor $SUPERVISOR_THREAD instead"; fi
+    [ "$notify_outcome" = skipped ] || return 0
+    tried="${tried:+$tried }$SUPERVISOR_THREAD"
+  fi
+  if [ -n "${DISPATCH_THREAD:-}" ] && [[ " $tried " != *" $DISPATCH_THREAD "* ]]; then
+    notify "$sha" "$key.unreached-owner" "$DISPATCH_THREAD" "$4
+
+(review-dispatch: $why, and the supervisor thread $SUPERVISOR_THREAD cannot receive it either (archived / missing), so it goes to the CI owner.)" || :
+    if [ "$notify_outcome" = sent ]; then log "notice $key ${sha:0:9}: $why, the supervisor too — delivered to the CI owner $DISPATCH_THREAD instead"; fi
+    [ "$notify_outcome" = skipped ] || return 0
+  fi
+  if [ -z "${DRY:-}" ] && [ ! -e "$nb" ]; then
+    log "ERROR notice $key ${sha:0:9}: $why, and neither the supervisor nor the CI owner can receive it — nobody was told: $(head -c 300 <<<"$4" | tr '\n' ' ')"
+    echo skipped > "$nb"   # "skipped" like notify's unreachable receipts: <S>.fixfailed* readers must not count it as delivered
+  fi
+  return 0
 }
 key_prefix=""
 REVIEW_NOTIFY_HELPER=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review-notify.sh
