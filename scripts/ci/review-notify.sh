@@ -63,8 +63,15 @@ $(head -20 "$dg")$(if [ "$dgrest" -gt 0 ]; then printf '\n(%s more, attached to 
       if steer_thread "$thread" "$msg"; then log "steered $key ${sha:0:9} → t3 $thread ($steer_how)"; touch "$mark"; digest_done "$dg" "$dgn"; notify_outcome=sent; return 0; fi
       log "steer unavailable for $key ${sha:0:9} → t3 $thread (${steer_err:-?}) — sent normally (queued)"
     fi
-    if out=$(printf '%s\n' "$msg" | timeout 60 t3 thread send "$thread" - 2>&1) \
-       || { [[ "$thread" != mcp:* && "$thread" != import:* ]] && out=$(printf '%s\n' "$msg" | timeout 60 t3 thread send "mcp:$thread" - 2>&1); }; then
+    # A bare uuid may be an agent thread (mcp:<uuid>) or an imported Claude session (import:claudeAgent:<uuid>; 11-20:
+    # trailers "Thread: 3afd24a5-…" of a live imported thread were judged missing) — try each form in turn.
+    local cand sent_ok=0 outs=""
+    for cand in "$thread" $([[ "$thread" != mcp:* && "$thread" != import:* ]] && printf '%s ' "mcp:$thread" "import:claudeAgent:$thread"); do
+      if out=$(printf '%s\n' "$msg" | timeout 60 t3 thread send "$cand" - 2>&1); then sent_ok=1; break; fi
+      outs+="$out"$'\n'
+    done
+    [ "$sent_ok" = 1 ] || out=$outs
+    if [ "$sent_ok" = 1 ]; then
       log "sent $key ${sha:0:9} → t3 $thread"; touch "$mark"; digest_done "$dg" "$dgn"; notify_outcome=sent
     elif grep -qE 'is archived|was not found|no longer available' <<<"$out"; then
       # An archived or missing thread can never receive messages: give up once instead of retrying every minute
