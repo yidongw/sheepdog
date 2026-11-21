@@ -22,6 +22,12 @@ settings. It never prints secrets; `touch $STATE/PAUSED` stops it; `DRY=1` logs 
   `DEV_ESCALATE_AFTER_MIN` (60) after its first fix-failed / orphan notice, with nobody at work on it, goes to the
   strongest fixer (`STRONG_FIXER_*`, on dev); each one that ends without a repair is followed by another at
   `STRONG_FIXER_EFFORT_ESCALATED` every `DEV_ESCALATE_AFTER_MIN`, until it is repaired (the supervisor is told from the third).
+- **The fixer slot never leaves a blocked dev commit unowned** (11-21): when the oldest unrepaired blocked dev commit has
+  waited `DEV_SLOT_WAIT_MIN` (30) for the one fixer slot (its request queued at the gate, or refused because another dev
+  block holds the dev slot), it is handed to its author(s) — the culprit threads, each with its own findings; unreachable →
+  supervisor → CI owner — with the task to push one repair commit on dev; again every further 2×`DEV_SLOT_WAIT_MIN` while
+  it is unrepaired. A queued request dropped as moot is logged with who has that commit now (a queued fixer or its
+  author(s)); nobody → it is handed to its author(s) at once. Slot ownership and priorities are unchanged.
 - **Every blocked dev commit has an owner** (owner 11-17): each run walks `main..dev` oldest first for commits whose
   verdict (`review_first_verdict`, kept on disk once decided) is blocked and that have no effective `Review-Fix-Of:`
   repair on dev — the commits the coverage chain needs repaired — and routes each one (author per the reviewer's route,
@@ -118,7 +124,7 @@ itself, [self-review.md](self-review.md)), `FIXER_PROVIDER` / `FIXER_MODEL`, `ST
 `STRONG_FIXER_EFFORT`, `FIXER_HOST_RULES` (host rules every fixer task states), `WAKE_URL` (the local wake relay for
 Discord thread ids, default `http://localhost:3011`), `FIXER_WT_ROOT`, `FIX_ROUNDS_MAX`, `FIX_ROUNDS_MAX_RISK`,
 `DEV_REVERT_AFTER_SEC`, `AUTHOR_FIX_WINDOW_SEC`, `MAIN_OWNER_CLAIM_SEC`, `STRONG_FIXER_EFFORT_ESCALATED`,
-`DEV_ESCALATE_AFTER_MIN`.
+`DEV_ESCALATE_AFTER_MIN`, `DEV_SLOT_WAIT_MIN`.
 
 ## Contract scripts
 
