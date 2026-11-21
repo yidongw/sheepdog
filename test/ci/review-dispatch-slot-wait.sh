@@ -36,6 +36,8 @@ t3() { case "$2" in show) if [ -e "$T3D/${3//:/_}" ]; then printf '%s  %s  codex
 notify() { local mark="$STATE/sent/$1.$2"
   if [ -e "$mark" ]; then notify_outcome=dup; [ "$(head -1 "$mark")" = skipped ] && notify_outcome=skipped; return 0; fi
   if grep -qxF "$3" "$T/gone" 2>/dev/null; then echo skipped > "$mark"; notify_outcome=skipped; return 0; fi
+  # a thread listed in $T/flaky fails once transiently (no receipt), then accepts
+  if grep -qxF "$3" "$T/flaky" 2>/dev/null; then grep -vxF "$3" "$T/flaky" > "$T/flaky.n" || true; mv "$T/flaky.n" "$T/flaky"; notify_outcome=undelivered; return 1; fi
   printf '%s\t%s\t%s\n' "$2" "$3" "$(tr '\n' ' ' <<<"$4")" >> "$T/sent"; touch "$mark"; notify_outcome=sent; }
 review_list() { jq -r "$3" "$T/runs.json" 2>/dev/null; }   # the trusted review runs (the cases below write them)
 echo '[]' > "$T/runs.json"
@@ -72,7 +74,7 @@ echo 'a queued dev block opens a wait episode'
 
 # 2. the head moves (a main→dev merge): O's request is no longer made and is dropped as moot after the TTL; the later
 #    head H1 queues the same block. Before DEV_SLOT_WAIT_MIN — but nobody would have O any more → its author at once
-g checkout -q main; commit src/main1.ts "Hotfix: x" >/dev/null; g push -q origin HEAD:refs/heads/main
+g checkout -q main; MM1=$(commit src/main1.ts "Hotfix: x"); g push -q origin HEAD:refs/heads/main
 g checkout -q --detach "$O"; g merge -q --no-ff -m "merge main into dev" main
 H1=$(g rev-parse HEAD); g push -q origin HEAD:refs/heads/dev; g fetch -q origin
 echo "$O $(ago 24)" > "$STATE/dev.slotwait"; s0=$(cut -d' ' -f2 "$STATE/dev.slotwait")
@@ -90,6 +92,21 @@ sent | grep -q "mainfix-60a6b0ee0 ${MF:0:9}" || fail "the hand does not say who 
 [ "$(cut -d' ' -f1 "$STATE/dev.slotwait")" = "$O" ] || fail "the later head took over the episode of the older O"
 test ! -e "$STATE/sent/$O.fixer-blocked" || fail "a fixer was woken"
 echo 'a moot drop hands the oldest unrepaired commit to its author at once (logged)'
+
+# 2b. (re-check of 2d74fb0a3 #1/#2) a passing round of a commit in O..dev that does not descend from O — main's side history
+#     merged into dev — never ends O's wait; a passing round of O's own descendant does
+cp "$T/runs.json" "$T/runs.keep"
+echo "[{\"databaseId\":701,\"displayTitle\":\"review $MM1\",\"status\":\"completed\",\"conclusion\":\"success\"},{\"databaseId\":700,\"displayTitle\":\"review $O\",\"status\":\"completed\",\"conclusion\":\"failure\"}]" > "$T/runs.json"
+dev_slot_wait
+[ "$(cut -d' ' -f1 "$STATE/dev.slotwait" 2>/dev/null)" = "$O" ] || fail "a passing side-history commit (${MM1:0:9}, not a descendant of O) ended O's wait: $(tail -1 "$LOG")"
+cp "$STATE/dev.slotwait" "$T/slotwait.keep"
+echo "[{\"databaseId\":702,\"displayTitle\":\"review $H1\",\"status\":\"completed\",\"conclusion\":\"success\"}]" > "$T/runs.json"
+mv "$FIXER_GATE/queue/$H1.blocked" "$T/h1.queue"   # (H1 no longer requests a fixer once its round passed)
+dev_slot_wait
+test ! -e "$STATE/dev.slotwait" || fail "a passing round of O's descendant H1 did not end O's tests-only wait"
+grep -q "dev ${O:0:9}: its wait for the fixer slot ended after .* — a later dev round (${H1:0:9}) passed" "$LOG" || fail "descendant pass end not logged"
+cp "$T/runs.keep" "$T/runs.json"; cp "$T/slotwait.keep" "$STATE/dev.slotwait"; mv "$T/h1.queue" "$FIXER_GATE/queue/$H1.blocked"
+echo 'only a passing round of a descendant ends a tests-only wait'
 
 # 3. same hand: once per episode — later runs before 3×DEV_SLOT_WAIT_MIN send nothing more; a further drop logs "its author(s)"
 echo "$O $(ago 60)" > "$STATE/dev.slotwait"; s1=$(cut -d' ' -f2 "$STATE/dev.slotwait")
@@ -156,4 +173,25 @@ echo 'a dev-slot refusal is handed too (fallback to the supervisor); its own fix
 rm -f "$STATE/sent/$S.fixer-blocked"; n2=$(sent | wc -l); l2=$(wc -l < "$LOG")
 DRY=1 dev_slot_wait >/dev/null
 test ! -e "$STATE/dev.slotwait" && [ "$(sent | wc -l)" = "$n2" ] && [ "$(wc -l < "$LOG")" = "$l2" ] || fail "DRY wrote state"
+
+# 8. (re-check of 2d74fb0a3 #3) two authors share one hand: one delivery fails transiently → that recipient is retried on
+#    the next run although the other one's receipt exists
+AUTHOR2=import:claudeAgent:22222222-2222-2222-2222-222222222222
+: > "$T/gone"; echo "$SFIX" > "$STATE/sent/$S.fixer-blocked"   # S has its own fixer: not waiting
+g checkout -q --detach origin/dev
+commit src/x1.ts "Thread: $AUTHOR" >/dev/null
+T2=$(commit src/x2.ts "Thread: $AUTHOR2"); g push -q origin HEAD:refs/heads/dev; g fetch -q origin
+printf '%s\n' 'trusted tests job: failure' ' FAIL test/x.test.ts > src/x1.ts and src/x2.ts disagree' > "$STATE/sent/$T2.findings"
+echo 4 > "$FIXER_GATE/queue/$T2.blocked"
+dev_slot_wait
+[ "$(cut -d' ' -f1 "$STATE/dev.slotwait")" = "$T2" ] || fail "no episode for T2"
+echo "$T2 $(ago 31)" > "$STATE/dev.slotwait"; s8=$(cut -d' ' -f2 "$STATE/dev.slotwait")
+echo "$AUTHOR2" > "$T/flaky"
+touch "$FIXER_GATE/queue/$T2.blocked"; dev_slot_wait
+sent | grep -q "^slotwait\.$s8\.1\.[01]	$AUTHOR	" || fail "the first author was not handed T2"
+! sent | grep -q "	$AUTHOR2	" || fail "the flaky delivery counted as sent"
+touch "$FIXER_GATE/queue/$T2.blocked"; dev_slot_wait
+[ "$(sent | grep -c "^slotwait\.$s8\.1\.[01]	$AUTHOR2	")" = 1 ] || fail "the recipient whose delivery failed was not retried: $(sent | tail -2)"
+[ "$(sent | grep -c "^slotwait\.$s8\.1\.[01]	$AUTHOR	")" = 1 ] || fail "the delivered recipient was handed twice"
+echo 'a failed recipient is retried, a delivered one is not'
 echo 'dev slot wait checks passed'
