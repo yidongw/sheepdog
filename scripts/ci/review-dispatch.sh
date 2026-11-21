@@ -1746,6 +1746,8 @@ dev_slot_later_pass() { # dev_slot_later_pass <S> → prints the later $DEV head
   runs=$(review_list 60 databaseId,displayTitle,status,conclusion '.[] | select(.status == "completed") | "\(.displayTitle) \(.conclusion)"' || true)
   [ -n "$runs" ] || return 1
   for x in $(git -C "$SRC" rev-list -n "$DEV_WALK_MAX" "$1..origin/$DEV" 2>/dev/null); do   # newest first
+    # only S's own descendants: side history merged into $DEV (main's commits, a devfix landed through main) never carries S
+    git -C "$SRC" merge-base --is-ancestor "$1" "$x" 2>/dev/null || continue
     case "$(awk -v t="review $x" '$1 " " $2 == t {print $3; exit}' <<<"$runs")" in
       success) printf '%s\n' "$x"; return 0 ;;
       "") continue ;;
@@ -1755,11 +1757,10 @@ dev_slot_later_pass() { # dev_slot_later_pass <S> → prints the later $DEV head
   return 1
 }
 dev_slot_hand() { # dev_slot_hand <S> <since> <hand #> <why> → S's findings to its author(s) (once per episode and hand)
-  local s=$1 since=$2 k=$3 why=$4 f att id url="" holder="" hs hk ht a now again="" m
+  # no early return on a receipt: notify_attributed sends per recipient, and notify's per-recipient receipt is what
+  # dedupes — a recipient whose delivery failed (no receipt) is retried on the next run whoever else got it
+  local s=$1 since=$2 k=$3 why=$4 f att id url="" holder="" hs hk ht a now again=""
   now=$(date +%s)
-  for m in "$STATE/sent/$s.slotwait.$since.$k".*; do   # delivered (or forwarded) already: nothing to resend
-    [ -f "$m" ] && [ "$(head -c 7 "$m" 2>/dev/null)" != skipped ] && [ -e "$STATE/sent/$s.slotwait-logged.$since.$k" ] && return 0
-  done
   f=$(cat "$STATE/sent/$s.findings" 2>/dev/null || cat "$DEV_VERDICTS/$s.review-findings" 2>/dev/null || true)
   att=$(attribution "$s" "$f")
   id=$(awk '$1 == "blocked" {print $2}' "$DEV_VERDICTS/$s" 2>/dev/null || true)
