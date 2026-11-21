@@ -729,6 +729,7 @@ fixer_gate_pass() { # fixer_gate_pass <sha> <key> → 0 when this request may wa
     # drop queued requests nobody asked for again within the TTL: their target became moot
     for e in $(find "$FIXER_GATE/queue" -maxdepth 1 -type f -mmin +"$FIXER_QUEUE_TTL_MIN" -printf '%f\n' 2>/dev/null); do
       log "fixer queue: dropped ${e#*.} ${e:0:9} — not requested for ${FIXER_QUEUE_TTL_MIN} min (target moot)"; rm -f "$FIXER_GATE/queue/$e"
+      echo "$e" >> "$FIXER_GATE/dropped"   # dev_slot_wait logs who has the oldest unrepaired blocked $DEV commit after this drop
     done
   fi
   [ -n "$fixer_gate_scanned" ] || fixer_gate_scan
@@ -1691,6 +1692,153 @@ dev_owner_walk() { # every run: each blocked commit of origin/$MAIN..origin/$DEV
     INFRA_WHERE=$DEV infra_alert "$s" "$run" "orphan.$run.$at" "$STATE/sent/$s.orphan" "[review-dispatch] $DEV ${s:0:9} was blocked by its review (run $url attempt $at) and has no effective repair — a commit on $DEV carrying Review-Fix-Of: $s — so no $DEV head can land on $MAIN (the coverage chain needs it). Nobody the dispatcher can wake owns it any more (no author window, no live fixer, no queued fixer, no delivered notice). Please hand it to someone: its author, or push the repair on $DEV yourself.
 $f"
   done <<<"$dev_unrepaired"
+  return 0
+}
+# ── the dev slot wait (11-21 tralyx): the oldest unrepaired blocked $DEV commit is never left waiting for the slot unowned ──
+# 11-20 22:57Z → 11-21 01:00Z+: d3290884a (blocked: its trusted tests failed) queued its fixer behind a chain of main
+# mainfix fixers that held the one fixer slot for 3 h; every new $DEV head (the dispatcher's own main→dev merges 7f32a9085,
+# d8b1824ec, 3bbb62c83) queued the same block again, each request was dropped as moot once its head moved ("not requested
+# for 10 min"), and nobody — no fixer, no author — acted on it. The slot's ownership and priorities stay as they are (owner
+# 11-12: one fixer agent per repository at a time). Instead, every run (dev_slot_wait, after the head loop):
+#   · the oldest commit S of origin/$MAIN..origin/$DEV whose fix waits for the slot — its request queued at the gate
+#     ($FIXER_GATE/queue/<S>.blocked), or, a blocked review verdict, refused because another $DEV block holds the dev slot
+#     (<S>.fixer-deferred) — with no repair, no fixer of its own and no author window opens a wait episode
+#     ($DEV_SLOT_WAIT: "<S> <since>"; an older such commit takes the episode over, keeping <since>);
+#   · DEV_SLOT_WAIT_MIN after <since> S is handed to its author(s) — notify_attributed: each culprit thread with its own
+#     findings, unattributable ones the supervisor, unreachable ones notice_fallback → supervisor → CI owner — with the task
+#     to push ONE repair commit on $DEV carrying Review-Fix-Of: S; again once per further 2×DEV_SLOT_WAIT_MIN while S is
+#     unrepaired (receipts <S>.slotwait.<since>.<hand>.*: once per episode and hand);
+#   · each queued request dropped as moot (fixer_gate_pass lists it in $FIXER_GATE/dropped) is logged with who has S now:
+#     a queued fixer agent, its author(s) — or nobody, and then S is handed to its author(s) at once.
+# The episode ends (logged) once S is on $MAIN, has its effective repair on $DEV, left $DEV, got a fixer agent of its own
+# or an author window, or — a block by the trusted tests only (no blocked review verdict) — the dev slot's fixer took the
+# same block on a later head, or a later $DEV round passed.
+DEV_SLOT_WAIT_MIN=${DEV_SLOT_WAIT_MIN:-30}
+DEV_SLOT_WAIT=$STATE/dev.slotwait
+dev_slot_tests_only() { [ "$(cut -d' ' -f1 "$DEV_VERDICTS/$1" 2>/dev/null || true)" != blocked ]; }   # no blocked review verdict kept
+dev_slot_own() { # dev_slot_own <S> → who has S besides the slot ("" = nobody): a fixer agent of its own, an author window, the
+  # dev slot's fixer on a later head with the same tests-only block
+  local r w a
+  for r in "$STATE/sent/$1.fixer-blocked" "$STATE/sent/$1".fixer-authorto-* "$STATE/sent/$1".fixer-devstrong-*; do
+    [ -f "$r" ] || continue
+    echo "a fixer agent of its own ($(head -1 "$r" 2>/dev/null || true))"; return 0
+  done
+  if w=$(author_window_open "$1"); then echo "its author ($w, routed by the review)"; return 0; fi
+  a=$(cat "$STATE/dev-fixer.active" 2>/dev/null || true)
+  if [ -n "$a" ] && [ "$a" != "$1" ] && [ -f "$STATE/sent/$a.fixer-blocked" ] && dev_slot_tests_only "$1" && dev_slot_tests_only "$a" \
+     && git -C "$SRC" merge-base --is-ancestor "$1" "$a" 2>/dev/null; then
+    echo "the fixer agent of the later $DEV head ${a:0:9} (the same tests-only block)"; return 0
+  fi
+  return 0
+}
+dev_slot_settled() { # dev_slot_settled <S> → prints why S needs no fix any more (0); 1 while it is an unrepaired $DEV commit
+  local c
+  if git -C "$SRC" merge-base --is-ancestor "$1" "origin/$MAIN" 2>/dev/null; then echo "it is on $MAIN"; return 0; fi
+  if ! git -C "$SRC" merge-base --is-ancestor "$1" "origin/$DEV" 2>/dev/null; then echo "it is no longer on $DEV"; return 0; fi
+  # the coverage chain's own rule (review-repair.sh effective_repairs: the full 40-hex trailer), as dev_carries_fix
+  c=$(cd "$SRC" && effective_repairs "$1" "origin/$DEV") || c=""
+  c=${c%%$'\n'*}
+  if [ -n "$c" ]; then echo "repaired by ${c:0:9} on $DEV"; return 0; fi
+  return 1
+}
+dev_slot_later_pass() { # dev_slot_later_pass <S> → prints the later $DEV head whose newest completed round passed (0); 1 when none
+  local runs x
+  runs=$(review_list 60 databaseId,displayTitle,status,conclusion '.[] | select(.status == "completed") | "\(.displayTitle) \(.conclusion)"' || true)
+  [ -n "$runs" ] || return 1
+  for x in $(git -C "$SRC" rev-list -n "$DEV_WALK_MAX" "$1..origin/$DEV" 2>/dev/null); do   # newest first
+    case "$(awk -v t="review $x" '$1 " " $2 == t {print $3; exit}' <<<"$runs")" in
+      success) printf '%s\n' "$x"; return 0 ;;
+      "") continue ;;
+      *) return 1 ;;   # the newest completed round of a later head is still blocked
+    esac
+  done
+  return 1
+}
+dev_slot_hand() { # dev_slot_hand <S> <since> <hand #> <why> → S's findings to its author(s) (once per episode and hand)
+  local s=$1 since=$2 k=$3 why=$4 f att id url="" holder="" hs hk ht a now again="" m
+  now=$(date +%s)
+  for m in "$STATE/sent/$s.slotwait.$since.$k".*; do   # delivered (or forwarded) already: nothing to resend
+    [ -f "$m" ] && [ "$(head -c 7 "$m" 2>/dev/null)" != skipped ] && [ -e "$STATE/sent/$s.slotwait-logged.$since.$k" ] && return 0
+  done
+  f=$(cat "$STATE/sent/$s.findings" 2>/dev/null || cat "$DEV_VERDICTS/$s.review-findings" 2>/dev/null || true)
+  att=$(attribution "$s" "$f")
+  id=$(awk '$1 == "blocked" {print $2}' "$DEV_VERDICTS/$s" 2>/dev/null || true)
+  [ -n "$id" ] || id=$(review_list 60 databaseId,displayTitle ".[] | select(.displayTitle == \"review $s\") | .databaseId" | head -1 || true)
+  [ -z "$id" ] || url="https://github.com/$REPO/actions/runs/$id"
+  [ -n "$fixer_gate_scanned" ] || fixer_gate_scan
+  if [ -n "$fixer_gate_holder" ]; then read -r hs hk ht <<<"$fixer_gate_holder"; holder="the fixer agent $hk ${hs:0:9} ($ht)"; fi
+  a=$(cat "$STATE/dev-fixer.active" 2>/dev/null || true)
+  if [ -z "$holder" ] && [ -n "$a" ] && [ "$a" != "$s" ]; then holder="the $DEV fixer slot of ${a:0:9}"; fi
+  if [ "$k" -gt 1 ]; then again=" — again (hand $k): it is still unrepaired"; fi
+  if [ -n "${DRY:-}" ]; then echo "DRY $DEV ${s:0:9}: blocked, no repair, waited $(( (now - since) / 60 )) min for the fixer slot ($why) — would hand it to its author(s) (hand $k)"; return 0; fi
+  if [ ! -e "$STATE/sent/$s.slotwait-logged.$since.$k" ]; then
+    log "$DEV ${s:0:9}: blocked, no repair, its fix waited $(( (now - since) / 60 )) min for the fixer slot (held by ${holder:-other fixes}; $why) — handed to its author(s) (hand $k of this episode)"
+    touch "$STATE/sent/$s.slotwait-logged.$since.$k"
+  fi
+  key_prefix=""
+  notify_attributed "$s" "slotwait.$since.$k" "$f" "$att" "[review-dispatch] $DEV ${s:0:9} is blocked and still has no repair: its fix has waited $(( (now - since) / 60 )) min for the fixer agent slot (one fixer agent per repository at a time; held by ${holder:-other fixes}). So it goes to you, its author$again. The findings attributed to your commits:" "${url:+run: $url
+}Push ONE repair commit on $DEV that fixes them at their source and carries the trailer Review-Fix-Of: $s (git pull --rebase origin $DEV, then git push origin HEAD:refs/heads/$DEV); it lands once the trusted tests pass. A finding you can show is wrong: dispute it in that commit (Review-Disputed: <finding #> <evidence>). Once an effective repair of ${s:0:9} is on $DEV, no fixer agent is woken for it."
+}
+dev_slot_wait() { # every run, after the head loop → the wait episode of the oldest unrepaired blocked $DEV commit (see above)
+  local s cand="" o="" since="" why="" now e drops q who k=0 waited w m told
+  now=$(date +%s)
+  drops=$(cat "$FIXER_GATE/dropped" 2>/dev/null || true)
+  [ -n "${DRY:-}" ] || rm -f "$FIXER_GATE/dropped"
+  if git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/null 2>&1; then
+    for s in $(git -C "$SRC" rev-list -n "$DEV_WALK_MAX" "origin/$MAIN..origin/$DEV" 2>/dev/null | tac); do   # oldest first
+      if [ -e "$FIXER_GATE/queue/$s.blocked" ] || { [ -e "$STATE/sent/$s.fixer-deferred" ] && ! dev_slot_tests_only "$s"; }; then :; else continue; fi
+      [ -z "$(dev_slot_own "$s")" ] || continue
+      ! budget_spent "$s" || continue
+      ! dev_slot_settled "$s" >/dev/null || continue
+      cand=$s; break
+    done
+  fi
+  if [ -s "$DEV_SLOT_WAIT" ]; then read -r o since < "$DEV_SLOT_WAIT" || true; fi
+  [[ "${since:-}" =~ ^[0-9]+$ ]] || { o="" since=""; }
+  if [ -n "$o" ]; then
+    if why=$(dev_slot_settled "$o"); then :
+    else
+      why=$(dev_slot_own "$o")
+      if [ -n "$why" ]; then why="$why has it"
+      elif dev_slot_tests_only "$o" && m=$(dev_slot_later_pass "$o"); then why="a later $DEV round (${m:0:9}) passed"; fi
+    fi
+    if [ -n "$why" ]; then
+      if [ -n "${DRY:-}" ]; then echo "DRY $DEV ${o:0:9}: its wait for the fixer slot would end — $why"
+      else log "$DEV ${o:0:9}: its wait for the fixer slot ended after $(( (now - since) / 60 )) min — $why"; rm -f "$DEV_SLOT_WAIT"; fi
+      o="" since=""
+    fi
+  fi
+  if [ -n "$cand" ] && [ "$cand" != "$o" ]; then
+    if [ -z "$o" ]; then
+      o=$cand since=$now
+      if [ -z "${DRY:-}" ]; then
+        echo "$o $since" > "$DEV_SLOT_WAIT"
+        log "$DEV ${o:0:9}: blocked, no repair, its fix waits for the fixer slot (another fix holds it) — handed to its author(s) if it still waits in $DEV_SLOT_WAIT_MIN min"
+      fi
+    elif git -C "$SRC" merge-base --is-ancestor "$cand" "$o" 2>/dev/null; then
+      [ -n "${DRY:-}" ] || { log "$DEV ${cand:0:9}: older than ${o:0:9}, it takes over the wait for the fixer slot (open for $(( (now - since) / 60 )) min)"; echo "$cand $since" > "$DEV_SLOT_WAIT"; }
+      o=$cand
+    fi
+  fi
+  if [ -z "$o" ]; then
+    for e in $drops; do [ -n "${DRY:-}" ] || log "fixer queue drop of ${e#*.} ${e:0:9}: no unrepaired blocked $DEV commit waits for the fixer slot"; done
+    return 0
+  fi
+  waited=$((now - since)) w=$((DEV_SLOT_WAIT_MIN * 60))
+  if [ "$waited" -ge "$w" ]; then k=$(( (waited - w) / (2 * w) + 1 )); fi
+  for e in $drops; do
+    who=""
+    for q in "$FIXER_GATE/queue/$o".*; do [ -f "$q" ] && { who="a queued fixer agent (${q##*/})"; break; }; done
+    if [ -z "$who" ]; then
+      told=""
+      for m in "$STATE/sent/$o.slotwait.$since".*; do [ -f "$m" ] && [ "$(head -c 7 "$m" 2>/dev/null)" != skipped ] && { told=1; break; }; done
+      if [ -n "$told" ]; then who="its author(s), handed it in this episode"
+      else who="nobody — handed to its author(s) now"; [ "$k" -ge 1 ] || k=1; fi
+    fi
+    [ -n "${DRY:-}" ] || log "fixer queue drop of ${e#*.} ${e:0:9}: the oldest unrepaired blocked $DEV commit ${o:0:9} has $who"
+  done
+  [ "$k" -ge 1 ] || return 0
+  dev_slot_hand "$o" "$since" "$k" "waiting since $(date -u -d "@$since" +%FT%TZ 2>/dev/null || echo "$since")"
   return 0
 }
 devfix_delete_leased() { # devfix_delete_leased <devfix ref> <the head this run merged> → delete the branch only while it is still that
@@ -3085,5 +3233,7 @@ run: $url
 Push the fix to the same branch: CI and the review run again, and it is merged automatically when they pass."
   fi
 done
+# the oldest unrepaired blocked $DEV commit never waits for the fixer slot unowned (after the head loop's requests of this run)
+dev_slot_wait || log "dev slot wait failed (ignored; retried next run)"
 revert_notices_flush
 exit 0
