@@ -2428,7 +2428,13 @@ A depth ≥ 1 means the culprit commit is itself a repair of an earlier main fin
 Your worktree is on origin/$MAIN (NOT dev for this task). Fix the findings at their source in ONE commit on top of
 origin/$MAIN with the trailers Review-Fix-Of: ${h} and Hotfix: main review fix of ${h:0:9}, and one line per finding you
 fix: Fixes-Finding: #<n> <the finding's text>. Then git push origin HEAD:refs/heads/$MAIN (rebase on origin/$MAIN and
-retry if it moved). The fix is reviewed again on $MAIN. If a finding is wrong, dispute it (Review-Disputed: trailer)." "$MAIN" "$(awk '$5 != "-" {print $5}' <<<"$plan" | sort -u)" || true
+retry if it moved). The fix is reviewed again on $MAIN. If a finding is wrong, dispute it (Review-Disputed: trailer).
+A finding another commit on origin/$MAIN already repairs (e.g. a repair of its culprit commit): change no code for it — still
+ONE commit, with the line Fixes-Finding: #<n> <the finding's text> (repaired by <that commit's sha>) for it; when every
+finding is already repaired, that commit is empty (git commit --allow-empty) with the trailers Review-Fix-Of: ${h},
+Hotfix: main review fix of ${h:0:9} (record: already repaired on $MAIN), those lines, Loop: dev-fixer, Thread: and a Verify:
+block whose - [x] lines name the existing fix's sha and the test that covers each finding. Facts only. Push it to $MAIN as
+above; it is re-checked on $MAIN like any repair." "$MAIN" "$(awk '$5 != "-" {print $5}' <<<"$plan" | sort -u)" || true
 }
 main_launch_check() { # main_launch_check <H> <key> <findings> <run url> <nums> → when no strongest fixer could be started (two refusals in a
   # row, launch_failed) the supervisor is told (a retryable notice: undelivered → retried next run); the launch itself is retried
@@ -2470,9 +2476,63 @@ reps_needed() { # reps_needed <nums> <repair>... → the repairs that cover at l
     if [ "$(wc -w <<<"$(nums_open "$want" "$r")")" -lt "$(wc -w <<<"$want")" ]; then printf '%s ' "$r"; fi
   done
 }
+# A finding of H is covered too by a repair on $MAIN of its CULPRIT commit C (tralyx 11-23: the main re-check of the train
+# merge ef25de16f blocked on #1, culprit df1c3ce57, while 77e61ef8e — Review-Fix-Of: df1c3ce57 — was already on main).
+# C = the FINDING line's commit=<sha> or the plan's culprit, when it is an ancestor of H other than H; the repair is effective
+# on $MAIN (repair_effective) and not in H's own history (a repair H's review saw did not hold). Its Fixes-Finding: /
+# Review-Disputed: numbers belong to C's OWN review, not H's: such a repair covers a finding of H only when one of its lines
+# carries that finding's text (culprit_text_match); a repair with no such line covers every finding of H pinned on C. A
+# finding no line matches stays routed (never silenced) — the fixer then records the existing repair with an empty commit
+# Review-Fix-Of: H (main_fixer). Repairs of H itself keep the numeric rule (nums_open). Main only: a repair only on $DEV
+# counts not.
+culprit_reps() { # culprit_reps <H> <findings> <plan> <n> → the effective repairs on $MAIN (beyond H) of finding n's culprit commit(s)
+  local h=$1 f=$2 plan=$3 n=$4 c full seen=" "
+  [ "$n" != 0 ] || return 0   # the unnumbered diagnostics have no culprit commit
+  h=$(git -C "$SRC" rev-parse -q --verify "$h^{commit}" 2>/dev/null) || return 0
+  for c in "$(finding_meta "$f" "$n" commit)" "$(awk -v n="$n" '$1 == n {print $3}' <<<"$plan")"; do
+    [[ "$c" =~ ^[0-9a-f]{7,40}$ ]] || continue
+    full=$(git -C "$SRC" rev-parse -q --verify "$c^{commit}" 2>/dev/null) || continue
+    [ "$full" != "$h" ] && [[ "$seen" != *" $full "* ]] || continue
+    seen="$seen$full "
+    git -C "$SRC" merge-base --is-ancestor "$full" "$h" 2>/dev/null || continue
+    _re_all=1 repair_effective "$full" "" "origin/$MAIN" "^$h" || true
+  done
+}
+norm_text() { tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//'; }   # lowercase, whitespace collapsed
+finding_texts() { # finding_texts <findings> <n> → finding n's texts, normalised, first 80 chars: its BLOCKED text (after the
+  # "[severity]: " tag) and the reason of its FINDING line (after " — "); texts under 16 chars are dropped (too short to tell)
+  { sed -nE "s/^review-gate: BLOCKED #$2 [^:]*\]: (.*)$/\1/p; s/^review-gate: BLOCKED #$2 ([^[].*)$/\1/p" <<<"$1" | head -1
+    sed -nE "s/^review-gate: FINDING #$2( [a-z]+=[^ ]*)* — (.*)$/\2/p" <<<"$1" | head -1; } | while IFS= read -r l; do
+    l=$(norm_text <<<"$l"); l=${l:0:80}; [ "${#l}" -lt 16 ] || printf '%s\n' "$l"; done
+  return 0
+}
+culprit_text_match() { # culprit_text_match <repair> <findings> <n> → 0 when a Fixes-Finding: / Review-Disputed: line of the repair
+  # carries finding n's text (finding_texts: the line's text, after "#<k> ", normalised, starts with it)
+  local t l x
+  t=$(finding_texts "$2" "$3"); [ -n "$t" ] || return 1
+  while IFS= read -r l; do
+    l=$(norm_text <<<"$l")
+    while IFS= read -r x; do [ -n "$x" ] && [[ "$l" == "$x"* ]] && return 0; done <<<"$t"
+  done < <({ git -C "$SRC" show -s --format=%B "$1" 2>/dev/null || true; } | sed -nE 's/^(Fixes-Finding|Review-Disputed):[[:space:]]*#?[0-9]+[[:space:]]+(.*)$/\2/p')
+  return 1
+}
+culprit_open() { # culprit_open <H> <findings> <plan> <nums> → _copen: the numbers of <nums> no repair of their culprit covers;
+  # the covering repairs are added to _ccov (set by the caller)
+  local h=$1 f=$2 plan=$3 n r cov
+  _copen=""
+  for n in $4; do
+    cov=""
+    for r in $(culprit_reps "$h" "$f" "$plan" "$n"); do
+      if [ -z "$(repair_nums "$r")" ] || culprit_text_match "$r" "$f" "$n"; then cov="$cov $r"; fi
+    done
+    if [ -n "$cov" ]; then _ccov="$_ccov$cov"; else _copen="$_copen$n "; fi
+  done
+  return 0
+}
 main_blocked() { # main_blocked <H> <findings> <range base> <run id> → assign H's findings (see above); H complete once all are repaired on main
   local h=$1 f=$2 hbase=$3 run=$4 url pf plan now t tk nums sub risk mark st age rep msg head fx="" fxnums="" d maxd=0 key eff
   local open=0 pending="" claims="" n o refs=("origin/$MAIN") tids="" r any mreps owreps freps fxall fxdig="" stillopen="" seen rest named
+  local _ccov="" _copen=""   # repairs on main of the findings' culprit commits that cover some of them (culprit_open)
   url="https://github.com/$REPO/actions/runs/$run"
   if git -C "$SRC" rev-parse -q --verify "origin/$DEV" >/dev/null 2>&1; then refs+=("origin/$DEV"); fi
   pf="$STATE/sent/$h.main-plan"
@@ -2491,6 +2551,7 @@ main_blocked() { # main_blocked <H> <findings> <range base> <run id> → assign 
     owreps=$(_re_all=1 repair_effective "$h" "$t" "${refs[@]}" | tr '\n' ' ' || true)
     # shellcheck disable=SC2086 # one sha per word
     rest=$(nums_open "$nums" $mreps)
+    culprit_open "$h" "$f" "$plan" "$rest"; rest=$_copen   # a repair of a finding's culprit commit on main covers it too
     # shellcheck disable=SC2086 # one sha per word
     nums=$(nums_open "$rest" $owreps)
     if [ -z "${nums// }" ]; then
@@ -2550,6 +2611,7 @@ Still no fix $((MAIN_OWNER_CLAIM_SEC / 60)) min from now, they go to the stronge
   fxall=$(for n in $(awk '$2 >= 1 || $5 == "-" {print $1}' <<<"$plan") $fx; do echo "$n"; done | sort -un | tr '\n' ' ')
   # shellcheck disable=SC2086 # one sha per word
   fxnums=$(nums_open "$fxall" $mreps)
+  culprit_open "$h" "$f" "$plan" "$fxnums"; fxnums=$_copen
   if [ -n "${fxall// }" ] && [ -z "${fxnums// }" ]; then claims="$claims $mreps"; fi
   if [ -n "${fxnums// }" ]; then
     for n in $fxnums; do d=$(awk -v n="$n" '$1 == n {print $2}' <<<"$plan"); if [ "${d:-0}" -gt "$maxd" ]; then maxd=$d; fi; done
@@ -2586,12 +2648,14 @@ run: $url"
       main_launch_check "$h" "$key" "$f" "$url" "$fxnums"
     fi
   fi
-  if [ "$open" = 1 ] && [ -n "${mreps// }" ]; then
+  # shellcheck disable=SC2086 # one sha per word
+  _ccov=$(printf '%s\n' $_ccov | awk 'NF && !seen[$1]++' | tr '\n' ' ')
+  if [ "$open" = 1 ] && [ -n "${mreps// }${_ccov// }" ]; then
     # H has repairs on main, but they leave findings uncovered: logged once per open set (those stay routed above)
     stillopen=$(for n in $stillopen $fxnums; do [ "$n" = 0 ] || echo "$n"; done | sort -un | tr '\n' ' ')
     seen=$(cat "$STATE/sent/$h.main-open" 2>/dev/null || true)
     if [ -z "${DRY:-}" ] && [ -n "${stillopen// }" ] && [ "$seen" != "$stillopen" ]; then
-      log "MAIN ${h:0:9}: repair(s) $(for r in $mreps; do printf '%s ' "${r:0:9}"; done)on main cover only some findings — still open: $(for n in $stillopen; do printf '#%s ' "$n"; done)(routed to their owner / the strongest fixer)"
+      log "MAIN ${h:0:9}: repair(s) $(for r in $mreps $_ccov; do printf '%s ' "${r:0:9}"; done)on main cover only some findings — still open: $(for n in $stillopen; do printf '#%s ' "$n"; done)(routed to their owner / the strongest fixer)"
       printf '%s\n' "$stillopen" > "$STATE/sent/$h.main-open"
     fi
   fi
@@ -2611,6 +2675,9 @@ run: $url"
   if [ -n "${mreps// }" ] && [ -z "$(nums_open "$(awk '{print $1}' <<<"$plan")" $mreps)" ]; then
     any=${mreps%% *}; log "MAIN ${h:0:9}: repaired by ${any:0:9} ($(thread_of "$any")) — the next main review re-checks it"
   fi
+  if [ -n "${_ccov// }" ]; then
+    log "MAIN ${h:0:9}: finding(s) covered by repair(s) $(for r in $_ccov; do printf '%s (of %s) ' "${r:0:9}" "$(fix_target "$r" | cut -c1-9)"; done)of their culprit commit(s) on main"
+  fi
   # owner digest: the owners of findings a fixer repaired hear it with their next notice (review-notify.sh) — each repair
   # credited only with the findings it names (all of them when it names none: re-check of 0c799ece7 #3)
   claims=$(printf '%s\n' $claims | awk 'NF && !seen[$1]++' | tr '\n' ' ')
@@ -2623,7 +2690,7 @@ run: $url"
       digest_add "$o" "${rep:0:9} main ${h:0:9} #$n $(main_subset "$f" "$n" | sed -nE 's/^review-gate: BLOCKED #[0-9]+ //p' | head -1 | head -c 160)"
     done
   done
-  log "HOTFIX ${h:0:9}: every finding repaired on main ($claims) — the repairs are reviewed on main themselves"
+  log "HOTFIX ${h:0:9}: every finding repaired on main ($claims${_ccov}) — the repairs are reviewed on main themselves"
   touch "$STATE/sent/$h.hotfix-complete"
 }
 
