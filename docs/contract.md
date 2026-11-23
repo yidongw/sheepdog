@@ -16,10 +16,8 @@ what gets deployed. The workflow is [.github/workflows/review.yml](../.github/wo
   disagrees with a finding records `Review-Disputed: <finding #> <evidence>`; a main repair names
   `Fixes-Finding: #<n> <finding>` per finding. For the dispatcher's routing of a blocked main commit, a repair covers
   exactly the findings its `Fixes-Finding:` / `Review-Disputed:` lines number (one with no such line covers them all);
-  the uncovered ones stay routed — landing still needs only one effective repair. A repair on main of a finding's culprit
-  commit (its `commit=`, an ancestor of the blocked commit), made after it, covers it too — when one of its lines carries that
-  finding's text (its numbers belong to the culprit's own review), or when it has no such line; otherwise the fixer
-  records the existing repair in an empty commit `Review-Fix-Of: <blocked sha>` with `Fixes-Finding: #<n> <text> (repaired by <sha>)`. A `Review-Fix-Of:` that names no ancestor of its commit is ignored with a
+  the uncovered ones stay routed — landing still needs only one effective repair. A finding already repaired on main by
+  another commit is recorded by an empty commit with `Review-Fix-Of: <blocked sha>` and `Fixes-Finding: #<n> <text> (repaired by <sha>)`. A `Review-Fix-Of:` that names no ancestor of its commit is ignored with a
   warning (never a range abort): that commit is reviewed as an ordinary commit and gets no repair privilege — no
   tests-only round, no repair of a blocked round (`review-repair.sh`), no previous-round ledger.
 
