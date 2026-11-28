@@ -8,7 +8,8 @@
 #     SHEEPDOG_LARGE_FILES_ALLOWED (review.yml's input `large-files-allowed`, i.e. the caller's default branch: a
 #     vendored binary the repository ships on purpose; a branch cannot add a path to it)
 # A published commit's missing Verify: checklist may be supplied by a SHA-bound record <sha>.txt in the TRUSTED
-# verification directory (SHEEPDOG_VERIFICATION_DIR: the caller's default branch, never the candidate's tree).
+# verification directory (SHEEPDOG_VERIFICATION_DIR: the caller's default branch, never the candidate's tree); the same
+# record's 'Thread: <id>' line, if any, replaces a published commit's wrong Thread: (validated as usual).
 # Usage: scripts/ci/commit-gates.sh <base> <head>   (HEAD must be <head>)
 # Exit: 0 ok · 3 trailer problem · 6 big binary · 2 usage
 set -euo pipefail
@@ -40,9 +41,17 @@ for sha in $commits; do
       miss="$miss Verify:"
     fi
   fi
-  grep -qiE '^Thread:[[:space:]]*[^[:space:]]' <<<"$msg" || miss="$miss Thread:"
-  [ -z "$miss" ] || { log "ERROR: commit $short missing trailer(s): $miss (Verify: is a bare line followed by '- [x] …' items)"; bad=1; }
   t="$(grep -iE '^Thread:' <<<"$msg" | tail -1 | sed -E 's/^[Tt]hread:[[:space:]]*//' | tr -d '[:space:]' || true)"
+  # A published commit whose Thread: is wrong (11-28: 'Thread: t3-<uuid>') cannot be amended either: the same trusted
+  # SHA-bound record may name the author's real thread on a 'Thread: <id>' line, which then stands for the commit's.
+  # The id is checked like any Thread: below — the record corrects the address, it never waives it.
+  rec="${SHEEPDOG_VERIFICATION_DIR:-$TRUSTED_CI/commit-verification}/$sha.txt"
+  if [ -f "$rec" ] && grep -qxF "Commit: $sha" "$rec" && grep -qiE '^Thread:[[:space:]]*[^[:space:]]' "$rec"; then
+    t="$(grep -iE '^Thread:' "$rec" | tail -1 | sed -E 's/^[Tt]hread:[[:space:]]*//' | tr -d '[:space:]' || true)"
+    log "commit $short: Thread: '$t' from trusted $rec"
+  fi
+  [ -n "$t" ] || miss="$miss Thread:"
+  [ -z "$miss" ] || { log "ERROR: commit $short missing trailer(s): $miss (Verify: is a bare line followed by '- [x] …' items)"; bad=1; }
   if [ -n "$t" ] && ! grep -qE '^([0-9]{17,20}|(mcp:|import:[A-Za-z]+:)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' <<<"$t"; then
     log "ERROR: commit $short Thread:'$t' is neither a Discord nor a T3 thread id — review findings could not reach its author"; bad=1
   fi

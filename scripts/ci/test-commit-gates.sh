@@ -64,6 +64,23 @@ record "$no_thread"; expect 3 'missing Thread'
 g checkout -q --detach "$base"
 bad_thread=$(commit $'Loop: test\nThread: invalid\nVerify:')
 record "$bad_thread"; expect 3 'invalid Thread'
+# ...but the trusted record may correct the address (11-28 'Thread: t3-<uuid>'), validated like a trailer.
+printf 'Commit: %s\n%s\nThread: t3-00000000-0000-0000-0000-000000000000\n' "$bad_thread" "$checked" > "$T/trusted/commit-verification/$bad_thread.txt"
+expect 3 'record with an invalid Thread'
+printf 'Commit: %s\nThread: 00000000-0000-0000-0000-000000000000\n%s\n' "$bad_thread" "$checked" > "$T/trusted/commit-verification/$bad_thread.txt"
+expect 0 'record corrects an invalid Thread'
+grep -q "Thread: '00000000-0000-0000-0000-000000000000' from trusted" "$T/out" || fail 'Thread correction not logged'
+printf 'Commit: %040d\nThread: 00000000-0000-0000-0000-000000000000\n%s\n' 0 "$checked" > "$T/trusted/commit-verification/$bad_thread.txt"
+expect 3 'Thread from a record of another SHA'
+g checkout -q --detach "$base"
+no_thread2=$(commit $'Loop: test\nVerify:')
+printf 'Commit: %s\nThread: mcp:00000000-0000-0000-0000-000000000000\n%s\n' "$no_thread2" "$checked" > "$T/trusted/commit-verification/$no_thread2.txt"
+expect 0 'record supplies a missing Thread'
+g checkout -q --detach "$base"
+mkdir -p scripts/ci/commit-verification
+cand=$(commit $'Loop: test\nThread: invalid\nVerify:\n- [x] fixture verification')
+printf 'Commit: %s\nThread: 00000000-0000-0000-0000-000000000000\n' "$cand" > "scripts/ci/commit-verification/$cand.txt"
+expect 3 'candidate record cannot correct Thread'
 g checkout -q --detach "$base"
 python3 -c 'open("large.bin", "wb").write(b"\0" * 1048577)'
 g add large.bin
